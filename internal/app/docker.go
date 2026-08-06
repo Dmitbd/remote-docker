@@ -20,6 +20,7 @@ type Runtime struct {
 	DockerCLIPath  string
 	ContextName    string
 	Executor       dockercli.Executor
+	Preflight      *Preflight
 	Env            []string
 	Dir            string
 	Stdin          io.Reader
@@ -47,7 +48,7 @@ func runDocker(ctx context.Context, runtime Runtime, args []string, stdout, stde
 	dockerArgs := make([]string, 0, len(args)+2)
 	dockerArgs = append(dockerArgs, "--context", contextName)
 	dockerArgs = append(dockerArgs, args...)
-	err := executor.Run(ctx, dockercli.Invocation{
+	invocation := dockercli.Invocation{
 		Binary: dockerCLIPath,
 		Args:   dockerArgs,
 		Env:    runtime.Env,
@@ -55,7 +56,17 @@ func runDocker(ctx context.Context, runtime Runtime, args []string, stdout, stde
 		Stdin:  runtime.Stdin,
 		Stdout: stdout,
 		Stderr: stderr,
-	})
+	}
+	if runtime.Preflight != nil {
+		if err := runtime.Preflight.Check(ctx, invocation, executor, stderr); err != nil {
+			fmt.Fprintf(stderr, "remote-docker: %v\n", err)
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.Canceled) {
+				return 130
+			}
+			return 1
+		}
+	}
+	err := executor.Run(ctx, invocation)
 	if err != nil && !isProcessExit(err) {
 		fmt.Fprintf(stderr, "remote-docker: %v\n", err)
 	}
