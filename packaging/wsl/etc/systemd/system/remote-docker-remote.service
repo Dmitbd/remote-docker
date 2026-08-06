@@ -1,0 +1,16 @@
+[Unit]
+Description=Remote Docker control helper readiness
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/remote-docker-remote health
+RemainAfterExit=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+
+[Install]
+WantedBy=remote-docker.target

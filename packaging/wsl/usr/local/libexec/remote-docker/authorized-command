@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+case "${SSH_ORIGINAL_COMMAND:-}" in
+  'docker system dial-stdio')
+    exec /usr/bin/docker system dial-stdio
+    ;;
+  'remote-docker-remote rpc')
+    exec /usr/local/bin/remote-docker-remote rpc
+    ;;
+  *)
+    echo 'remote-docker: command is not allowed' >&2
+    exit 126
+    ;;
+esac

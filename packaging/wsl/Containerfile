@@ -1,0 +1,55 @@
+FROM golang:1.26-bookworm AS remote-builder
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/remote-docker-remote ./cmd/remote-docker-remote
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath -ldflags='-s -w' -o /out/remote-docker-remote ./cmd/remote-docker-remote
+
+FROM ubuntu:24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG SYNCTHING_VERSION=2.1.1
+ARG SYNCTHING_SHA256=0b960a67a0391156c2ca45943ed1ceaad9ae1fc3772d967e6aafc5a7c662565d
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        docker-buildx \
+        docker.io \
+        iproute2 \
+        openssh-client \
+        openssh-server \
+        systemd \
+        tini \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    archive="syncthing-linux-amd64-v${SYNCTHING_VERSION}.tar.gz"; \
+    curl --fail --location --proto '=https' --tlsv1.2 \
+      --output "/tmp/${archive}" \
+      "https://github.com/syncthing/syncthing/releases/download/v${SYNCTHING_VERSION}/${archive}"; \
+    echo "${SYNCTHING_SHA256}  /tmp/${archive}" | sha256sum --check --strict -; \
+    tar --extract --gzip --file "/tmp/${archive}" --directory /tmp; \
+    install -m 0755 "/tmp/syncthing-linux-amd64-v${SYNCTHING_VERSION}/syncthing" /usr/local/bin/syncthing; \
+    rm -rf "/tmp/${archive}" "/tmp/syncthing-linux-amd64-v${SYNCTHING_VERSION}"
+
+COPY --from=remote-builder /out/remote-docker-remote /usr/local/bin/remote-docker-remote
+COPY packaging/wsl/etc/ /etc/
+COPY packaging/wsl/usr/ /usr/
+
+RUN set -eux; \
+    groupadd --force docker; \
+    useradd --create-home --shell /bin/sh --groups docker remote-docker; \
+    passwd --lock remote-docker; \
+    install -d -m 0700 -o remote-docker -g remote-docker /var/lib/remote-docker/syncthing; \
+    install -d -m 0755 /etc/remote-docker; \
+    install -m 0600 -o root -g root /dev/null /etc/remote-docker/authorized_keys; \
+    printf '%s\n' 'remote-docker-managed-v1' > /etc/remote-docker-release; \
+    chmod 0755 /usr/local/bin/remote-docker-remote /usr/local/libexec/remote-docker/authorized-command; \
+    rm -f /etc/ssh/ssh_host_*
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]
