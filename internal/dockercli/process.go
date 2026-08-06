@@ -62,7 +62,7 @@ func ExitCode(err error) int {
 		return 130
 	}
 
-	var exitError *exec.ExitError
+	var exitError interface{ ExitCode() int }
 	if errors.As(err, &exitError) {
 		if code := exitError.ExitCode(); code >= 0 {
 			return code
