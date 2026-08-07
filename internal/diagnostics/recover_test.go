@@ -87,6 +87,23 @@ func TestRecoveryStopsWhenFreshObservationConfirmsRecoveryDespiteActionError(t *
 	}
 }
 
+func TestRecoveryDoesNotAcceptReadyObservationWithObservationError(t *testing.T) {
+	result, err := (Recoverer{
+		Operations: RecoveryOperations{
+			Reconnect: recordRecovery(nil, RecoveryReconnect, nil),
+		},
+		Readiness: ReadinessFunc(func(context.Context) (bool, error) {
+			return true, errors.New("readiness probe failed")
+		}),
+	}).Recover(context.Background())
+	if !errors.Is(err, ErrRecoveryFailed) {
+		t.Fatalf("Recover() error = %v, want %v", err, ErrRecoveryFailed)
+	}
+	if result.Step != "" || result.Attempts[0].OK || result.Attempts[0].Reason != string(ReasonRecoveryNotConfirmed) {
+		t.Fatalf("result = %#v, want unconfirmed reconnect", result)
+	}
+}
+
 func TestRecoveryReturnsSafePublicAttemptsWhenReadinessNeverRecovers(t *testing.T) {
 	observations := 0
 	result, err := (Recoverer{

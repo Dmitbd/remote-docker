@@ -105,9 +105,11 @@ func runRPCWithOperations(
 					outgoing.Error = &rpcError{Code: -32002, Message: "managed diagnostics observation failed"}
 				} else {
 					outgoing.Result = map[string]any{
-						"wsl_running":    observation.WSLRunning,
-						"systemd_target": observation.SystemdTarget,
-						"disk_available": observation.DiskAvailable,
+						"wsl_running":       observation.WSLRunning,
+						"systemd_target":    observation.SystemdTarget,
+						"docker_socket":     observation.DockerSocket,
+						"disk_available":    observation.DiskAvailable,
+						"syncthing_service": observation.SyncthingService,
 					}
 				}
 			}

@@ -15,9 +15,11 @@ const managedDistroName = "remote-docker"
 // ManagedWSLStatus is the fixed, non-sensitive status subset used by
 // diagnostics. It contains no command output or host paths.
 type ManagedWSLStatus struct {
-	Running       bool `json:"wsl_running"`
-	SystemdTarget bool `json:"systemd_target"`
-	DiskAvailable bool `json:"disk_available"`
+	Running          bool `json:"wsl_running"`
+	SystemdTarget    bool `json:"systemd_target"`
+	DockerSocket     bool `json:"docker_socket"`
+	DiskAvailable    bool `json:"disk_available"`
+	SyncthingService bool `json:"syncthing_service"`
 }
 
 type managedWSLOperation string

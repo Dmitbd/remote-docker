@@ -15,6 +15,7 @@ import (
 	"github.com/Dmitbd/remote-docker/internal/diagnostics"
 	"github.com/Dmitbd/remote-docker/internal/localapi"
 	"github.com/Dmitbd/remote-docker/internal/sshtransport"
+	"github.com/Dmitbd/remote-docker/internal/windowsbridge"
 )
 
 func TestProductionRecoveryUsesOneOrchestrationPathAndFreshReadiness(t *testing.T) {
@@ -171,6 +172,74 @@ func TestMacRepairStepsReconcileInfrastructureOnceBeforeReadiness(t *testing.T) 
 	}
 }
 
+func TestWindowsRecoveryRequiresFreshDockerAndSyncthingHealth(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      windowsbridge.ManagedWSLStatus
+		wantReady   bool
+		failedCheck string
+	}{
+		{
+			name: "Docker unhealthy",
+			status: windowsbridge.ManagedWSLStatus{
+				Running: true, SystemdTarget: true, DiskAvailable: true, SyncthingService: true,
+			},
+			failedCheck: "docker_socket",
+		},
+		{
+			name: "Syncthing unhealthy",
+			status: windowsbridge.ManagedWSLStatus{
+				Running: true, SystemdTarget: true, DockerSocket: true, DiskAvailable: true,
+			},
+			failedCheck: "syncthing",
+		},
+		{
+			name: "all managed host checks healthy",
+			status: windowsbridge.ManagedWSLStatus{
+				Running: true, SystemdTarget: true, DockerSocket: true,
+				DiskAvailable: true, SyncthingService: true,
+			},
+			wantReady: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			windows := &recordingWindowsDiagnostics{status: tt.status}
+			diagnosticsRuntime := newProductionDiagnosticsWithOptions(productionDiagnosticsOptions{
+				Observe:  func(context.Context) AgentStatus { return AgentStatus{State: AgentUnpaired} },
+				Windows:  windows,
+				Platform: "windows",
+			})
+			doctor := diagnosticsRuntime.Doctor(context.Background())
+			if tt.failedCheck != "" {
+				found := false
+				for _, check := range doctor.Checks {
+					if check.Name == tt.failedCheck {
+						found = true
+						if check.OK {
+							t.Fatalf("Doctor check %s = %#v, want unhealthy remote result", tt.failedCheck, check)
+						}
+					}
+				}
+				if !found {
+					t.Fatalf("Doctor checks = %#v, missing %s", doctor.Checks, tt.failedCheck)
+				}
+			}
+
+			result, status, err := diagnosticsRuntime.Recover(context.Background())
+			if tt.wantReady {
+				if err != nil || status.State != AgentReady || result.Step != diagnostics.RecoveryStartWSLDistro {
+					t.Fatalf("Recover() = (%#v, %#v, %v), want confirmed Windows self-heal", result, status, err)
+				}
+				return
+			}
+			if !errors.Is(err, diagnostics.ErrRecoveryFailed) || status.State == AgentReady || result.Step != "" {
+				t.Fatalf("Recover() = (%#v, %#v, %v), must not synthesize Ready", result, status, err)
+			}
+		})
+	}
+}
+
 func TestSSHRemoteDiagnosticsUsesOnlyExactTypedRPC(t *testing.T) {
 	root := t.TempDir()
 	store := config.Store{Path: filepath.Join(root, "config.json")}
@@ -196,7 +265,10 @@ func TestSSHRemoteDiagnosticsUsesOnlyExactTypedRPC(t *testing.T) {
 			methods = append(methods, request.Method)
 			response := map[string]any{"jsonrpc": "2.0", "id": 1}
 			if request.Method == "diagnostics.observe" {
-				response["result"] = remoteDiagnosticStatus{WSLRunning: true, SystemdTarget: true, DiskAvailable: true}
+				response["result"] = remoteDiagnosticStatus{
+					WSLRunning: true, SystemdTarget: true, DockerSocket: true,
+					DiskAvailable: true, SyncthingService: true,
+				}
 			} else {
 				response["result"] = map[string]bool{"restarted": true}
 			}
@@ -205,7 +277,8 @@ func TestSSHRemoteDiagnosticsUsesOnlyExactTypedRPC(t *testing.T) {
 	}
 
 	status, err := client.Observe(context.Background())
-	if err != nil || !status.WSLRunning || !status.SystemdTarget || !status.DiskAvailable {
+	if err != nil || !status.WSLRunning || !status.SystemdTarget || !status.DockerSocket ||
+		!status.DiskAvailable || !status.SyncthingService {
 		t.Fatalf("Observe() = (%#v, %v)", status, err)
 	}
 	if err := client.RestartSystemdTarget(context.Background()); err != nil {
@@ -313,6 +386,25 @@ func (s staticRemoteDiagnostics) RestartSystemdTarget(context.Context) error { r
 type repairingRemoteDiagnostics struct {
 	status   remoteDiagnosticStatus
 	restarts int
+}
+
+type recordingWindowsDiagnostics struct {
+	status           windowsbridge.ManagedWSLStatus
+	starts, restarts int
+}
+
+func (w *recordingWindowsDiagnostics) Observe(context.Context) (windowsbridge.ManagedWSLStatus, error) {
+	return w.status, nil
+}
+
+func (w *recordingWindowsDiagnostics) StartDistro(context.Context) error {
+	w.starts++
+	return nil
+}
+
+func (w *recordingWindowsDiagnostics) RestartSystemdTarget(context.Context) error {
+	w.restarts++
+	return nil
 }
 
 func (r *repairingRemoteDiagnostics) Observe(context.Context) (remoteDiagnosticStatus, error) {

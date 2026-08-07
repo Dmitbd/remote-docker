@@ -16,9 +16,11 @@ import (
 )
 
 type remoteDiagnosticStatus struct {
-	WSLRunning    bool `json:"wsl_running"`
-	SystemdTarget bool `json:"systemd_target"`
-	DiskAvailable bool `json:"disk_available"`
+	WSLRunning       bool `json:"wsl_running"`
+	SystemdTarget    bool `json:"systemd_target"`
+	DockerSocket     bool `json:"docker_socket"`
+	DiskAvailable    bool `json:"disk_available"`
+	SyncthingService bool `json:"syncthing_service"`
 }
 
 type remoteDiagnosticOperations interface {
@@ -88,8 +90,11 @@ func (d productionDiagnostics) observeHealth(ctx context.Context) (localapi.Doct
 			}
 			windowsStatus, err := d.options.Windows.Observe(observeCtx)
 			remoteStatus = remoteDiagnosticStatus{
-				WSLRunning: windowsStatus.Running, SystemdTarget: windowsStatus.SystemdTarget,
-				DiskAvailable: windowsStatus.DiskAvailable,
+				WSLRunning:       windowsStatus.Running,
+				SystemdTarget:    windowsStatus.SystemdTarget,
+				DockerSocket:     windowsStatus.DockerSocket,
+				DiskAvailable:    windowsStatus.DiskAvailable,
+				SyncthingService: windowsStatus.SyncthingService,
 			}
 			remoteErr = err
 			return remoteStatus, remoteErr
@@ -118,6 +123,16 @@ func (d productionDiagnostics) observeHealth(ctx context.Context) (localapi.Doct
 			return nil
 		})
 	}
+	dockerSocketCheck := checkState(map[AgentState]bool{
+		AgentSyncing: true, AgentReady: true,
+	}, diagnostics.ReasonDockerSocketNotReady)
+	syncthingCheck := checkState(map[AgentState]bool{
+		AgentReady: true,
+	}, diagnostics.ReasonSyncthingNotReady)
+	if d.options.Platform == "windows" {
+		dockerSocketCheck = checkRemote(func(value remoteDiagnosticStatus) bool { return value.DockerSocket }, diagnostics.ReasonDockerSocketNotReady)
+		syncthingCheck = checkRemote(func(value remoteDiagnosticStatus) bool { return value.SyncthingService }, diagnostics.ReasonSyncthingNotReady)
+	}
 
 	results := (diagnostics.Runner{Operations: diagnostics.Operations{
 		LANReachability: checkState(map[AgentState]bool{
@@ -129,14 +144,10 @@ func (d productionDiagnostics) observeHealth(ctx context.Context) (localapi.Doct
 		}, diagnostics.ReasonSSHIdentityNotReady),
 		WSLRunning:    checkRemote(func(value remoteDiagnosticStatus) bool { return value.WSLRunning }, diagnostics.ReasonWSLNotRunning),
 		SystemdTarget: checkRemote(func(value remoteDiagnosticStatus) bool { return value.SystemdTarget }, diagnostics.ReasonSystemdTargetNotReady),
-		DockerSocket: checkState(map[AgentState]bool{
-			AgentSyncing: true, AgentReady: true,
-		}, diagnostics.ReasonDockerSocketNotReady),
-		Disk: checkRemote(func(value remoteDiagnosticStatus) bool { return value.DiskAvailable }, diagnostics.ReasonDiskUnavailable),
-		Syncthing: checkState(map[AgentState]bool{
-			AgentReady: true,
-		}, diagnostics.ReasonSyncthingNotReady),
-		PortRelays: d.options.PortRelays,
+		DockerSocket:  dockerSocketCheck,
+		Disk:          checkRemote(func(value remoteDiagnosticStatus) bool { return value.DiskAvailable }, diagnostics.ReasonDiskUnavailable),
+		Syncthing:     syncthingCheck,
+		PortRelays:    d.options.PortRelays,
 	}}).Check(ctx)
 	checks := make([]localapi.DoctorCheck, 0, len(results))
 	for _, result := range results {
@@ -156,7 +167,7 @@ func (d productionDiagnostics) Recover(ctx context.Context) (diagnostics.Recover
 		health, observed := d.observeHealth(observeCtx)
 		latest = safeAgentStatus(observed)
 		if d.options.Platform == "windows" {
-			ready := checksReady(health.Checks, "wsl_running", "systemd_target", "disk")
+			ready := checksReady(health.Checks, "wsl_running", "systemd_target", "docker_socket", "disk", "syncthing")
 			if ready {
 				latest = AgentStatus{State: AgentReady, Message: "connected"}
 			}

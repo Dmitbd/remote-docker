@@ -138,7 +138,10 @@ func TestRPCPairingRevokeUsesManagedAuthorizationRuntime(t *testing.T) {
 
 func TestRPCDiagnosticsExposeTypedObservationAndExactRecoveryOnly(t *testing.T) {
 	operations := &recordingRemoteDiagnostics{
-		observation: remoteDiagnosticObservation{WSLRunning: true, SystemdTarget: true, DiskAvailable: true},
+		observation: remoteDiagnosticObservation{
+			WSLRunning: true, SystemdTarget: true, DockerSocket: true,
+			DiskAvailable: true, SyncthingService: true,
+		},
 	}
 	input := strings.NewReader(
 		`{"jsonrpc":"2.0","id":8,"method":"diagnostics.observe"}` + "\n" +
@@ -154,7 +157,8 @@ func TestRPCDiagnosticsExposeTypedObservationAndExactRecoveryOnly(t *testing.T) 
 	if err := decoder.Decode(&observed); err != nil {
 		t.Fatalf("decode observation: %v", err)
 	}
-	if observed.Error != nil || observed.Result["wsl_running"] != true || observed.Result["systemd_target"] != true || observed.Result["disk_available"] != true {
+	if observed.Error != nil || observed.Result["wsl_running"] != true || observed.Result["systemd_target"] != true ||
+		observed.Result["docker_socket"] != true || observed.Result["disk_available"] != true || observed.Result["syncthing_service"] != true {
 		t.Fatalf("observation response = %#v", observed)
 	}
 	var restarted response

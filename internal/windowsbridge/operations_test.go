@@ -51,7 +51,10 @@ func TestManagedWSLObservationDoesNotStartStoppedDistro(t *testing.T) {
 func TestManagedWSLObservationUsesTypedRemoteRPCForRunningDistro(t *testing.T) {
 	runner := &recordingManagedWSLRunner{
 		runningOutput: "remote-docker\x00\r\n",
-		observation:   ManagedWSLStatus{Running: true, SystemdTarget: true, DiskAvailable: true},
+		observation: ManagedWSLStatus{
+			Running: true, SystemdTarget: true, DockerSocket: true,
+			DiskAvailable: true, SyncthingService: true,
+		},
 	}
 	status, err := (ManagedWSLOperations{runner: runner}).Observe(context.Background())
 	if err != nil {

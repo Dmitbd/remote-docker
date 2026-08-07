@@ -119,8 +119,8 @@ func (r Recoverer) Recover(ctx context.Context) (RecoveryResult, error) {
 		actionErr := operation.Recover(ctx)
 		ready := false
 		if r.Readiness != nil {
-			observed, _ := r.Readiness.Ready(ctx)
-			ready = observed
+			observed, observationErr := r.Readiness.Ready(ctx)
+			ready = observed && observationErr == nil
 		}
 		if ready {
 			result.Step = step

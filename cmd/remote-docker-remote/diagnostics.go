@@ -9,9 +9,11 @@ import (
 const minimumDiagnosticFreeBytes = uint64(1 << 30)
 
 type remoteDiagnosticObservation struct {
-	WSLRunning    bool `json:"wsl_running"`
-	SystemdTarget bool `json:"systemd_target"`
-	DiskAvailable bool `json:"disk_available"`
+	WSLRunning       bool `json:"wsl_running"`
+	SystemdTarget    bool `json:"systemd_target"`
+	DockerSocket     bool `json:"docker_socket"`
+	DiskAvailable    bool `json:"disk_available"`
+	SyncthingService bool `json:"syncthing_service"`
 }
 
 type remoteDiagnosticsRuntime interface {
@@ -33,6 +35,7 @@ type systemdRunner interface {
 type remoteSystemOperations struct {
 	runner    systemdRunner
 	freeBytes func(string) (uint64, error)
+	probes    remoteHealthProbes
 }
 
 func (o remoteSystemOperations) Observe(ctx context.Context) (remoteDiagnosticObservation, error) {
@@ -49,8 +52,16 @@ func (o remoteSystemOperations) Observe(ctx context.Context) (remoteDiagnosticOb
 	if err != nil {
 		return remoteDiagnosticObservation{}, errors.New("read managed filesystem capacity")
 	}
+	probes := o.probes
+	if probes == nil {
+		probes = remoteServiceProbes{}
+	}
 	return remoteDiagnosticObservation{
-		WSLRunning: true, SystemdTarget: active, DiskAvailable: available >= minimumDiagnosticFreeBytes,
+		WSLRunning:       true,
+		SystemdTarget:    active,
+		DockerSocket:     probes.DockerSocketHealthy(ctx),
+		DiskAvailable:    available >= minimumDiagnosticFreeBytes,
+		SyncthingService: probes.SyncthingServiceHealthy(ctx),
 	}, nil
 }
 
