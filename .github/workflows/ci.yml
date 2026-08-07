@@ -36,7 +36,7 @@ jobs:
         run: bash packaging/wsl/build-rootfs.sh
 
       - name: Verify rootfs artifact contract
-        run: bash tests/integration/rootfs_test.sh
+        run: sudo bash tests/integration/rootfs_test.sh
 
       - name: Upload rootfs input
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact@v7
