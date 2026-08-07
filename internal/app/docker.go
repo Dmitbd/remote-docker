@@ -21,6 +21,7 @@ type Runtime struct {
 	ContextName    string
 	Executor       dockercli.Executor
 	Preflight      *Preflight
+	ControlClient  ControlClient
 	Env            []string
 	Dir            string
 	Stdin          io.Reader
