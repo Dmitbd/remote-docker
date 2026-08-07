@@ -1,0 +1,108 @@
+name: Windows package CI
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/release.yml'
+      - 'cmd/remote-docker-agent/**'
+      - 'cmd/remote-docker-tray/**'
+      - 'internal/**'
+      - 'packaging/windows/**'
+      - 'packaging/wsl/**'
+      - 'tests/integration/windows_package.Tests.ps1'
+      - 'tests/integration/rootfs_test.sh'
+      - 'go.mod'
+      - 'go.sum'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rootfs:
+    name: Build package rootfs input
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Verify rootfs source contract
+        run: bash tests/integration/rootfs_test.sh --source
+
+      - name: Build rootfs input
+        run: bash packaging/wsl/build-rootfs.sh
+
+      - name: Verify rootfs artifact contract
+        run: bash tests/integration/rootfs_test.sh
+
+      - name: Upload rootfs input
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact@v7
+        with:
+          name: remote-docker-rootfs
+          path: |
+            dist/remote-docker-rootfs.tar.zst
+            dist/remote-docker-rootfs.tar.zst.sha256
+          if-no-files-found: error
+          retention-days: 3
+
+  windows-package:
+    name: Test and build unsigned Windows package
+    needs: rootfs
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up pinned Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # actions/setup-go@v7
+        with:
+          go-version: '1.26.5'
+          cache: true
+
+      - name: Download rootfs input
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # actions/download-artifact@v7
+        with:
+          name: remote-docker-rootfs
+          path: dist
+
+      - name: Install pinned Pester
+        shell: pwsh
+        run: Install-Module Pester -RequiredVersion 6.0.0 -Scope CurrentUser -Force
+
+      - name: Verify focused Windows provisioning package
+        run: go test ./internal/provision
+
+      - name: Verify Windows package contract
+        shell: pwsh
+        run: Invoke-Pester -Path tests/integration/windows_package.Tests.ps1 -CI
+
+      - name: Build unsigned development MSI
+        shell: pwsh
+        run: >-
+          ./packaging/windows/build-msi.ps1
+          -Version 0.0.0
+          -RootfsPath dist/remote-docker-rootfs.tar.zst
+
+      - name: Confirm development binaries are unsigned
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -LiteralPath dist/windows -Recurse -File | Where-Object Extension -in '.exe', '.msi'
+          if ($files.Count -ne 3) { throw "Expected two executables and one MSI, found $($files.Count)." }
+          foreach ($file in $files) {
+            if ((Get-AuthenticodeSignature -LiteralPath $file.FullName).Status -ne 'NotSigned') {
+              throw "Development artifact must be unsigned: $($file.Name)"
+            }
+          }
+
+      - name: Upload unsigned development package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact@v7
+        with:
+          name: remote-docker-windows-unsigned
+          path: dist/windows
+          if-no-files-found: error
+          retention-days: 7

@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="Remote Docker"
+    Manufacturer="Remote Docker"
+    Version="$(var.ProductVersion)"
+    UpgradeCode="D730969C-97A3-4C7C-8E30-E6B112FF48B0"
+    Language="1033"
+    InstallerVersion="500"
+    Scope="perMachine"
+    Compressed="yes">
+    <MajorUpgrade
+      Schedule="afterInstallExecute"
+      DowngradeErrorMessage="A newer version of Remote Docker is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Remote Docker">
+        <Component Id="AgentExecutableComponent" Guid="CA08F79D-FCD8-445D-A229-F4A86BE9CC4B" Bitness="always64">
+          <File Id="AgentExecutable" Source="$(var.AgentSource)" Name="RemoteDockerAgent.exe" KeyPath="yes" />
+        </Component>
+        <Component Id="TrayExecutableComponent" Guid="99560DB7-C2C6-4E33-8DF7-E899E4E3B60A" Bitness="always64">
+          <File Id="TrayExecutable" Source="$(var.TraySource)" Name="RemoteDockerTray.exe" KeyPath="yes" />
+        </Component>
+        <Component Id="AgentStartupComponent" Guid="10218E31-549F-487D-98D1-3B37924FB4A4" Bitness="always64">
+          <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="RemoteDockerAgent" Value="&quot;[INSTALLFOLDER]RemoteDockerAgent.exe&quot;" Type="string" KeyPath="yes" />
+        </Component>
+        <Component Id="TrayStartupComponent" Guid="C20B29D1-5136-42DF-AFE4-83E761969F72" Bitness="always64">
+          <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="RemoteDockerTray" Value="&quot;[INSTALLFOLDER]RemoteDockerTray.exe&quot;" Type="string" KeyPath="yes" />
+        </Component>
+
+        <Directory Id="AssetsFolder" Name="assets">
+          <Component Id="RootfsComponent" Guid="4C9F5F78-1017-4E43-9361-44A16042C520" Bitness="always64">
+            <File Id="RootfsArchive" Source="$(var.RootfsSource)" Name="remote-docker-rootfs.tar.zst" KeyPath="yes" />
+          </Component>
+          <Component Id="RootfsChecksumComponent" Guid="2930AA1C-2473-4999-8D80-11C7A19457A9" Bitness="always64">
+            <File Id="RootfsChecksum" Source="$(var.RootfsChecksumSource)" Name="remote-docker-rootfs.tar.zst.sha256" KeyPath="yes" />
+          </Component>
+        </Directory>
+
+        <Directory Id="ToolsFolder" Name="tools">
+          <Component Id="ProbeScriptComponent" Guid="6852E1B2-ABF7-483F-A08B-EA31015F02E7" Bitness="always64">
+            <File Id="ProbeScript" Source="$(var.ProbeScriptSource)" Name="probe.ps1" KeyPath="yes" />
+          </Component>
+          <Component Id="ProvisionScriptComponent" Guid="A69E06AC-A542-42C1-8F05-BE0E928EEBA2" Bitness="always64">
+            <File Id="ProvisionScript" Source="$(var.ProvisionScriptSource)" Name="provision.ps1" KeyPath="yes" />
+          </Component>
+          <Component Id="UninstallScriptComponent" Guid="4C307716-8C9D-41CF-864E-E21DF875D639" Bitness="always64">
+            <File Id="UninstallScript" Source="$(var.UninstallScriptSource)" Name="uninstall.ps1" KeyPath="yes" />
+          </Component>
+          <Component Id="UpdateScriptComponent" Guid="9FC98E6A-31A5-4505-A7F6-5D9BED6C647F" Bitness="always64">
+            <File Id="UpdateScript" Source="$(var.UpdateScriptSource)" Name="install-agent.ps1" KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="MainFeature" Title="Remote Docker" Level="1">
+      <ComponentRef Id="AgentExecutableComponent" />
+      <ComponentRef Id="TrayExecutableComponent" />
+      <ComponentRef Id="AgentStartupComponent" />
+      <ComponentRef Id="TrayStartupComponent" />
+      <ComponentRef Id="RootfsComponent" />
+      <ComponentRef Id="RootfsChecksumComponent" />
+      <ComponentRef Id="ProbeScriptComponent" />
+      <ComponentRef Id="ProvisionScriptComponent" />
+      <ComponentRef Id="UninstallScriptComponent" />
+      <ComponentRef Id="UpdateScriptComponent" />
+    </Feature>
+  </Package>
+</Wix>

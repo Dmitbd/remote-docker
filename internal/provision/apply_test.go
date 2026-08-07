@@ -116,7 +116,6 @@ func TestProvisionScriptKeepsConfirmationAndMutationOrder(t *testing.T) {
 		"$firstBoot",
 		"Managed WSL health check",
 		"New-NetFirewallRule",
-		"Register-ScheduledTask",
 	}
 	last := -1
 	for _, fragment := range ordered {
@@ -129,9 +128,14 @@ func TestProvisionScriptKeepsConfirmationAndMutationOrder(t *testing.T) {
 		}
 		last = position
 	}
-	for _, fragment := range []string{"-Profile Private", "-RemoteAddress LocalSubnet"} {
+	for _, fragment := range []string{"-Program $agentExecutable", "-Profile Private", "-RemoteAddress LocalSubnet"} {
 		if !strings.Contains(script, fragment) {
 			t.Fatalf("provision.ps1 is missing firewall restriction %q", fragment)
+		}
+	}
+	for _, fragment := range []string{"New-ScheduledTask", "Register-ScheduledTask", "RunLevel Highest"} {
+		if strings.Contains(script, fragment) {
+			t.Fatalf("provision.ps1 contains obsolete elevated startup registration %q", fragment)
 		}
 	}
 }
