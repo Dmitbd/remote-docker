@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -36,6 +37,68 @@ type Client struct {
 type HTTPError struct {
 	StatusCode int
 	Message    string
+}
+
+// Bootstrap requests a single pairing session over private-LAN TLS. The
+// returned server key is bound to the TLS certificate and then authenticated
+// out of band by the six-digit comparison code.
+func Bootstrap(ctx context.Context, baseURL string, clientPublicKey ed25519.PublicKey, httpClient *http.Client) (SessionDescriptor, error) {
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || len(clientPublicKey) != ed25519.PublicKeySize {
+		return SessionDescriptor{}, errorsNewSecureURL()
+	}
+	payload, err := json.Marshal(struct {
+		ClientPublicKey ed25519.PublicKey `json:"client_public_key"`
+	}{ClientPublicKey: append(ed25519.PublicKey(nil), clientPublicKey...)})
+	if err != nil {
+		return SessionDescriptor{}, fmt.Errorf("encode pairing session request: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+pairSessionPath, bytes.NewReader(payload))
+	if err != nil {
+		return SessionDescriptor{}, fmt.Errorf("create pairing session request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	client := httpClient
+	if client == nil {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.TLSClientConfig = &tls.Config{
+			MinVersion: tls.VersionTLS13,
+			// Trust is completed by certificate/descriptor binding plus the OOB code.
+			InsecureSkipVerify: true, //nolint:gosec
+		}
+		client = &http.Client{Transport: transport, Timeout: 15 * time.Second}
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return SessionDescriptor{}, fmt.Errorf("request pairing session: %w", err)
+	}
+	defer response.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return SessionDescriptor{}, fmt.Errorf("read pairing session response: %w", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		var body struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(raw, &body)
+		return SessionDescriptor{}, &HTTPError{StatusCode: response.StatusCode, Message: body.Error}
+	}
+	var descriptor SessionDescriptor
+	if err := json.Unmarshal(raw, &descriptor); err != nil {
+		return SessionDescriptor{}, fmt.Errorf("decode pairing session response: %w", err)
+	}
+	if !bytes.Equal(descriptor.ClientPublicKey, clientPublicKey) || response.TLS == nil || response.TLS.Version != tls.VersionTLS13 || len(response.TLS.PeerCertificates) != 1 {
+		return SessionDescriptor{}, ErrInvalidSession
+	}
+	serverPublicKey, ok := response.TLS.PeerCertificates[0].PublicKey.(ed25519.PublicKey)
+	if !ok || subtle.ConstantTimeCompare(serverPublicKey, descriptor.ServerPublicKey) != 1 {
+		return SessionDescriptor{}, errors.New("pairing bootstrap TLS identity does not match session")
+	}
+	if _, err := Code(descriptor); err != nil {
+		return SessionDescriptor{}, err
+	}
+	return descriptor, nil
 }
 
 func (e *HTTPError) Error() string {

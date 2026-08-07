@@ -14,6 +14,8 @@ import (
 	"time"
 )
 
+const SSHPrivateKeyCredential = "ssh-private-key"
+
 // Command describes one direct process invocation without a shell.
 type Command struct {
 	Binary string

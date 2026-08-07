@@ -18,11 +18,16 @@ func TestStoreRoundTrip(t *testing.T) {
 		ActiveDevice:  "pc-1",
 		Devices: map[string]Device{
 			"pc-1": {
-				Name:     "Dev PC",
-				Address:  "192.168.1.20",
-				SSHPort:  2222,
-				SyncPort: 22000,
+				Name:              "Dev PC",
+				Address:           "192.168.1.20",
+				SSHPort:           2222,
+				SyncPort:          22000,
+				SSHHostPublicKey:  "ssh-ed25519 AAAAhost",
+				SyncthingDeviceID: "SYNC-DEVICE",
 			},
+		},
+		Workspaces: map[string]Workspace{
+			"sample": {Path: "/Users/demo/sample"},
 		},
 	}
 
@@ -45,6 +50,31 @@ func TestStoreRoundTrip(t *testing.T) {
 		if got := info.Mode().Perm(); got != 0o600 {
 			t.Fatalf("config mode = %o, want 600", got)
 		}
+	}
+}
+
+func TestStoreLoadsConfigWithoutWorkspaceAndPairingMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	legacy := `{
+  "schemaVersion": 1,
+  "activeDevice": "pc-1",
+  "devices": {
+    "pc-1": {"name": "Dev PC", "address": "192.168.1.20", "sshPort": 2222}
+  }
+}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy config: %v", err)
+	}
+
+	got, err := (Store{Path: path}).Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got.ActiveDevice != "pc-1" || got.Devices["pc-1"].Name != "Dev PC" {
+		t.Fatalf("Load() = %#v", got)
+	}
+	if got.Workspaces != nil || got.Devices["pc-1"].SSHHostPublicKey != "" || got.Devices["pc-1"].SyncthingDeviceID != "" {
+		t.Fatalf("legacy optional fields were not zero-valued: %#v", got)
 	}
 }
 

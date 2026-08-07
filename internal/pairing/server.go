@@ -2,6 +2,7 @@ package pairing
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/subtle"
@@ -21,7 +22,16 @@ import (
 	"time"
 )
 
-const pairPath = "/v1/pair"
+const (
+	pairPath        = "/v1/pair"
+	pairSessionPath = "/v1/pair/session"
+)
+
+// Installer applies or revokes the one managed Mac authorization on Windows.
+type Installer interface {
+	Install(context.Context, string, string) (DeviceInfo, error)
+	Revoke(context.Context, string) error
+}
 
 type sessionState struct {
 	descriptor SessionDescriptor
@@ -30,13 +40,14 @@ type sessionState struct {
 
 // Server owns one short-lived pairing session.
 type Server struct {
-	mu       sync.Mutex
-	identity ServerIdentity
-	device   DeviceInfo
-	now      func() time.Time
-	random   io.Reader
-	active   *sessionState
-	terminal map[string]int
+	mu        sync.Mutex
+	identity  ServerIdentity
+	device    DeviceInfo
+	installer Installer
+	now       func() time.Time
+	random    io.Reader
+	active    *sessionState
+	terminal  map[string]int
 }
 
 // ServerOption changes a server dependency.
@@ -55,6 +66,13 @@ func WithClock(now func() time.Time) ServerOption {
 func WithDeviceInfo(device DeviceInfo) ServerOption {
 	return func(server *Server) {
 		server.device = device
+	}
+}
+
+// WithInstaller configures the Windows-side managed-key installer.
+func WithInstaller(installer Installer) ServerOption {
+	return func(server *Server) {
+		server.installer = installer
 	}
 }
 
@@ -115,9 +133,28 @@ func (s *Server) StartSession(clientPublicKey ed25519.PublicKey, ttl time.Durati
 	return cloneDescriptor(descriptor), nil
 }
 
+// ActiveSession returns the current descriptor and OOB code without secrets.
+func (s *Server) ActiveSession() (SessionDescriptor, string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.active == nil || !s.now().Before(s.active.descriptor.ExpiresAt) {
+		return SessionDescriptor{}, "", false
+	}
+	descriptor := cloneDescriptor(s.active.descriptor)
+	code, err := Code(descriptor)
+	if err != nil {
+		return SessionDescriptor{}, "", false
+	}
+	return descriptor, code, true
+}
+
 // ServeHTTP accepts the one confirmation request that completes pairing.
 func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Content-Type", "application/json")
+	if request.Method == http.MethodPost && request.URL.Path == pairSessionPath {
+		s.serveStartSession(response, request)
+		return
+	}
 	if request.Method != http.MethodPost || request.URL.Path != pairPath {
 		writeError(response, http.StatusNotFound, "pairing endpoint not found")
 		return
@@ -132,7 +169,7 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		return
 	}
 
-	record, status, message := s.confirm(confirmation)
+	record, status, message := s.confirm(request.Context(), confirmation)
 	if status != http.StatusOK {
 		writeError(response, status, message)
 		return
@@ -141,7 +178,31 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 	_ = json.NewEncoder(response).Encode(record)
 }
 
-func (s *Server) confirm(request confirmRequest) (DeviceRecord, int, string) {
+func (s *Server) serveStartSession(response http.ResponseWriter, request *http.Request) {
+	request.Body = http.MaxBytesReader(response, request.Body, 8<<10)
+	var input struct {
+		ClientPublicKey ed25519.PublicKey `json:"client_public_key"`
+	}
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		writeError(response, http.StatusBadRequest, "invalid pairing session request")
+		return
+	}
+	descriptor, err := s.StartSession(input.ClientPublicKey, MaxSessionTTL)
+	if errors.Is(err, ErrSessionActive) {
+		writeError(response, http.StatusConflict, "a pairing session is already active")
+		return
+	}
+	if err != nil {
+		writeError(response, http.StatusBadRequest, "invalid pairing session request")
+		return
+	}
+	response.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(response).Encode(descriptor)
+}
+
+func (s *Server) confirm(ctx context.Context, request confirmRequest) (DeviceRecord, int, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -177,11 +238,22 @@ func (s *Server) confirm(request confirmRequest) (DeviceRecord, int, string) {
 		return DeviceRecord{}, http.StatusForbidden, "pairing code or device identity is invalid"
 	}
 
+	device := s.device
+	if s.installer != nil {
+		var installErr error
+		device, installErr = s.installer.Install(ctx, request.DeviceID, request.AuthorizedKey)
+		if installErr != nil || strings.TrimSpace(device.SSHHostPublicKey) == "" || strings.TrimSpace(device.SyncthingDeviceID) == "" ||
+			device.SSHPort < 1 || device.SSHPort > 65535 || device.SyncthingPort < 1 || device.SyncthingPort > 65535 {
+			return DeviceRecord{}, http.StatusServiceUnavailable, "managed pairing installation failed"
+		}
+	}
 	record := DeviceRecord{
 		DeviceID:          request.DeviceID,
 		AuthorizedKeys:    []string{request.AuthorizedKey},
-		SSHHostPublicKey:  s.device.SSHHostPublicKey,
-		SyncthingDeviceID: s.device.SyncthingDeviceID,
+		SSHHostPublicKey:  device.SSHHostPublicKey,
+		SyncthingDeviceID: device.SyncthingDeviceID,
+		SSHPort:           device.SSHPort,
+		SyncthingPort:     device.SyncthingPort,
 	}
 	s.terminal[request.SessionID] = http.StatusConflict
 	s.active = nil

@@ -1,0 +1,720 @@
+package app
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/Dmitbd/remote-docker/internal/config"
+	"github.com/Dmitbd/remote-docker/internal/credentials"
+	"github.com/Dmitbd/remote-docker/internal/discovery"
+	"github.com/Dmitbd/remote-docker/internal/dockercli"
+	"github.com/Dmitbd/remote-docker/internal/localapi"
+	"github.com/Dmitbd/remote-docker/internal/pairing"
+	"github.com/Dmitbd/remote-docker/internal/portrelay"
+	"github.com/Dmitbd/remote-docker/internal/provision"
+	"github.com/Dmitbd/remote-docker/internal/sshtransport"
+	"github.com/Dmitbd/remote-docker/internal/syncer"
+	"golang.org/x/crypto/ssh"
+)
+
+const agentProbeTimeout = 5 * time.Second
+
+// ProductionAgentOptions identifies the installed executable and persisted
+// non-secret config. Empty platform paths use per-user defaults.
+type ProductionAgentOptions struct {
+	ConfigPath     string
+	ExecutablePath string
+}
+
+// AgentRuntime owns the concrete controller, health observer, pairing host,
+// SSH child, Docker event reconciler, and relay state for one background agent.
+type AgentRuntime struct {
+	agent    *Agent
+	restorer *infrastructureRestorer
+	pairHost *windowsPairingHost
+	ssh      *managedSSHRuntime
+}
+
+// NewProductionAgentRuntime builds the real platform composition.
+func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, error) {
+	configPath := options.ConfigPath
+	if configPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("find user home: %w", err)
+		}
+		configPath = config.DefaultPath(runtime.GOOS, home)
+	}
+	if !filepath.IsAbs(configPath) {
+		return nil, errors.New("background agent config path must be absolute")
+	}
+	executablePath := options.ExecutablePath
+	if executablePath == "" {
+		var err error
+		executablePath, err = os.Executable()
+		if err != nil {
+			return nil, fmt.Errorf("find background agent executable: %w", err)
+		}
+	}
+	sshConfigPath, knownHostsPath, agentSocketPath, controlDir := defaultRuntimePaths(configPath)
+	store := config.Store{Path: configPath}
+	secrets := credentials.NewKeyringStore()
+	dockerCLI := realDockerCLIPath(executablePath)
+	httpClient := &http.Client{Timeout: agentProbeTimeout}
+	sshRuntime := &managedSSHRuntime{
+		store: store, secrets: secrets,
+		sshConfigPath: sshConfigPath, knownHostsPath: knownHostsPath,
+		agentSocketPath: agentSocketPath, controlDir: controlDir,
+	}
+
+	var pairingCoordinator runtimePairingCoordinator
+	var pairHost *windowsPairingHost
+	if runtime.GOOS == "windows" {
+		installer := provision.WSLPairingInstaller{}
+		host, err := newWindowsPairingHost(installer)
+		if err != nil {
+			return nil, err
+		}
+		pairHost = host
+		pairingCoordinator = windowsPairingCoordinator{server: host.server, installer: installer}
+	} else {
+		pairingCoordinator = newMacPairingCoordinator(macPairingOptions{
+			Store: store, Secrets: secrets,
+			Transport: discoveryPairingTransport{SSHConfigPath: sshConfigPath},
+			Docker:    dockercli.Runner{}, DockerCLI: dockerCLI, DockerContext: defaultContextName,
+			SSHConfigPath: sshConfigPath, KnownHostsPath: knownHostsPath,
+			AgentSocketPath: agentSocketPath, ControlDir: controlDir,
+		})
+	}
+
+	observer := &productionAgentObserver{
+		store: store, knownHostsPath: knownHostsPath,
+		dockerCLI: dockerCLI, dockerContext: defaultContextName,
+		secrets: secrets, httpClient: httpClient,
+	}
+	restorer := newInfrastructureRestorer(func() (portrelay.Reconciler, error) {
+		if runtime.GOOS == "windows" {
+			return portrelay.Reconciler{}, unavailable("port relay runtime is available on macOS")
+		}
+		cfg, err := loadAgentConfig(store)
+		if err != nil {
+			return portrelay.Reconciler{}, needsAction("background agent configuration is unavailable")
+		}
+		if cfg.ActiveDevice == "" {
+			return portrelay.Reconciler{}, needsAction("pair a device before restoring relays")
+		}
+		device, ok := cfg.Devices[cfg.ActiveDevice]
+		if !ok {
+			return portrelay.Reconciler{}, needsAction("active paired device is missing")
+		}
+		if err := sshRuntime.Ensure(context.Background()); err != nil {
+			return portrelay.Reconciler{}, unavailable("managed SSH runtime is unavailable")
+		}
+		alias := "remote-docker-device-" + cfg.ActiveDevice
+		source := portrelay.DockerSource{CLI: dockerCLI, Context: defaultContextName, Env: os.Environ()}
+		supervisor := portrelay.NewSupervisor(portrelay.SSHForwardStarter{
+			Forwarder:  sshtransport.Forwarder{Env: os.Environ()},
+			ConfigPath: sshConfigPath, ManagedHost: alias,
+		}, 250*time.Millisecond, 5*time.Second)
+		_ = device
+		return portrelay.Reconciler{Source: source, Sink: supervisor}, nil
+	})
+	controller := &productionAgentController{
+		store: store, pairing: pairingCoordinator,
+		sync: productionSyncInspector{secrets: secrets, httpClient: httpClient},
+	}
+	agent := NewAgent(observer, restorer, controller)
+	controller.status = agent.Status
+	controller.recover = agent.Reconnect
+	controller.afterPair = func(ctx context.Context) { _ = agent.Reconnect(ctx) }
+	return &AgentRuntime{agent: agent, restorer: restorer, pairHost: pairHost, ssh: sshRuntime}, nil
+}
+
+// Agent returns the concrete local API handler.
+func (r *AgentRuntime) Agent() *Agent { return r.agent }
+
+// Run owns all long-running infrastructure until ctx is cancelled.
+func (r *AgentRuntime) Run(ctx context.Context, interval time.Duration) error {
+	if r == nil || r.agent == nil || r.restorer == nil {
+		return errors.New("production background agent runtime is incomplete")
+	}
+	r.restorer.Bind(ctx)
+	if r.pairHost != nil {
+		go r.pairHost.Run(ctx)
+	}
+	go func() {
+		<-ctx.Done()
+		_ = r.ssh.Close()
+	}()
+	recoveryCtx, cancel := context.WithTimeout(ctx, agentProbeTimeout)
+	_ = r.agent.Reconnect(recoveryCtx)
+	cancel()
+	return r.agent.Run(ctx, interval)
+}
+
+type runtimePairingCoordinator interface {
+	Start(context.Context, string) (localapi.PairStartResult, error)
+	Confirm(context.Context, localapi.PairConfirmParams) (localapi.PairConfirmResult, error)
+	Unpair(context.Context, string) error
+}
+
+type productionAgentController struct {
+	store     config.Store
+	pairing   runtimePairingCoordinator
+	sync      productionSyncInspector
+	status    func() AgentStatus
+	recover   func(context.Context) error
+	afterPair func(context.Context)
+	mu        sync.Mutex
+}
+
+func (c *productionAgentController) Handle(ctx context.Context, method localapi.Method, raw json.RawMessage) (any, error) {
+	switch method {
+	case localapi.MethodListDevices:
+		return c.listDevices()
+	case localapi.MethodPairStart:
+		var params localapi.PairStartParams
+		if err := decodeControlParams(raw, &params); err != nil {
+			return nil, err
+		}
+		return c.pairing.Start(ctx, params.Device)
+	case localapi.MethodPairConfirm:
+		var params localapi.PairConfirmParams
+		if err := decodeControlParams(raw, &params); err != nil {
+			return nil, err
+		}
+		result, err := c.pairing.Confirm(ctx, params)
+		if err == nil && c.afterPair != nil {
+			go c.afterPair(context.Background())
+		}
+		return result, err
+	case localapi.MethodUnpair:
+		var params localapi.UnpairParams
+		if err := decodeControlParams(raw, &params); err != nil {
+			return nil, err
+		}
+		if err := c.pairing.Unpair(ctx, params.DeviceID); err != nil {
+			return nil, err
+		}
+		return map[string]bool{"unpaired": true}, nil
+	case localapi.MethodWorkspaceAdd:
+		var params localapi.WorkspaceAddParams
+		if err := decodeControlParams(raw, &params); err != nil {
+			return nil, err
+		}
+		return c.addWorkspace(params.Path)
+	case localapi.MethodWorkspaceList:
+		return c.listWorkspaces()
+	case localapi.MethodWorkspaceRemove:
+		var params localapi.WorkspaceRemoveParams
+		if err := decodeControlParams(raw, &params); err != nil {
+			return nil, err
+		}
+		return c.removeWorkspace(params.ID)
+	case localapi.MethodSyncStatus:
+		cfg, err := loadAgentConfig(c.store)
+		if err != nil {
+			return nil, unavailable("cannot read sync configuration")
+		}
+		return c.sync.Status(ctx, cfg)
+	case localapi.MethodDoctor:
+		status := AgentStatus{State: AgentNeedsAction, Message: "background agent status is unavailable"}
+		if c.status != nil {
+			status = c.status()
+		}
+		return localapi.DoctorResult{Checks: []localapi.DoctorCheck{{
+			Name: "agent_state", OK: status.State == AgentReady, Message: status.Message,
+		}}}, nil
+	case localapi.MethodRecover:
+		if c.recover == nil {
+			return nil, unavailable("recovery infrastructure is unavailable")
+		}
+		if err := c.recover(ctx); err != nil {
+			return nil, err
+		}
+		status := c.status()
+		return localapi.RecoverResult{State: string(status.State), Message: status.Message}, nil
+	default:
+		return nil, &localapi.PublicError{Code: localapi.ErrorInvalidRequest, Message: "unsupported agent operation"}
+	}
+}
+
+func (c *productionAgentController) listDevices() (localapi.ListDevicesResult, error) {
+	cfg, err := loadAgentConfig(c.store)
+	if err != nil {
+		return localapi.ListDevicesResult{}, unavailable("cannot read paired devices")
+	}
+	result := localapi.ListDevicesResult{Devices: []localapi.Device{}}
+	for id, device := range cfg.Devices {
+		result.Devices = append(result.Devices, localapi.Device{ID: id, Name: device.Name, Address: device.Address})
+	}
+	sort.Slice(result.Devices, func(i, j int) bool { return result.Devices[i].ID < result.Devices[j].ID })
+	return result, nil
+}
+
+func (c *productionAgentController) addWorkspace(path string) (localapi.Workspace, error) {
+	canonical, err := canonicalWorkspacePath(path)
+	if err != nil {
+		return localapi.Workspace{}, &localapi.PublicError{Code: localapi.ErrorInvalidRequest, Message: "workspace must be an existing directory"}
+	}
+	digest := sha256.Sum256([]byte(canonical))
+	id := hex.EncodeToString(digest[:8])
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cfg, err := loadAgentConfig(c.store)
+	if err != nil {
+		return localapi.Workspace{}, unavailable("cannot read workspace configuration")
+	}
+	if cfg.Workspaces == nil {
+		cfg.Workspaces = make(map[string]config.Workspace)
+	}
+	for existingID, existing := range cfg.Workspaces {
+		if existing.Path == canonical {
+			return localapi.Workspace{ID: existingID, Path: canonical}, nil
+		}
+	}
+	cfg.Workspaces[id] = config.Workspace{Path: canonical}
+	if err := c.store.Save(cfg); err != nil {
+		return localapi.Workspace{}, unavailable("cannot save workspace configuration")
+	}
+	return localapi.Workspace{ID: id, Path: canonical}, nil
+}
+
+func (c *productionAgentController) listWorkspaces() (localapi.WorkspaceListResult, error) {
+	cfg, err := loadAgentConfig(c.store)
+	if err != nil {
+		return localapi.WorkspaceListResult{}, unavailable("cannot read workspace configuration")
+	}
+	result := localapi.WorkspaceListResult{Workspaces: []localapi.Workspace{}}
+	for id, workspace := range cfg.Workspaces {
+		result.Workspaces = append(result.Workspaces, localapi.Workspace{ID: id, Path: workspace.Path})
+	}
+	sort.Slice(result.Workspaces, func(i, j int) bool { return result.Workspaces[i].ID < result.Workspaces[j].ID })
+	return result, nil
+}
+
+func (c *productionAgentController) removeWorkspace(id string) (map[string]bool, error) {
+	if strings.TrimSpace(id) == "" {
+		return nil, &localapi.PublicError{Code: localapi.ErrorInvalidRequest, Message: "workspace ID is required"}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cfg, err := loadAgentConfig(c.store)
+	if err != nil {
+		return nil, unavailable("cannot read workspace configuration")
+	}
+	if _, ok := cfg.Workspaces[id]; !ok {
+		return nil, needsAction("workspace was not found")
+	}
+	delete(cfg.Workspaces, id)
+	if err := c.store.Save(cfg); err != nil {
+		return nil, unavailable("cannot save workspace configuration")
+	}
+	return map[string]bool{"removed": true}, nil
+}
+
+func decodeControlParams(raw json.RawMessage, destination any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return &localapi.PublicError{Code: localapi.ErrorInvalidRequest, Message: "invalid agent operation parameters"}
+	}
+	return nil
+}
+
+func canonicalWorkspacePath(value string) (string, error) {
+	absolute, err := filepath.Abs(value)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(absolute)
+	if err != nil || !info.IsDir() {
+		return "", errors.New("workspace is not a directory")
+	}
+	canonical, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Abs(canonical)
+}
+
+type productionAgentObserver struct {
+	store          config.Store
+	knownHostsPath string
+	dockerCLI      string
+	dockerContext  string
+	secrets        credentials.Store
+	httpClient     *http.Client
+}
+
+func (o *productionAgentObserver) Observe(ctx context.Context) AgentObservation {
+	cfg, err := loadAgentConfig(o.store)
+	if err != nil {
+		return AgentObservation{Err: err}
+	}
+	if cfg.ActiveDevice == "" {
+		return AgentObservation{}
+	}
+	device, ok := cfg.Devices[cfg.ActiveDevice]
+	if !ok {
+		return AgentObservation{Paired: true, NeedsAction: "active paired device is missing"}
+	}
+	observation := AgentObservation{Paired: true}
+	if strings.TrimSpace(device.SSHHostPublicKey) == "" || strings.TrimSpace(device.SyncthingDeviceID) == "" {
+		observation.NeedsAction = "paired device metadata is incomplete; pair the device again"
+		return observation
+	}
+	alias := "remote-docker-device-" + cfg.ActiveDevice
+	pinned, err := knownHostPinned(o.knownHostsPath, alias, device.SSHHostPublicKey)
+	if err != nil || !pinned {
+		return observation
+	}
+	observation.PinnedSSH = true
+	probeCtx, cancel := context.WithTimeout(ctx, agentProbeTimeout)
+	defer cancel()
+	if err := (dockercli.Runner{}).Run(probeCtx, dockercli.Invocation{
+		Binary: o.dockerCLI,
+		Args:   []string{"--context", o.dockerContext, "version", "--format", "{{.Server.Version}}"},
+		Stdout: io.Discard, Stderr: io.Discard,
+	}); err != nil {
+		return observation
+	}
+	observation.DockerPing = true
+	inspector := productionSyncInspector{secrets: o.secrets, httpClient: o.httpClient}
+	connected, err := inspector.Connected(probeCtx, cfg)
+	if err == nil {
+		observation.SyncthingConnected = connected
+	}
+	return observation
+}
+
+func knownHostPinned(path, alias, expected string) (bool, error) {
+	expectedKey, _, _, rest, err := ssh.ParseAuthorizedKey([]byte(expected))
+	if err != nil || len(bytes.TrimSpace(rest)) != 0 {
+		return false, errors.New("expected SSH host key is invalid")
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	for len(contents) > 0 {
+		_, hosts, key, _, remaining, parseErr := ssh.ParseKnownHosts(contents)
+		if parseErr != nil {
+			return false, parseErr
+		}
+		contents = remaining
+		for _, host := range hosts {
+			if host == alias && bytes.Equal(key.Marshal(), expectedKey.Marshal()) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+type productionSyncInspector struct {
+	secrets    credentials.Store
+	httpClient *http.Client
+}
+
+func (i productionSyncInspector) client(cfg config.Config) (*syncer.Client, config.Device, error) {
+	device, ok := cfg.Devices[cfg.ActiveDevice]
+	if cfg.ActiveDevice == "" || !ok || strings.TrimSpace(device.SyncthingDeviceID) == "" {
+		return nil, config.Device{}, errors.New("paired Syncthing device is unavailable")
+	}
+	client, err := syncer.NewClient("http://127.0.0.1:8384", cfg.ActiveDevice, i.secrets, i.httpClient)
+	return client, device, err
+}
+
+func (i productionSyncInspector) Connected(ctx context.Context, cfg config.Config) (bool, error) {
+	client, device, err := i.client(cfg)
+	if err != nil {
+		return false, err
+	}
+	connections, err := client.Connections(ctx)
+	if err != nil {
+		return false, err
+	}
+	return connections[device.SyncthingDeviceID].Connected, nil
+}
+
+func (i productionSyncInspector) Status(ctx context.Context, cfg config.Config) (localapi.SyncStatusResult, error) {
+	client, device, err := i.client(cfg)
+	if err != nil {
+		return localapi.SyncStatusResult{}, unavailable("Syncthing status is unavailable")
+	}
+	connections, err := client.Connections(ctx)
+	if err != nil {
+		return localapi.SyncStatusResult{}, unavailable("Syncthing status is unavailable")
+	}
+	connected := connections[device.SyncthingDeviceID].Connected
+	result := localapi.SyncStatusResult{Folders: []localapi.SyncFolderStatus{}}
+	ids := make([]string, 0, len(cfg.Workspaces))
+	for id := range cfg.Workspaces {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		status, statusErr := client.FolderStatus(ctx, id)
+		if statusErr != nil {
+			return localapi.SyncStatusResult{}, unavailable("Syncthing folder status is unavailable")
+		}
+		result.Folders = append(result.Folders, localapi.SyncFolderStatus{
+			WorkspaceID: id, State: status.State, Connected: connected,
+		})
+	}
+	return result, nil
+}
+
+type infrastructureFactory func() (portrelay.Reconciler, error)
+
+type infrastructureRestorer struct {
+	factory infrastructureFactory
+	mu      sync.Mutex
+	life    context.Context
+	cancel  context.CancelFunc
+	current *portrelay.Reconciler
+}
+
+func newInfrastructureRestorer(factory infrastructureFactory) *infrastructureRestorer {
+	return &infrastructureRestorer{factory: factory}
+}
+
+func (r *infrastructureRestorer) Bind(ctx context.Context) {
+	r.mu.Lock()
+	r.life = ctx
+	r.mu.Unlock()
+}
+
+func (r *infrastructureRestorer) RestoreEventStream(context.Context) error {
+	if r == nil || r.factory == nil {
+		return unavailable("Docker event reconciliation is unavailable")
+	}
+	reconciler, err := r.factory()
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	if r.life == nil {
+		r.mu.Unlock()
+		return unavailable("background agent lifecycle is unavailable")
+	}
+	if r.cancel != nil {
+		r.cancel()
+	}
+	runCtx, cancel := context.WithCancel(r.life)
+	r.cancel = cancel
+	r.current = &reconciler
+	r.mu.Unlock()
+	go func() { _ = reconciler.Run(runCtx) }()
+	return nil
+}
+
+func (r *infrastructureRestorer) RestoreRelays(ctx context.Context) error {
+	r.mu.Lock()
+	current := r.current
+	r.mu.Unlock()
+	if current == nil {
+		return unavailable("port relay reconciliation is unavailable")
+	}
+	if err := current.Reconcile(ctx); err != nil {
+		return unavailable("port relay reconciliation failed")
+	}
+	return nil
+}
+
+type managedSSHRuntime struct {
+	store           config.Store
+	secrets         credentials.Store
+	sshConfigPath   string
+	knownHostsPath  string
+	agentSocketPath string
+	controlDir      string
+	mu              sync.Mutex
+	deviceID        string
+	managed         *sshtransport.ManagedAgent
+}
+
+func (r *managedSSHRuntime) Ensure(ctx context.Context) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cfg, err := loadAgentConfig(r.store)
+	if err != nil || cfg.ActiveDevice == "" {
+		return errors.New("paired SSH device is unavailable")
+	}
+	device, ok := cfg.Devices[cfg.ActiveDevice]
+	if !ok {
+		return errors.New("paired SSH device is unavailable")
+	}
+	if r.managed != nil && r.deviceID == cfg.ActiveDevice {
+		return nil
+	}
+	if r.managed != nil {
+		_ = r.managed.Close()
+		r.managed = nil
+	}
+	if err := os.MkdirAll(filepath.Dir(r.agentSocketPath), 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(filepath.Dir(r.agentSocketPath), 0o700); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(r.controlDir, 0o700); err != nil {
+		return err
+	}
+	_ = os.Remove(r.agentSocketPath)
+	privateKey, err := r.secrets.Get(cfg.ActiveDevice, sshtransport.SSHPrivateKeyCredential)
+	if err != nil {
+		return err
+	}
+	managed, err := (sshtransport.Agent{}).Start(ctx, r.agentSocketPath, privateKey)
+	if err != nil {
+		return err
+	}
+	if err := sshtransport.WriteConfig(r.sshConfigPath, sshtransport.Config{
+		DeviceID: cfg.ActiveDevice, HostName: device.Address, Port: device.SSHPort,
+		AgentSocket: r.agentSocketPath, KnownHostsFile: r.knownHostsPath, ControlDir: r.controlDir,
+	}); err != nil {
+		_ = managed.Close()
+		return err
+	}
+	r.managed = managed
+	r.deviceID = cfg.ActiveDevice
+	return nil
+}
+
+func (r *managedSSHRuntime) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.managed == nil {
+		return nil
+	}
+	err := r.managed.Close()
+	r.managed = nil
+	r.deviceID = ""
+	return err
+}
+
+type windowsPairingHost struct {
+	server    *pairing.Server
+	publisher discovery.Publisher
+}
+
+func newWindowsPairingHost(installer pairing.Installer) (*windowsPairingHost, error) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	server, err := pairing.NewServer(pairing.ServerIdentity{PrivateKey: privateKey}, pairing.WithInstaller(installer))
+	if err != nil {
+		return nil, err
+	}
+	return &windowsPairingHost{server: server, publisher: discovery.ZeroconfPublisher{}}, nil
+}
+
+func (h *windowsPairingHost) Run(ctx context.Context) {
+	address, err := privateListenAddress()
+	if err != nil {
+		return
+	}
+	listener, err := pairing.ListenPrivate("tcp", net.JoinHostPort(address.String(), "0"))
+	if err != nil {
+		return
+	}
+	defer listener.Close()
+	tlsConfig, err := h.server.TLSConfig()
+	if err != nil {
+		return
+	}
+	instanceID, err := randomDeviceID()
+	if err != nil {
+		return
+	}
+	advertisement, err := discovery.PairingAdvertisement(instanceID, listener.Addr().(*net.TCPAddr).Port)
+	if err != nil {
+		return
+	}
+	registration, err := h.publisher.Publish(ctx, advertisement)
+	if err != nil {
+		return
+	}
+	defer registration.Shutdown()
+	server := &http.Server{Handler: h.server, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		<-ctx.Done()
+		_ = server.Close()
+	}()
+	_ = server.Serve(tls.NewListener(listener, tlsConfig))
+}
+
+type windowsPairingCoordinator struct {
+	server    *pairing.Server
+	installer pairing.Installer
+}
+
+func (c windowsPairingCoordinator) Start(context.Context, string) (localapi.PairStartResult, error) {
+	descriptor, code, ok := c.server.ActiveSession()
+	if !ok {
+		return localapi.PairStartResult{}, needsAction("waiting for a Mac pairing request on the private network")
+	}
+	return localapi.PairStartResult{SessionID: descriptor.ID, Code: code}, nil
+}
+
+func (windowsPairingCoordinator) Confirm(context.Context, localapi.PairConfirmParams) (localapi.PairConfirmResult, error) {
+	return localapi.PairConfirmResult{}, needsAction("confirm pairing from the Mac after comparing both codes")
+}
+
+func (c windowsPairingCoordinator) Unpair(ctx context.Context, deviceID string) error {
+	if strings.TrimSpace(deviceID) == "" {
+		return needsAction("client device ID is required")
+	}
+	if err := c.installer.Revoke(ctx, deviceID); err != nil {
+		return unavailable("managed pairing revocation failed")
+	}
+	return nil
+}
+
+func privateListenAddress() (net.IP, error) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addresses, addressErr := iface.Addrs()
+		if addressErr != nil {
+			continue
+		}
+		for _, address := range addresses {
+			host, _, splitErr := net.SplitHostPort(address.String())
+			if splitErr != nil {
+				host = strings.Split(address.String(), "/")[0]
+			}
+			ip := net.ParseIP(strings.Split(host, "%")[0])
+			if ip != nil && ip.IsPrivate() {
+				return ip, nil
+			}
+		}
+	}
+	return nil, errors.New("no private network interface is available")
+}

@@ -58,6 +58,119 @@ func TestPairingEndToEnd(t *testing.T) {
 	assertHTTPStatus(t, err, http.StatusConflict)
 }
 
+func TestPairingBootstrapOverTLSBindsClientAndServerKeys(t *testing.T) {
+	identity := newServerIdentity(t)
+	server, err := NewServer(identity)
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	tlsConfig, err := server.TLSConfig()
+	if err != nil {
+		t.Fatalf("TLSConfig() error = %v", err)
+	}
+	httpServer := httptest.NewUnstartedServer(server)
+	httpServer.TLS = tlsConfig
+	httpServer.StartTLS()
+	defer httpServer.Close()
+
+	clientPublicKey, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey(client) error = %v", err)
+	}
+	descriptor, err := Bootstrap(context.Background(), httpServer.URL, clientPublicKey, nil)
+	if err != nil {
+		t.Fatalf("Bootstrap() error = %v", err)
+	}
+	if !bytes.Equal(descriptor.ServerPublicKey, identity.PublicKey()) || !bytes.Equal(descriptor.ClientPublicKey, clientPublicKey) {
+		t.Fatalf("descriptor keys = server %x client %x", descriptor.ServerPublicKey, descriptor.ClientPublicKey)
+	}
+	clientCode, err := Code(descriptor)
+	if err != nil || len(clientCode) != 6 {
+		t.Fatalf("Code() = %q, %v", clientCode, err)
+	}
+	serverDescriptor, serverCode, ok := server.ActiveSession()
+	if !ok || serverDescriptor.ID != descriptor.ID || serverCode != clientCode {
+		t.Fatalf("ActiveSession() = %#v, %q, %t", serverDescriptor, serverCode, ok)
+	}
+
+	_, err = Bootstrap(context.Background(), httpServer.URL, clientPublicKey, nil)
+	assertHTTPStatus(t, err, http.StatusConflict)
+}
+
+func TestPairingConfirmInstallsOnlyManagedClientKeyAndReturnsInstallerMetadata(t *testing.T) {
+	installer := &recordingPairInstaller{device: DeviceInfo{
+		SSHHostPublicKey:  "ssh-ed25519 ACTUAL-WINDOWS-HOST",
+		SyncthingDeviceID: "ACTUAL-SYNCTHING-ID",
+		SSHPort:           49222,
+		SyncthingPort:     49220,
+	}}
+	identity := newServerIdentity(t)
+	server, err := NewServer(identity, WithInstaller(installer))
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	clientPublicKey, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey(client) error = %v", err)
+	}
+	descriptor, err := server.StartSession(clientPublicKey, MaxSessionTTL)
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+	tlsConfig, err := server.TLSConfig()
+	if err != nil {
+		t.Fatalf("TLSConfig() error = %v", err)
+	}
+	httpServer := httptest.NewUnstartedServer(server)
+	httpServer.TLS = tlsConfig
+	httpServer.StartTLS()
+	defer httpServer.Close()
+
+	client := Client{
+		BaseURL: httpServer.URL, Session: descriptor,
+		DeviceID: "mac-device", AuthorizedKey: "ssh-ed25519 MANAGED-MAC-KEY",
+	}
+	code, _ := client.Code()
+	record, raw, err := client.Confirm(context.Background(), code)
+	if err != nil {
+		t.Fatalf("Confirm() error = %v", err)
+	}
+	if installer.installs != 1 || installer.deviceID != "mac-device" || installer.authorizedKey != "ssh-ed25519 MANAGED-MAC-KEY" {
+		t.Fatalf("installer calls=%d device=%q key=%q", installer.installs, installer.deviceID, installer.authorizedKey)
+	}
+	if record.SSHHostPublicKey != installer.device.SSHHostPublicKey || record.SyncthingDeviceID != installer.device.SyncthingDeviceID {
+		t.Fatalf("record = %#v", record)
+	}
+	if record.SSHPort != 49222 || record.SyncthingPort != 49220 {
+		t.Fatalf("record ports = %#v", record)
+	}
+	if bytes.Contains(bytes.ToLower(raw), []byte("private")) {
+		t.Fatalf("pair response contains private material: %s", raw)
+	}
+}
+
+type recordingPairInstaller struct {
+	device        DeviceInfo
+	deviceID      string
+	authorizedKey string
+	installs      int
+	revokes       int
+	err           error
+}
+
+func (i *recordingPairInstaller) Install(_ context.Context, deviceID, authorizedKey string) (DeviceInfo, error) {
+	i.installs++
+	i.deviceID = deviceID
+	i.authorizedKey = authorizedKey
+	return i.device, i.err
+}
+
+func (i *recordingPairInstaller) Revoke(_ context.Context, deviceID string) error {
+	i.revokes++
+	i.deviceID = deviceID
+	return i.err
+}
+
 func TestPairingRejectsWrongAndExpiredCodes(t *testing.T) {
 	t.Run("wrong code", func(t *testing.T) {
 		fixture := newPairingFixture(t)

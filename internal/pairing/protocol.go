@@ -48,6 +48,8 @@ type SessionDescriptor struct {
 type DeviceInfo struct {
 	SSHHostPublicKey  string `json:"ssh_host_public_key"`
 	SyncthingDeviceID string `json:"syncthing_device_id"`
+	SSHPort           int    `json:"ssh_port"`
+	SyncthingPort     int    `json:"syncthing_port"`
 }
 
 // DeviceRecord is the public result of a successful pairing.
@@ -56,6 +58,8 @@ type DeviceRecord struct {
 	AuthorizedKeys    []string `json:"authorized_keys"`
 	SSHHostPublicKey  string   `json:"ssh_host_public_key"`
 	SyncthingDeviceID string   `json:"syncthing_device_id"`
+	SSHPort           int      `json:"ssh_port"`
+	SyncthingPort     int      `json:"syncthing_port"`
 }
 
 // Code calculates the six-digit out-of-band comparison code.
