@@ -64,6 +64,7 @@ func TestAgentLocalAPIDispatchesEveryControlMethod(t *testing.T) {
 	methods := []Method{
 		MethodStatus,
 		MethodListDevices,
+		MethodPairCandidates,
 		MethodPairStart,
 		MethodPairConfirm,
 		MethodUnpair,

@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -223,6 +224,13 @@ func TestMacPairingCoordinatorPersistsPinnedDeviceAndRevokesBeforeLocalRemoval(t
 		AgentSocketPath: filepath.Join(root, "ssh-agent.sock"),
 		ControlDir:      filepath.Join(root, "control"),
 	})
+	candidates, err := coordinator.Candidates(context.Background())
+	if err != nil {
+		t.Fatalf("Candidates() error = %v", err)
+	}
+	if want := []localapi.PairingCandidate{{ID: "windows-peer", Name: "Dev PC"}}; !reflect.DeepEqual(candidates.Candidates, want) {
+		t.Fatalf("candidates = %#v, want %#v", candidates.Candidates, want)
+	}
 
 	started, err := coordinator.Start(context.Background(), "windows-peer")
 	if err != nil {
@@ -281,6 +289,10 @@ type runtimePairingTransport struct {
 	hostKey string
 	private ed25519.PrivateKey
 	revoked string
+}
+
+func (*runtimePairingTransport) Candidates(context.Context) ([]pairingTarget, error) {
+	return []pairingTarget{{Name: "Dev PC", InstanceID: "windows-peer", Address: "192.168.1.20", PairingPort: 43119}}, nil
 }
 
 func (t *runtimePairingTransport) Bootstrap(_ context.Context, _ string, clientPublicKey ed25519.PublicKey) (pairingTarget, pairing.SessionDescriptor, error) {
@@ -460,6 +472,19 @@ func TestWindowsPairingHostRetriesAndPublishesOnReachableLANInterface(t *testing
 	if advertisement.Port != int(listenerPort.Load()) {
 		t.Fatalf("published port = %d, want reachable listener port %d", advertisement.Port, listenerPort.Load())
 	}
+	if !containsTXTKey(advertisement.TXT, "name") {
+		t.Fatalf("advertisement TXT = %#v, want local device name", advertisement.TXT)
+	}
+}
+
+func containsTXTKey(values []string, key string) bool {
+	prefix := key + "="
+	for _, value := range values {
+		if strings.HasPrefix(value, prefix) && len(value) > len(prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestPrivatePeerListenerRejectsPublicPeerAtAcceptBoundary(t *testing.T) {

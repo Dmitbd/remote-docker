@@ -23,23 +23,24 @@ func TestMenuForStatusMapsEveryAgentStateToStablePresentation(t *testing.T) {
 		ActionQuit,
 	}
 	tests := []struct {
-		state string
-		label string
-		icon  Icon
+		state  string
+		paired bool
+		label  string
+		icon   Icon
 	}{
 		{state: "Unpaired", label: "Not paired", icon: IconUnpaired},
-		{state: "Connecting", label: "Connecting", icon: IconConnecting},
-		{state: "EngineStarting", label: "Starting Docker Engine", icon: IconStarting},
-		{state: "Syncing", label: "Syncing workspaces", icon: IconSyncing},
-		{state: "Ready", label: "Ready", icon: IconReady},
-		{state: "Degraded", label: "Connection needs attention", icon: IconDegraded},
-		{state: "NeedsAction", label: "Action required", icon: IconNeedsAction},
+		{state: "Connecting", paired: true, label: "Connecting", icon: IconConnecting},
+		{state: "EngineStarting", paired: true, label: "Starting Docker Engine", icon: IconStarting},
+		{state: "Syncing", paired: true, label: "Syncing workspaces", icon: IconSyncing},
+		{state: "Ready", paired: true, label: "Ready", icon: IconReady},
+		{state: "Degraded", paired: true, label: "Connection needs attention", icon: IconDegraded},
+		{state: "NeedsAction", paired: true, label: "Action required", icon: IconNeedsAction},
 		{state: "unknown", label: "Action required", icon: IconNeedsAction},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.state, func(t *testing.T) {
-			model := MenuForStatus(localapi.StatusResult{State: tt.state, Message: "agent message"})
+			model := MenuForStatus(localapi.StatusResult{State: tt.state, Paired: tt.paired, Message: "agent message"})
 			if model.Label != tt.label || model.Icon != tt.icon {
 				t.Fatalf("MenuForStatus(%q) = label=%q icon=%q, want label=%q icon=%q", tt.state, model.Label, model.Icon, tt.label, tt.icon)
 			}
@@ -56,13 +57,55 @@ func TestMenuForStatusMapsEveryAgentStateToStablePresentation(t *testing.T) {
 	}
 }
 
+func TestMenuAvailabilityUsesExplicitPairedStatus(t *testing.T) {
+	t.Parallel()
+
+	paired := MenuForStatus(localapi.StatusResult{State: "NeedsAction", Paired: true})
+	if actionEnabled(paired.Items, ActionPair) || !actionEnabled(paired.Items, ActionAddWorkspace) || !actionEnabled(paired.Items, ActionUnpair) {
+		t.Fatalf("paired NeedsAction items = %#v", paired.Items)
+	}
+	unpaired := MenuForStatus(localapi.StatusResult{State: "Connecting", Paired: false})
+	if !actionEnabled(unpaired.Items, ActionPair) || actionEnabled(unpaired.Items, ActionAddWorkspace) || actionEnabled(unpaired.Items, ActionUnpair) {
+		t.Fatalf("unpaired Connecting items = %#v", unpaired.Items)
+	}
+}
+
+func TestControllerDiscoversAndPairsSelectedCandidateByOpaqueID(t *testing.T) {
+	t.Parallel()
+
+	candidate := localapi.PairingCandidate{ID: "candidate-1", Name: "Windows Workstation"}
+	client := &recordingClient{results: map[localapi.Method]any{
+		localapi.MethodPairCandidates: localapi.PairCandidatesResult{Candidates: []localapi.PairingCandidate{candidate}},
+		localapi.MethodPairStart:      localapi.PairStartResult{SessionID: "session-1", Code: "654321"},
+	}}
+	controller := NewController(client)
+	model, err := controller.DiscoverPairingCandidates(context.Background())
+	if err != nil {
+		t.Fatalf("DiscoverPairingCandidates error = %v", err)
+	}
+	if !reflect.DeepEqual(model.Candidates, []localapi.PairingCandidate{candidate}) {
+		t.Fatalf("candidates = %#v", model.Candidates)
+	}
+	model, err = controller.PairCandidate(context.Background(), candidate)
+	if err != nil {
+		t.Fatalf("PairCandidate error = %v", err)
+	}
+	if model.Pairing == nil || model.Pairing.DeviceName != "Windows Workstation" || model.Pairing.Code != "654321" {
+		t.Fatalf("pairing = %#v", model.Pairing)
+	}
+	params, ok := client.lastParams(localapi.MethodPairStart).(localapi.PairStartParams)
+	if !ok || params.Device != "candidate-1" {
+		t.Fatalf("PairStart params = %#v", params)
+	}
+}
+
 func TestControllerPairShowsSelectedDeviceAndRequiresExplicitConfirmation(t *testing.T) {
 	t.Parallel()
 
 	client := &recordingClient{results: map[localapi.Method]any{
 		localapi.MethodPairStart:   localapi.PairStartResult{SessionID: "session-1", Code: "123456"},
 		localapi.MethodPairConfirm: localapi.PairConfirmResult{Device: localapi.Device{ID: "device-1", Name: "Windows host"}},
-		localapi.MethodStatus:      localapi.StatusResult{State: "Ready", Message: "connected"},
+		localapi.MethodStatus:      localapi.StatusResult{State: "Ready", Paired: true, Message: "connected"},
 	}}
 	controller := NewController(client)
 
@@ -96,7 +139,7 @@ func TestControllerUsesOnlyLocalAPIForAgentActionsAndBoundsCalls(t *testing.T) {
 	t.Parallel()
 
 	client := &recordingClient{results: map[localapi.Method]any{
-		localapi.MethodStatus:       localapi.StatusResult{State: "Ready"},
+		localapi.MethodStatus:       localapi.StatusResult{State: "Ready", Paired: true},
 		localapi.MethodRecover:      localapi.RecoverResult{State: "Ready"},
 		localapi.MethodDoctor:       localapi.DoctorResult{},
 		localapi.MethodUnpair:       map[string]bool{"unpaired": true},
@@ -125,6 +168,7 @@ func TestControllerUsesOnlyLocalAPIForAgentActionsAndBoundsCalls(t *testing.T) {
 		localapi.MethodStatus,
 		localapi.MethodWorkspaceAdd,
 		localapi.MethodRecover,
+		localapi.MethodStatus,
 		localapi.MethodDoctor,
 		localapi.MethodUnpair,
 	}
@@ -201,4 +245,13 @@ func (c *recordingClient) lastParams(method localapi.Method) any {
 		}
 	}
 	return nil
+}
+
+func actionEnabled(items []Item, action Action) bool {
+	for _, item := range items {
+		if item.Action == action {
+			return item.Enabled
+		}
+	}
+	return false
 }

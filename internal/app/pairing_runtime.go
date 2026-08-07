@@ -34,12 +34,14 @@ import (
 const pairingDiscoveryTimeout = 3 * time.Second
 
 type pairingTarget struct {
+	InstanceID  string
 	Name        string
 	Address     string
 	PairingPort int
 }
 
 type pairingTransport interface {
+	Candidates(context.Context) ([]pairingTarget, error)
 	Bootstrap(context.Context, string, ed25519.PublicKey) (pairingTarget, pairing.SessionDescriptor, error)
 	Confirm(context.Context, pairingTarget, pairing.SessionDescriptor, string, string, string) (pairing.DeviceRecord, error)
 	Revoke(context.Context, config.Device, string) error
@@ -74,6 +76,30 @@ type macPairingCoordinator struct {
 
 func newMacPairingCoordinator(options macPairingOptions) *macPairingCoordinator {
 	return &macPairingCoordinator{options: options}
+}
+
+func (c *macPairingCoordinator) Candidates(ctx context.Context) (localapi.PairCandidatesResult, error) {
+	if c == nil || c.options.Transport == nil {
+		return localapi.PairCandidatesResult{}, unavailable("pairing discovery is unavailable")
+	}
+	targets, err := c.options.Transport.Candidates(ctx)
+	if err != nil {
+		return localapi.PairCandidatesResult{}, unavailable("cannot discover pairing devices")
+	}
+	result := localapi.PairCandidatesResult{Candidates: make([]localapi.PairingCandidate, 0, len(targets))}
+	for _, target := range targets {
+		if strings.TrimSpace(target.InstanceID) == "" || strings.TrimSpace(target.Name) == "" {
+			continue
+		}
+		result.Candidates = append(result.Candidates, localapi.PairingCandidate{ID: target.InstanceID, Name: target.Name})
+	}
+	sort.Slice(result.Candidates, func(i, j int) bool {
+		if result.Candidates[i].Name == result.Candidates[j].Name {
+			return result.Candidates[i].ID < result.Candidates[j].ID
+		}
+		return result.Candidates[i].Name < result.Candidates[j].Name
+	})
+	return result, nil
 }
 
 func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (localapi.PairStartResult, error) {
@@ -251,6 +277,26 @@ type discoveryPairingTransport struct {
 	bootstrap     func(context.Context, string, ed25519.PublicKey) (pairing.SessionDescriptor, error)
 }
 
+func (t discoveryPairingTransport) Candidates(ctx context.Context) ([]pairingTarget, error) {
+	peers, err := t.discoverPeers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	targets := make([]pairingTarget, 0, len(peers))
+	for _, peer := range peers {
+		if !peer.Pairing || len(peer.Addresses) == 0 {
+			continue
+		}
+		targets = append(targets, pairingTarget{
+			InstanceID:  peer.InstanceID,
+			Name:        peer.Name,
+			Address:     peer.Addresses[0].String(),
+			PairingPort: peer.Port,
+		})
+	}
+	return targets, nil
+}
+
 func (t discoveryPairingTransport) Bootstrap(ctx context.Context, selector string, clientPublicKey ed25519.PublicKey) (pairingTarget, pairing.SessionDescriptor, error) {
 	peers, err := t.discoverPeers(ctx)
 	if err != nil {
@@ -268,7 +314,7 @@ func (t discoveryPairingTransport) Bootstrap(ctx context.Context, selector strin
 	}
 	var lastErr error
 	for _, address := range addresses {
-		target := pairingTarget{Name: peer.InstanceID, Address: address.String(), PairingPort: peer.Port}
+		target := pairingTarget{InstanceID: peer.InstanceID, Name: peer.Name, Address: address.String(), PairingPort: peer.Port}
 		endpoint := "https://" + net.JoinHostPort(target.Address, fmt.Sprintf("%d", target.PairingPort))
 		descriptor, bootstrapErr := bootstrap(ctx, endpoint, clientPublicKey)
 		if bootstrapErr == nil {

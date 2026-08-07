@@ -169,7 +169,7 @@ func (d productionDiagnostics) Recover(ctx context.Context) (diagnostics.Recover
 		if d.options.Platform == "windows" {
 			ready := checksReady(health.Checks, "wsl_running", "systemd_target", "docker_socket", "disk", "syncthing")
 			if ready {
-				latest = AgentStatus{State: AgentReady, Message: "connected"}
+				latest = AgentStatus{State: AgentReady, Paired: true, Message: "connected"}
 			}
 			return ready, nil
 		}
@@ -245,9 +245,9 @@ func safeAgentStatus(status AgentStatus) AgentStatus {
 	}
 	message, ok := messages[status.State]
 	if !ok {
-		return AgentStatus{State: AgentNeedsAction, Message: "background agent needs attention"}
+		return AgentStatus{State: AgentNeedsAction, Paired: status.Paired, Message: "background agent needs attention"}
 	}
-	return AgentStatus{State: status.State, Message: message}
+	return AgentStatus{State: status.State, Paired: status.Paired, Message: message}
 }
 
 type remoteDiagnosticsMethod string

@@ -3,13 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
-	"flag"
+	"encoding/binary"
 	"fmt"
 	"image"
 	"image/color"
 	"image/draw"
 	"image/png"
 	"sync"
+	"time"
 
 	"fyne.io/systray"
 	"github.com/Dmitbd/remote-docker/internal/localapi"
@@ -17,42 +18,41 @@ import (
 )
 
 var icons = map[tray.Icon][]byte{
-	tray.IconUnpaired:    statusIcon(color.RGBA{R: 128, G: 128, B: 128, A: 255}),
-	tray.IconConnecting:  statusIcon(color.RGBA{R: 54, G: 123, B: 245, A: 255}),
-	tray.IconStarting:    statusIcon(color.RGBA{R: 230, G: 152, B: 0, A: 255}),
-	tray.IconSyncing:     statusIcon(color.RGBA{R: 119, G: 73, B: 204, A: 255}),
-	tray.IconReady:       statusIcon(color.RGBA{R: 37, G: 145, B: 70, A: 255}),
-	tray.IconDegraded:    statusIcon(color.RGBA{R: 206, G: 99, B: 0, A: 255}),
-	tray.IconNeedsAction: statusIcon(color.RGBA{R: 190, G: 43, B: 43, A: 255}),
+	tray.IconUnpaired:    statusPNG(color.RGBA{R: 128, G: 128, B: 128, A: 255}),
+	tray.IconConnecting:  statusPNG(color.RGBA{R: 54, G: 123, B: 245, A: 255}),
+	tray.IconStarting:    statusPNG(color.RGBA{R: 230, G: 152, B: 0, A: 255}),
+	tray.IconSyncing:     statusPNG(color.RGBA{R: 119, G: 73, B: 204, A: 255}),
+	tray.IconReady:       statusPNG(color.RGBA{R: 37, G: 145, B: 70, A: 255}),
+	tray.IconDegraded:    statusPNG(color.RGBA{R: 206, G: 99, B: 0, A: 255}),
+	tray.IconNeedsAction: statusPNG(color.RGBA{R: 190, G: 43, B: 43, A: 255}),
 }
 
 func main() {
-	device := flag.String("device", "", "paired device name to select when starting pairing")
-	workspace := flag.String("workspace", "", "workspace directory to add from the tray menu")
-	flag.Parse()
-
-	presentation := newPresentation(*device, *workspace)
+	presentation := newPresentation(nativeDirectoryPicker{})
 	systray.Run(presentation.ready, nil)
+}
+
+type directoryPicker interface {
+	Choose(context.Context) (string, error)
 }
 
 type presentation struct {
 	controller *tray.Controller
-	device     string
-	workspace  string
+	picker     directoryPicker
 
-	mu       sync.Mutex
-	items    map[tray.Action]*systray.MenuItem
-	pairing  *systray.MenuItem
-	pairCode *systray.MenuItem
-	confirm  *systray.MenuItem
+	mu         sync.Mutex
+	items      map[tray.Action]*systray.MenuItem
+	pairing    *systray.MenuItem
+	pairCode   *systray.MenuItem
+	confirm    *systray.MenuItem
+	candidates []*systray.MenuItem
 }
 
-func newPresentation(device, workspace string) *presentation {
+func newPresentation(picker directoryPicker) *presentation {
 	controller := tray.NewController(localapi.Client{})
 	presentation := &presentation{
 		controller: controller,
-		device:     device,
-		workspace:  workspace,
+		picker:     picker,
 		items:      make(map[tray.Action]*systray.MenuItem),
 	}
 	controller.Present = presentation.apply
@@ -92,14 +92,22 @@ func (p *presentation) listen(action tray.Action, item *systray.MenuItem) {
 }
 
 func (p *presentation) invoke(action tray.Action) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
 	switch action {
 	case tray.ActionPair:
-		_, _ = p.controller.Pair(ctx, p.device)
+		_, _ = p.controller.DiscoverPairingCandidates(ctx)
 	case tray.ActionOpenStatus:
 		_, _ = p.controller.OpenStatus(ctx)
 	case tray.ActionAddWorkspace:
-		_, _ = p.controller.AddWorkspace(ctx, p.workspace)
+		if p.picker == nil {
+			return
+		}
+		path, err := p.picker.Choose(ctx)
+		if err != nil {
+			return
+		}
+		_, _ = p.controller.AddWorkspace(ctx, path)
 	case tray.ActionRetry:
 		_, _ = p.controller.Retry(ctx)
 	case tray.ActionRunDiagnostics:
@@ -137,6 +145,7 @@ func (p *presentation) apply(_ context.Context, model tray.Model) {
 			menuItem.Disable()
 		}
 	}
+	p.updateCandidates(model.Candidates)
 	if model.Pairing == nil {
 		p.pairing.SetTitle("No pairing is pending")
 		p.pairCode.SetTitle("")
@@ -150,12 +159,12 @@ func (p *presentation) apply(_ context.Context, model tray.Model) {
 
 func iconFor(icon tray.Icon) []byte {
 	if image := icons[icon]; len(image) > 0 {
-		return image
+		return platformIcon(image)
 	}
-	return icons[tray.IconNeedsAction]
+	return platformIcon(icons[tray.IconNeedsAction])
 }
 
-func statusIcon(fill color.RGBA) []byte {
+func statusPNG(fill color.RGBA) []byte {
 	canvas := image.NewNRGBA(image.Rect(0, 0, 16, 16))
 	draw.Draw(canvas, canvas.Bounds(), &image.Uniform{C: fill}, image.Point{}, draw.Src)
 	var output bytes.Buffer
@@ -163,4 +172,59 @@ func statusIcon(fill color.RGBA) []byte {
 		return nil
 	}
 	return output.Bytes()
+}
+
+func icoFromPNG(pngBytes []byte) []byte {
+	if len(pngBytes) == 0 {
+		return nil
+	}
+	icon := make([]byte, 22, 22+len(pngBytes))
+	binary.LittleEndian.PutUint16(icon[2:4], 1)
+	binary.LittleEndian.PutUint16(icon[4:6], 1)
+	icon[6], icon[7] = 16, 16
+	binary.LittleEndian.PutUint16(icon[10:12], 1)
+	binary.LittleEndian.PutUint16(icon[12:14], 32)
+	binary.LittleEndian.PutUint32(icon[14:18], uint32(len(pngBytes)))
+	binary.LittleEndian.PutUint32(icon[18:22], 22)
+	return append(icon, pngBytes...)
+}
+
+func (p *presentation) updateCandidates(candidates []localapi.PairingCandidate) {
+	for _, item := range p.candidates {
+		item.Remove()
+	}
+	p.candidates = nil
+	parent := p.items[tray.ActionPair]
+	if parent == nil {
+		return
+	}
+	nameCounts := make(map[string]int, len(candidates))
+	for _, candidate := range candidates {
+		nameCounts[candidate.Name]++
+	}
+	for _, candidate := range candidates {
+		candidate := candidate
+		label := candidate.Name
+		if nameCounts[candidate.Name] > 1 {
+			label += " — " + shortCandidateID(candidate.ID)
+		}
+		item := parent.AddSubMenuItem(label, "Pair with "+candidate.Name)
+		p.candidates = append(p.candidates, item)
+		go func() {
+			for range item.ClickedCh {
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					_, _ = p.controller.PairCandidate(ctx, candidate)
+				}()
+			}
+		}()
+	}
+}
+
+func shortCandidateID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
 }

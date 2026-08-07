@@ -33,6 +33,9 @@ func TestAgentStateMachineRequiresPinnedSSHDockerPingAndSyncthing(t *testing.T) 
 			if status.State != tt.want {
 				t.Fatalf("state = %q, want %q", status.State, tt.want)
 			}
+			if status.Paired != tt.observation.Paired {
+				t.Fatalf("paired = %t, want %t", status.Paired, tt.observation.Paired)
+			}
 		})
 	}
 }
@@ -48,6 +51,21 @@ func TestAgentStateMachineDegradesAfterReadyProbeFailure(t *testing.T) {
 	status := agent.Refresh(context.Background())
 	if status.State != AgentDegraded || !strings.Contains(status.Message, "connection") {
 		t.Fatalf("degraded status = %#v", status)
+	}
+}
+
+func TestAgentStatusHandlerPublishesExplicitPairedFlag(t *testing.T) {
+	agent := NewAgent(&sequenceObserver{observations: []AgentObservation{{
+		Paired: true, PinnedSSH: true, DockerPing: true, SyncthingConnected: true,
+	}}}, nil, nil)
+	agent.Refresh(context.Background())
+	result, err := agent.Handle(context.Background(), localapi.MethodStatus, nil)
+	if err != nil {
+		t.Fatalf("Handle(Status) error = %v", err)
+	}
+	status, ok := result.(localapi.StatusResult)
+	if !ok || !status.Paired || status.State != string(AgentReady) {
+		t.Fatalf("status = %#v", result)
 	}
 }
 
@@ -76,6 +94,7 @@ func TestAgentHandlerRoutesAllControlOperations(t *testing.T) {
 	agent := NewAgent(&sequenceObserver{}, nil, controller)
 	methods := []localapi.Method{
 		localapi.MethodListDevices,
+		localapi.MethodPairCandidates,
 		localapi.MethodPairStart,
 		localapi.MethodPairConfirm,
 		localapi.MethodUnpair,
@@ -103,6 +122,7 @@ func TestAgentCLIControlCommandsAndJSONOutput(t *testing.T) {
 		method localapi.Method
 	}{
 		{name: "status", args: []string{"status"}, method: localapi.MethodStatus},
+		{name: "pair candidates", args: []string{"pair", "candidates"}, method: localapi.MethodPairCandidates},
 		{name: "pair start", args: []string{"pair", "start", "host"}, method: localapi.MethodPairStart},
 		{name: "pair confirm", args: []string{"pair", "confirm", "session", "123456"}, method: localapi.MethodPairConfirm},
 		{name: "unpair", args: []string{"unpair", "device"}, method: localapi.MethodUnpair},

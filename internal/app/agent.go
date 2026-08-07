@@ -24,6 +24,7 @@ const (
 
 type AgentStatus struct {
 	State   AgentState `json:"state"`
+	Paired  bool       `json:"paired"`
 	Message string     `json:"message,omitempty"`
 }
 
@@ -89,34 +90,35 @@ func (a *Agent) Refresh(ctx context.Context) AgentStatus {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	previous := a.status.State
+	previous := a.status
 	a.status = evaluateAgent(previous, observation)
 	return a.status
 }
 
-func evaluateAgent(previous AgentState, observation AgentObservation) AgentStatus {
+func evaluateAgent(previous AgentStatus, observation AgentObservation) AgentStatus {
 	if observation.NeedsAction != "" {
-		return AgentStatus{State: AgentNeedsAction, Message: observation.NeedsAction}
+		return AgentStatus{State: AgentNeedsAction, Paired: observation.Paired, Message: observation.NeedsAction}
 	}
 	if observation.Err != nil {
-		if previous == AgentReady || previous == AgentDegraded {
-			return AgentStatus{State: AgentDegraded, Message: "connection health check failed"}
+		paired := observation.Paired || previous.Paired
+		if previous.State == AgentReady || previous.State == AgentDegraded {
+			return AgentStatus{State: AgentDegraded, Paired: paired, Message: "connection health check failed"}
 		}
-		return AgentStatus{State: AgentNeedsAction, Message: "background agent health check failed"}
+		return AgentStatus{State: AgentNeedsAction, Paired: paired, Message: "background agent health check failed"}
 	}
 	if !observation.Paired {
 		return AgentStatus{State: AgentUnpaired, Message: "pair a device to continue"}
 	}
 	if !observation.PinnedSSH {
-		return AgentStatus{State: AgentConnecting, Message: "establishing pinned SSH connection"}
+		return AgentStatus{State: AgentConnecting, Paired: true, Message: "establishing pinned SSH connection"}
 	}
 	if !observation.DockerPing {
-		return AgentStatus{State: AgentEngineStarting, Message: "waiting for Docker Engine"}
+		return AgentStatus{State: AgentEngineStarting, Paired: true, Message: "waiting for Docker Engine"}
 	}
 	if !observation.SyncthingConnected {
-		return AgentStatus{State: AgentSyncing, Message: "waiting for Syncthing connection"}
+		return AgentStatus{State: AgentSyncing, Paired: true, Message: "waiting for Syncthing connection"}
 	}
-	return AgentStatus{State: AgentReady, Message: "connected"}
+	return AgentStatus{State: AgentReady, Paired: true, Message: "connected"}
 }
 
 func (a *Agent) Reconnect(ctx context.Context) error {
@@ -159,7 +161,7 @@ func (a *Agent) Run(ctx context.Context, interval time.Duration) error {
 func (a *Agent) Handle(ctx context.Context, method localapi.Method, params json.RawMessage) (any, error) {
 	if method == localapi.MethodStatus {
 		status := a.Status()
-		return localapi.StatusResult{State: string(status.State), Message: status.Message}, nil
+		return localapi.StatusResult{State: string(status.State), Paired: status.Paired, Message: status.Message}, nil
 	}
 	if a == nil || a.controller == nil {
 		return nil, &localapi.PublicError{Code: localapi.ErrorUnavailable, Message: "agent operation is unavailable"}

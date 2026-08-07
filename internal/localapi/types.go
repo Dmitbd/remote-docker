@@ -6,13 +6,14 @@ import (
 	"fmt"
 )
 
-const CurrentSchemaVersion = 1
+const CurrentSchemaVersion = 2
 
 type Method string
 
 const (
 	MethodStatus          Method = "Status"
 	MethodListDevices     Method = "ListDevices"
+	MethodPairCandidates  Method = "PairCandidates"
 	MethodPairStart       Method = "PairStart"
 	MethodPairConfirm     Method = "PairConfirm"
 	MethodUnpair          Method = "Unpair"
@@ -26,7 +27,7 @@ const (
 
 func (m Method) valid() bool {
 	switch m {
-	case MethodStatus, MethodListDevices, MethodPairStart, MethodPairConfirm,
+	case MethodStatus, MethodListDevices, MethodPairCandidates, MethodPairStart, MethodPairConfirm,
 		MethodUnpair, MethodWorkspaceAdd, MethodWorkspaceList,
 		MethodWorkspaceRemove, MethodSyncStatus, MethodDoctor, MethodRecover:
 		return true
@@ -82,6 +83,7 @@ func (f HandlerFunc) Handle(ctx context.Context, method Method, params json.RawM
 
 type StatusResult struct {
 	State   string `json:"state"`
+	Paired  bool   `json:"paired"`
 	Message string `json:"message,omitempty"`
 }
 
@@ -93,6 +95,15 @@ type Device struct {
 
 type ListDevicesResult struct {
 	Devices []Device `json:"devices"`
+}
+
+type PairingCandidate struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type PairCandidatesResult struct {
+	Candidates []PairingCandidate `json:"candidates"`
 }
 
 type PairStartParams struct {

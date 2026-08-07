@@ -75,6 +75,9 @@ func parseControlCommand(args []string) (localapi.Method, any, bool) {
 		if len(args) == 1 {
 			return localapi.MethodPairStart, localapi.PairStartParams{}, true
 		}
+		if args[1] == "candidates" && len(args) == 2 {
+			return localapi.MethodPairCandidates, nil, true
+		}
 		if args[1] == "start" && len(args) <= 3 {
 			params := localapi.PairStartParams{}
 			if len(args) == 3 {
@@ -160,7 +163,7 @@ func printHumanResult(writer io.Writer, method localapi.Method, result any) {
 }
 
 func humanItems(object map[string]any) []string {
-	for _, key := range []string{"devices", "workspaces", "folders", "checks"} {
+	for _, key := range []string{"devices", "candidates", "workspaces", "folders", "checks"} {
 		values, ok := object[key].([]any)
 		if !ok {
 			continue

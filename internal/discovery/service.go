@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/grandcat/zeroconf"
 )
@@ -29,6 +31,7 @@ type Record struct {
 // Peer is one filtered and deduplicated Windows Agent.
 type Peer struct {
 	InstanceID string
+	Name       string
 	DeviceID   string
 	Pairing    bool
 	Port       int
@@ -79,7 +82,7 @@ func (s Service) Discover(ctx context.Context) ([]Peer, error) {
 				peersByID[peer.InstanceID] = &copy
 				continue
 			}
-			if existing.Port != peer.Port || existing.Pairing != peer.Pairing || existing.DeviceID != peer.DeviceID {
+			if existing.Port != peer.Port || existing.Pairing != peer.Pairing || existing.DeviceID != peer.DeviceID || existing.Name != peer.Name {
 				continue
 			}
 			existing.Addresses = mergeAddresses(existing.Addresses, peer.Addresses)
@@ -94,10 +97,15 @@ type Advertisement struct {
 	TXT          []string
 }
 
-// PairingAdvertisement creates a privacy-preserving temporary advertisement.
-func PairingAdvertisement(instanceID string, port int) (Advertisement, error) {
+// PairingAdvertisement publishes a temporary opaque ID and the local device
+// name needed for explicit user selection on the private LAN.
+func PairingAdvertisement(instanceID, deviceName string, port int) (Advertisement, error) {
 	if err := validateOpaqueID(instanceID); err != nil {
 		return Advertisement{}, fmt.Errorf("invalid pairing instance ID: %w", err)
+	}
+	deviceName = strings.TrimSpace(deviceName)
+	if !validDeviceName(deviceName) {
+		return Advertisement{}, errors.New("invalid pairing device name")
 	}
 	if !validPort(port) {
 		return Advertisement{}, errors.New("invalid pairing port")
@@ -108,6 +116,7 @@ func PairingAdvertisement(instanceID string, port int) (Advertisement, error) {
 		TXT: []string{
 			"version=" + DefaultProtocolVersion,
 			"instance=" + instanceID,
+			"name=" + deviceName,
 			"pairing=1",
 		},
 	}, nil
@@ -243,13 +252,14 @@ func peerFromRecord(record Record, protocolVersion string) (Peer, bool) {
 	peer := Peer{Port: record.Port}
 	switch pairingValue {
 	case "1":
-		if txt["device"] != "" || validateOpaqueID(txt["instance"]) != nil {
+		if txt["device"] != "" || validateOpaqueID(txt["instance"]) != nil || !validDeviceName(txt["name"]) {
 			return Peer{}, false
 		}
 		peer.InstanceID = txt["instance"]
+		peer.Name = txt["name"]
 		peer.Pairing = true
 	case "0":
-		if txt["instance"] != "" || validateOpaqueID(txt["device"]) != nil {
+		if txt["instance"] != "" || txt["name"] != "" || validateOpaqueID(txt["device"]) != nil {
 			return Peer{}, false
 		}
 		peer.InstanceID = txt["device"]
@@ -268,7 +278,7 @@ func peerFromRecord(record Record, protocolVersion string) (Peer, bool) {
 }
 
 func parseTXT(entries []string) (map[string]string, bool) {
-	allowed := map[string]bool{"version": true, "instance": true, "device": true, "pairing": true}
+	allowed := map[string]bool{"version": true, "instance": true, "name": true, "device": true, "pairing": true}
 	values := make(map[string]string, len(entries))
 	for _, entry := range entries {
 		key, value, found := strings.Cut(entry, "=")
@@ -281,6 +291,18 @@ func parseTXT(entries []string) (map[string]string, bool) {
 		values[key] = value
 	}
 	return values, true
+}
+
+func validDeviceName(name string) bool {
+	if name == "" || len(name) > 64 || !utf8.ValidString(name) || strings.TrimSpace(name) != name {
+		return false
+	}
+	for _, character := range name {
+		if !unicode.IsPrint(character) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateOpaqueID(id string) error {

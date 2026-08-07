@@ -219,6 +219,7 @@ func selectStartupRecovery(
 }
 
 type runtimePairingCoordinator interface {
+	Candidates(context.Context) (localapi.PairCandidatesResult, error)
 	Start(context.Context, string) (localapi.PairStartResult, error)
 	Confirm(context.Context, localapi.PairConfirmParams) (localapi.PairConfirmResult, error)
 	Unpair(context.Context, string) error
@@ -237,6 +238,8 @@ func (c *productionAgentController) Handle(ctx context.Context, method localapi.
 	switch method {
 	case localapi.MethodListDevices:
 		return c.listDevices()
+	case localapi.MethodPairCandidates:
+		return c.pairing.Candidates(ctx)
 	case localapi.MethodPairStart:
 		var params localapi.PairStartParams
 		if err := decodeControlParams(raw, &params); err != nil {
@@ -731,6 +734,7 @@ func (r *managedSSHRuntime) Close() error {
 
 type windowsPairingHost struct {
 	server            *pairing.Server
+	deviceName        string
 	publisher         discovery.Publisher
 	listen            func(string, string) (net.Listener, error)
 	minRetryBackoff   time.Duration
@@ -739,6 +743,10 @@ type windowsPairingHost struct {
 }
 
 func newWindowsPairingHost(installer pairing.Installer) (*windowsPairingHost, error) {
+	deviceName, err := os.Hostname()
+	if err != nil || strings.TrimSpace(deviceName) == "" {
+		return nil, errors.New("find Windows device name")
+	}
 	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
@@ -748,7 +756,7 @@ func newWindowsPairingHost(installer pairing.Installer) (*windowsPairingHost, er
 		return nil, err
 	}
 	return &windowsPairingHost{
-		server: server, publisher: discovery.ZeroconfPublisher{}, listen: net.Listen,
+		server: server, deviceName: strings.TrimSpace(deviceName), publisher: discovery.ZeroconfPublisher{}, listen: net.Listen,
 		minRetryBackoff: pairingHostMinRetryBackoff, maxRetryBackoff: pairingHostMaxRetryBackoff,
 		republishInterval: pairingHostRepublishInterval,
 	}, nil
@@ -795,7 +803,7 @@ func (h *windowsPairingHost) serve(
 	if !ok || tcpAddress.Port <= 0 {
 		return false
 	}
-	advertisement, err := discovery.PairingAdvertisement(instanceID, tcpAddress.Port)
+	advertisement, err := discovery.PairingAdvertisement(instanceID, h.deviceName, tcpAddress.Port)
 	if err != nil {
 		return false
 	}
@@ -910,6 +918,10 @@ func stopTimer(timer *time.Timer) {
 type windowsPairingCoordinator struct {
 	server    *pairing.Server
 	installer pairing.Installer
+}
+
+func (windowsPairingCoordinator) Candidates(context.Context) (localapi.PairCandidatesResult, error) {
+	return localapi.PairCandidatesResult{Candidates: []localapi.PairingCandidate{}}, nil
 }
 
 func (c windowsPairingCoordinator) Start(context.Context, string) (localapi.PairStartResult, error) {

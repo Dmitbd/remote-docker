@@ -41,11 +41,12 @@ type Pairing struct {
 }
 
 type Model struct {
-	Label   string
-	Message string
-	Icon    Icon
-	Items   []Item
-	Pairing *Pairing
+	Label      string
+	Message    string
+	Icon       Icon
+	Items      []Item
+	Candidates []localapi.PairingCandidate
+	Pairing    *Pairing
 }
 
 // MenuForStatus produces stable labels, icon identifiers, and action items for
@@ -70,12 +71,11 @@ func MenuForStatus(status localapi.StatusResult) Model {
 	default:
 		model.Label, model.Icon = "Action required", IconNeedsAction
 	}
-	model.Items = baseItems(status.State)
+	model.Items = baseItems(status.State, status.Paired)
 	return model
 }
 
-func baseItems(state string) []Item {
-	paired := state != "" && state != "Unpaired" && state != "NeedsAction"
+func baseItems(state string, paired bool) []Item {
 	return []Item{
 		{Action: ActionPair, Label: "Pair", Enabled: !paired},
 		{Action: ActionOpenStatus, Label: "Open status", Enabled: true},

@@ -56,13 +56,42 @@ func (c *Controller) OpenStatus(ctx context.Context) (Model, error) {
 	return c.setStatus(status), nil
 }
 
+func (c *Controller) DiscoverPairingCandidates(ctx context.Context) (Model, error) {
+	var result localapi.PairCandidatesResult
+	if err := c.call(ctx, localapi.MethodPairCandidates, nil, &result); err != nil {
+		return c.setUnavailable()
+	}
+	c.mu.Lock()
+	c.model.Candidates = append([]localapi.PairingCandidate(nil), result.Candidates...)
+	if len(result.Candidates) == 0 {
+		c.model.Message = "No Windows pairing devices were found."
+	} else {
+		c.model.Message = "Choose a Windows device to pair."
+	}
+	model := cloneModel(c.model)
+	c.mu.Unlock()
+	c.present(model)
+	return model, nil
+}
+
+func (c *Controller) PairCandidate(ctx context.Context, candidate localapi.PairingCandidate) (Model, error) {
+	if strings.TrimSpace(candidate.ID) == "" || strings.TrimSpace(candidate.Name) == "" {
+		return c.setMessage("Choose a valid Windows device before pairing.")
+	}
+	return c.startPair(ctx, candidate.ID, candidate.Name)
+}
+
 // Pair starts a pairing session. The chosen device name is presentation input;
 // the API receives the same selector and the agent remains the sole owner of
 // discovery and pairing credentials.
 func (c *Controller) Pair(ctx context.Context, deviceName string) (Model, error) {
 	deviceName = strings.TrimSpace(deviceName)
+	return c.startPair(ctx, deviceName, deviceName)
+}
+
+func (c *Controller) startPair(ctx context.Context, selector, deviceName string) (Model, error) {
 	var result localapi.PairStartResult
-	if err := c.call(ctx, localapi.MethodPairStart, localapi.PairStartParams{Device: deviceName}, &result); err != nil {
+	if err := c.call(ctx, localapi.MethodPairStart, localapi.PairStartParams{Device: selector}, &result); err != nil {
 		return c.setUnavailable()
 	}
 	if result.SessionID == "" || !sixDigits(result.Code) {
@@ -74,6 +103,7 @@ func (c *Controller) Pair(ctx context.Context, deviceName string) (Model, error)
 	pairing := &Pairing{DeviceName: deviceName, Code: result.Code, sessionID: result.SessionID}
 	c.mu.Lock()
 	c.pairing = pairing
+	c.model.Candidates = nil
 	c.model.Pairing = clonePairing(pairing)
 	c.model.Items = append(c.model.Items, Item{Action: ActionConfirmPair, Label: "Confirm pairing", Enabled: true})
 	model := cloneModel(c.model)
@@ -120,7 +150,7 @@ func (c *Controller) Retry(ctx context.Context) (Model, error) {
 	if err := c.call(ctx, localapi.MethodRecover, nil, &result); err != nil {
 		return c.setUnavailable()
 	}
-	return c.setStatus(localapi.StatusResult{State: result.State, Message: result.Message}), nil
+	return c.OpenStatus(ctx)
 }
 
 func (c *Controller) RunDiagnostics(ctx context.Context) (Model, error) {
@@ -139,7 +169,7 @@ func (c *Controller) Unpair(ctx context.Context, deviceID string) (Model, error)
 	c.mu.Lock()
 	c.pairing = nil
 	c.mu.Unlock()
-	return c.setStatus(localapi.StatusResult{State: "Unpaired", Message: "Device unpaired."}), nil
+	return c.setStatus(localapi.StatusResult{State: "Unpaired", Paired: false, Message: "Device unpaired."}), nil
 }
 
 func (c *Controller) Quit(ctx context.Context) {
@@ -238,6 +268,7 @@ func clonePairing(pairing *Pairing) *Pairing {
 
 func cloneModel(model Model) Model {
 	model.Items = append([]Item(nil), model.Items...)
+	model.Candidates = append([]localapi.PairingCandidate(nil), model.Candidates...)
 	model.Pairing = clonePairing(model.Pairing)
 	return model
 }
