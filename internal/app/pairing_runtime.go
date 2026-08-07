@@ -247,27 +247,52 @@ func (c *macPairingCoordinator) Unpair(ctx context.Context, deviceID string) err
 type discoveryPairingTransport struct {
 	SSHConfigPath string
 	SSHBinary     string
+	discover      func(context.Context) ([]discovery.Peer, error)
+	bootstrap     func(context.Context, string, ed25519.PublicKey) (pairing.SessionDescriptor, error)
 }
 
 func (t discoveryPairingTransport) Bootstrap(ctx context.Context, selector string, clientPublicKey ed25519.PublicKey) (pairingTarget, pairing.SessionDescriptor, error) {
-	browser, err := discovery.NewZeroconfBrowser()
+	peers, err := t.discoverPeers(ctx)
 	if err != nil {
 		return pairingTarget{}, pairing.SessionDescriptor{}, err
+	}
+	peer, addresses, err := selectPairingPeer(peers, selector)
+	if err != nil {
+		return pairingTarget{}, pairing.SessionDescriptor{}, err
+	}
+	bootstrap := t.bootstrap
+	if bootstrap == nil {
+		bootstrap = func(ctx context.Context, endpoint string, key ed25519.PublicKey) (pairing.SessionDescriptor, error) {
+			return pairing.Bootstrap(ctx, endpoint, key, nil)
+		}
+	}
+	var lastErr error
+	for _, address := range addresses {
+		target := pairingTarget{Name: peer.InstanceID, Address: address.String(), PairingPort: peer.Port}
+		endpoint := "https://" + net.JoinHostPort(target.Address, fmt.Sprintf("%d", target.PairingPort))
+		descriptor, bootstrapErr := bootstrap(ctx, endpoint, clientPublicKey)
+		if bootstrapErr == nil {
+			return target, descriptor, nil
+		}
+		lastErr = bootstrapErr
+		if ctx.Err() != nil {
+			return pairingTarget{}, pairing.SessionDescriptor{}, ctx.Err()
+		}
+	}
+	return pairingTarget{}, pairing.SessionDescriptor{}, fmt.Errorf("bootstrap discovered pairing peer: %w", lastErr)
+}
+
+func (t discoveryPairingTransport) discoverPeers(ctx context.Context) ([]discovery.Peer, error) {
+	if t.discover != nil {
+		return t.discover(ctx)
+	}
+	browser, err := discovery.NewZeroconfBrowser()
+	if err != nil {
+		return nil, err
 	}
 	discoveryCtx, cancel := context.WithTimeout(ctx, pairingDiscoveryTimeout)
 	defer cancel()
-	peers, err := (discovery.Service{Browser: browser}).Discover(discoveryCtx)
-	if err != nil {
-		return pairingTarget{}, pairing.SessionDescriptor{}, err
-	}
-	peer, address, err := selectPairingPeer(peers, selector)
-	if err != nil {
-		return pairingTarget{}, pairing.SessionDescriptor{}, err
-	}
-	target := pairingTarget{Name: peer.InstanceID, Address: address.String(), PairingPort: peer.Port}
-	endpoint := "https://" + net.JoinHostPort(target.Address, fmt.Sprintf("%d", target.PairingPort))
-	descriptor, err := pairing.Bootstrap(ctx, endpoint, clientPublicKey, nil)
-	return target, descriptor, err
+	return (discovery.Service{Browser: browser}).Discover(discoveryCtx)
 }
 
 func (t discoveryPairingTransport) Confirm(ctx context.Context, target pairingTarget, descriptor pairing.SessionDescriptor, clientDeviceID, authorizedKey, code string) (pairing.DeviceRecord, error) {
@@ -315,34 +340,55 @@ func (t discoveryPairingTransport) Revoke(ctx context.Context, device config.Dev
 	return nil
 }
 
-func selectPairingPeer(peers []discovery.Peer, selector string) (discovery.Peer, net.IP, error) {
+func selectPairingPeer(peers []discovery.Peer, selector string) (discovery.Peer, []net.IP, error) {
 	type candidate struct {
-		peer    discovery.Peer
-		address net.IP
+		peer      discovery.Peer
+		addresses map[string]net.IP
 	}
-	var candidates []candidate
+	selectorIP := net.ParseIP(selector)
+	candidates := make(map[string]*candidate)
 	for _, peer := range peers {
 		if !peer.Pairing {
 			continue
 		}
+		if selector != "" && selectorIP == nil && selector != peer.InstanceID {
+			continue
+		}
 		for _, address := range peer.Addresses {
-			if selector == "" || selector == peer.InstanceID || selector == address.String() {
-				candidates = append(candidates, candidate{peer: peer, address: address})
+			if address == nil || (!address.IsPrivate() && !address.IsLoopback()) ||
+				(selectorIP != nil && !address.Equal(selectorIP)) {
+				continue
 			}
+			selected := candidates[peer.InstanceID]
+			if selected == nil {
+				selected = &candidate{peer: peer, addresses: make(map[string]net.IP)}
+				candidates[peer.InstanceID] = selected
+			}
+			selected.addresses[address.String()] = append(net.IP(nil), address...)
 		}
 	}
-	sort.Slice(candidates, func(i, j int) bool {
-		left := candidates[i].peer.InstanceID + "|" + candidates[i].address.String()
-		right := candidates[j].peer.InstanceID + "|" + candidates[j].address.String()
-		return left < right
-	})
+	ids := make([]string, 0, len(candidates))
+	for id := range candidates {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
 	if len(candidates) == 0 {
 		return discovery.Peer{}, nil, errors.New("no matching pairing peer was discovered")
 	}
-	if selector == "" && len(candidates) != 1 {
+	if len(candidates) != 1 {
 		return discovery.Peer{}, nil, errors.New("multiple pairing peers were discovered; select one")
 	}
-	return candidates[0].peer, candidates[0].address, nil
+	selected := candidates[ids[0]]
+	addressStrings := make([]string, 0, len(selected.addresses))
+	for address := range selected.addresses {
+		addressStrings = append(addressStrings, address)
+	}
+	sort.Strings(addressStrings)
+	addresses := make([]net.IP, 0, len(addressStrings))
+	for _, address := range addressStrings {
+		addresses = append(addresses, selected.addresses[address])
+	}
+	return selected.peer, addresses, nil
 }
 
 func pairedRemoteDeviceID(hostPublicKey string) (string, error) {

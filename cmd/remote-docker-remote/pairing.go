@@ -92,16 +92,33 @@ func runPairingRevoke(runtime pairingRuntime, args []string, errorOutput io.Writ
 		fmt.Fprintln(errorOutput, "cannot read managed pairing key")
 		return 1
 	}
-	marker := managedPairingMarker + deviceID
-	if len(contents) > 0 && !strings.Contains(string(contents), marker) {
-		fmt.Fprintln(errorOutput, "managed pairing belongs to another device")
-		return 1
+	if len(contents) > 0 {
+		managedDeviceID, managed := managedPairingDeviceID(contents)
+		if !managed || managedDeviceID != deviceID {
+			fmt.Fprintln(errorOutput, "managed pairing belongs to another device")
+			return 1
+		}
 	}
 	if err := writeManagedAuthorization(runtime.AuthorizedKeysPath, nil); err != nil {
 		fmt.Fprintln(errorOutput, "cannot revoke managed pairing key")
 		return 1
 	}
 	return 0
+}
+
+func managedPairingDeviceID(contents []byte) (string, bool) {
+	key, comment, options, rest, err := ssh.ParseAuthorizedKey(contents)
+	if err != nil || key.Type() != ssh.KeyAlgoED25519 || len(options) != 0 || len(bytes.TrimSpace(rest)) != 0 {
+		return "", false
+	}
+	deviceID, ok := strings.CutPrefix(comment, managedPairingMarker)
+	if !ok || managedPairingMarker+deviceID != comment {
+		return "", false
+	}
+	if _, valid := pairingDeviceArgument([]string{"--device", deviceID}); !valid {
+		return "", false
+	}
+	return deviceID, true
 }
 
 func pairingDeviceArgument(args []string) (string, bool) {

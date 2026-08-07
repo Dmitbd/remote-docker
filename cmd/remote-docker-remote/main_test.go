@@ -88,6 +88,27 @@ func TestPairingInstallAndRevokeOwnOnlyManagedAuthorizedKey(t *testing.T) {
 	}
 }
 
+func TestPairingRevokeRejectsDeviceIDPrefixCollision(t *testing.T) {
+	root := t.TempDir()
+	authorizedKeysPath := filepath.Join(root, "authorized_keys")
+	contents := []byte(testAuthorizedLine(t, "mac-device-long"))
+	if err := os.WriteFile(authorizedKeysPath, contents, 0o600); err != nil {
+		t.Fatalf("seed authorized keys: %v", err)
+	}
+	runtime := pairingRuntime{AuthorizedKeysPath: authorizedKeysPath}
+
+	if code := runPairingRevoke(runtime, []string{"--device", "mac-device"}, &bytes.Buffer{}); code == 0 {
+		t.Fatal("revoke accepted a device ID that is only a prefix of the managed owner")
+	}
+	after, err := os.ReadFile(authorizedKeysPath)
+	if err != nil {
+		t.Fatalf("read authorized keys after rejected revoke: %v", err)
+	}
+	if !bytes.Equal(after, contents) {
+		t.Fatalf("prefix collision changed authorized keys: %q", after)
+	}
+}
+
 func TestRPCPairingRevokeUsesManagedAuthorizationRuntime(t *testing.T) {
 	root := t.TempDir()
 	runtime := pairingRuntime{

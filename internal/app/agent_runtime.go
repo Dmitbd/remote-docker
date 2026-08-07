@@ -33,9 +33,16 @@ import (
 	"github.com/Dmitbd/remote-docker/internal/sshtransport"
 	"github.com/Dmitbd/remote-docker/internal/syncer"
 	"golang.org/x/crypto/ssh"
+	sshagent "golang.org/x/crypto/ssh/agent"
 )
 
-const agentProbeTimeout = 5 * time.Second
+const (
+	agentProbeTimeout            = 5 * time.Second
+	managedSSHProbeTimeout       = time.Second
+	pairingHostMinRetryBackoff   = 250 * time.Millisecond
+	pairingHostMaxRetryBackoff   = 5 * time.Second
+	pairingHostRepublishInterval = 30 * time.Second
+)
 
 // ProductionAgentOptions identifies the installed executable and persisted
 // non-secret config. Empty platform paths use per-user defaults.
@@ -548,9 +555,15 @@ type managedSSHRuntime struct {
 	knownHostsPath  string
 	agentSocketPath string
 	controlDir      string
+	start           func(context.Context, string, []byte) (managedSSHAgent, error)
+	probe           func(context.Context, string) error
 	mu              sync.Mutex
 	deviceID        string
-	managed         *sshtransport.ManagedAgent
+	managed         managedSSHAgent
+}
+
+type managedSSHAgent interface {
+	Close() error
 }
 
 func (r *managedSSHRuntime) Ensure(ctx context.Context) error {
@@ -565,11 +578,21 @@ func (r *managedSSHRuntime) Ensure(ctx context.Context) error {
 		return errors.New("paired SSH device is unavailable")
 	}
 	if r.managed != nil && r.deviceID == cfg.ActiveDevice {
-		return nil
+		probe := r.probe
+		if probe == nil {
+			probe = probeManagedSSHAgent
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, managedSSHProbeTimeout)
+		probeErr := probe(probeCtx, r.agentSocketPath)
+		cancel()
+		if probeErr == nil {
+			return nil
+		}
 	}
 	if r.managed != nil {
 		_ = r.managed.Close()
 		r.managed = nil
+		r.deviceID = ""
 	}
 	if err := os.MkdirAll(filepath.Dir(r.agentSocketPath), 0o700); err != nil {
 		return err
@@ -580,12 +603,20 @@ func (r *managedSSHRuntime) Ensure(ctx context.Context) error {
 	if err := os.MkdirAll(r.controlDir, 0o700); err != nil {
 		return err
 	}
-	_ = os.Remove(r.agentSocketPath)
+	if err := os.Remove(r.agentSocketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	privateKey, err := r.secrets.Get(cfg.ActiveDevice, sshtransport.SSHPrivateKeyCredential)
 	if err != nil {
 		return err
 	}
-	managed, err := (sshtransport.Agent{}).Start(ctx, r.agentSocketPath, privateKey)
+	start := r.start
+	if start == nil {
+		start = func(ctx context.Context, socketPath string, privateKey []byte) (managedSSHAgent, error) {
+			return (sshtransport.Agent{}).Start(ctx, socketPath, privateKey)
+		}
+	}
+	managed, err := start(ctx, r.agentSocketPath, privateKey)
 	if err != nil {
 		return err
 	}
@@ -601,6 +632,21 @@ func (r *managedSSHRuntime) Ensure(ctx context.Context) error {
 	return nil
 }
 
+func probeManagedSSHAgent(ctx context.Context, socketPath string) error {
+	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := connection.SetDeadline(deadline); err != nil {
+			return err
+		}
+	}
+	_, err = sshagent.NewClient(connection).List()
+	return err
+}
+
 func (r *managedSSHRuntime) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -614,8 +660,12 @@ func (r *managedSSHRuntime) Close() error {
 }
 
 type windowsPairingHost struct {
-	server    *pairing.Server
-	publisher discovery.Publisher
+	server            *pairing.Server
+	publisher         discovery.Publisher
+	listen            func(string, string) (net.Listener, error)
+	minRetryBackoff   time.Duration
+	maxRetryBackoff   time.Duration
+	republishInterval time.Duration
 }
 
 func newWindowsPairingHost(installer pairing.Installer) (*windowsPairingHost, error) {
@@ -627,19 +677,14 @@ func newWindowsPairingHost(installer pairing.Installer) (*windowsPairingHost, er
 	if err != nil {
 		return nil, err
 	}
-	return &windowsPairingHost{server: server, publisher: discovery.ZeroconfPublisher{}}, nil
+	return &windowsPairingHost{
+		server: server, publisher: discovery.ZeroconfPublisher{}, listen: net.Listen,
+		minRetryBackoff: pairingHostMinRetryBackoff, maxRetryBackoff: pairingHostMaxRetryBackoff,
+		republishInterval: pairingHostRepublishInterval,
+	}, nil
 }
 
 func (h *windowsPairingHost) Run(ctx context.Context) {
-	address, err := privateListenAddress()
-	if err != nil {
-		return
-	}
-	listener, err := pairing.ListenPrivate("tcp", net.JoinHostPort(address.String(), "0"))
-	if err != nil {
-		return
-	}
-	defer listener.Close()
 	tlsConfig, err := h.server.TLSConfig()
 	if err != nil {
 		return
@@ -648,21 +693,148 @@ func (h *windowsPairingHost) Run(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	advertisement, err := discovery.PairingAdvertisement(instanceID, listener.Addr().(*net.TCPAddr).Port)
-	if err != nil {
-		return
+	minBackoff, maxBackoff, republishInterval := h.durations()
+	backoff := minBackoff
+	for ctx.Err() == nil {
+		if h.serve(ctx, tlsConfig, instanceID, minBackoff, maxBackoff, republishInterval) {
+			return
+		}
+		if !waitForPairingHostRetry(ctx, backoff) {
+			return
+		}
+		backoff = nextPairingHostBackoff(backoff, maxBackoff)
 	}
-	registration, err := h.publisher.Publish(ctx, advertisement)
-	if err != nil {
-		return
+}
+
+func (h *windowsPairingHost) serve(
+	ctx context.Context,
+	tlsConfig *tls.Config,
+	instanceID string,
+	minBackoff, maxBackoff, republishInterval time.Duration,
+) bool {
+	listen := h.listen
+	if listen == nil {
+		listen = net.Listen
 	}
-	defer registration.Shutdown()
+	listener, err := listen("tcp", ":0")
+	if err != nil {
+		return false
+	}
+	defer listener.Close()
+	tcpAddress, ok := listener.Addr().(*net.TCPAddr)
+	if !ok || tcpAddress.Port <= 0 {
+		return false
+	}
+	advertisement, err := discovery.PairingAdvertisement(instanceID, tcpAddress.Port)
+	if err != nil {
+		return false
+	}
 	server := &http.Server{Handler: h.server, ReadHeaderTimeout: 5 * time.Second}
+	serveDone := make(chan error, 1)
 	go func() {
-		<-ctx.Done()
-		_ = server.Close()
+		serveDone <- server.Serve(tls.NewListener(privatePeerListener{Listener: listener}, tlsConfig))
 	}()
-	_ = server.Serve(tls.NewListener(listener, tlsConfig))
+	defer server.Close()
+
+	backoff := minBackoff
+	for {
+		publishCtx, cancelPublish := context.WithCancel(ctx)
+		registration, publishErr := h.publisher.Publish(publishCtx, advertisement)
+		if publishErr != nil {
+			cancelPublish()
+			timer := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				stopTimer(timer)
+				return true
+			case <-serveDone:
+				stopTimer(timer)
+				return false
+			case <-timer.C:
+			}
+			backoff = nextPairingHostBackoff(backoff, maxBackoff)
+			continue
+		}
+
+		backoff = minBackoff
+		timer := time.NewTimer(republishInterval)
+		select {
+		case <-ctx.Done():
+			stopTimer(timer)
+			cancelPublish()
+			registration.Shutdown()
+			return true
+		case <-serveDone:
+			stopTimer(timer)
+			cancelPublish()
+			registration.Shutdown()
+			return false
+		case <-timer.C:
+			cancelPublish()
+			registration.Shutdown()
+		}
+	}
+}
+
+func (h *windowsPairingHost) durations() (time.Duration, time.Duration, time.Duration) {
+	minBackoff := h.minRetryBackoff
+	if minBackoff <= 0 {
+		minBackoff = pairingHostMinRetryBackoff
+	}
+	maxBackoff := h.maxRetryBackoff
+	if maxBackoff < minBackoff {
+		maxBackoff = minBackoff
+	}
+	republishInterval := h.republishInterval
+	if republishInterval <= 0 {
+		republishInterval = pairingHostRepublishInterval
+	}
+	return minBackoff, maxBackoff, republishInterval
+}
+
+type privatePeerListener struct {
+	net.Listener
+}
+
+func (l privatePeerListener) Accept() (net.Conn, error) {
+	for {
+		connection, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		address, ok := connection.RemoteAddr().(*net.TCPAddr)
+		if ok && address.IP != nil && (address.IP.IsPrivate() || address.IP.IsLoopback()) {
+			return connection, nil
+		}
+		_ = connection.Close()
+	}
+}
+
+func waitForPairingHostRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer stopTimer(timer)
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func nextPairingHostBackoff(current, maximum time.Duration) time.Duration {
+	if current >= maximum/2 {
+		return maximum
+	}
+	return current * 2
+}
+
+func stopTimer(timer *time.Timer) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
 }
 
 type windowsPairingCoordinator struct {
@@ -690,31 +862,4 @@ func (c windowsPairingCoordinator) Unpair(ctx context.Context, deviceID string) 
 		return unavailable("managed pairing revocation failed")
 	}
 	return nil
-}
-
-func privateListenAddress() (net.IP, error) {
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return nil, err
-	}
-	for _, iface := range interfaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		addresses, addressErr := iface.Addrs()
-		if addressErr != nil {
-			continue
-		}
-		for _, address := range addresses {
-			host, _, splitErr := net.SplitHostPort(address.String())
-			if splitErr != nil {
-				host = strings.Split(address.String(), "/")[0]
-			}
-			ip := net.ParseIP(strings.Split(host, "%")[0])
-			if ip != nil && ip.IsPrivate() {
-				return ip, nil
-			}
-		}
-	}
-	return nil, errors.New("no private network interface is available")
 }

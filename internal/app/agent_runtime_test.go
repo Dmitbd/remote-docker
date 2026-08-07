@@ -4,16 +4,19 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Dmitbd/remote-docker/internal/config"
 	"github.com/Dmitbd/remote-docker/internal/credentials"
+	"github.com/Dmitbd/remote-docker/internal/discovery"
 	"github.com/Dmitbd/remote-docker/internal/dockercli"
 	"github.com/Dmitbd/remote-docker/internal/localapi"
 	"github.com/Dmitbd/remote-docker/internal/pairing"
@@ -316,4 +319,218 @@ func (s *runtimeRelaySink) Apply(context.Context, portrelay.Snapshot) error {
 
 func (s *runtimeRelaySink) Calls() int {
 	return int(s.calls.Load())
+}
+
+func TestWindowsPairingHostRetriesAndPublishesOnReachableLANInterface(t *testing.T) {
+	host, err := newWindowsPairingHost(runtimePairingInstaller{})
+	if err != nil {
+		t.Fatalf("newWindowsPairingHost() error = %v", err)
+	}
+	publisher := &retryingPairingPublisher{published: make(chan discovery.Advertisement, 1)}
+	host.publisher = publisher
+	host.minRetryBackoff = time.Millisecond
+	host.maxRetryBackoff = 2 * time.Millisecond
+	host.republishInterval = time.Hour
+	var listenAddress string
+	var listenerPort atomic.Int32
+	var listenCalls atomic.Int32
+	host.listen = func(_ string, address string) (net.Listener, error) {
+		listenAddress = address
+		if listenCalls.Add(1) == 1 {
+			return nil, errors.New("private LAN is not available yet")
+		}
+		listenerPort.Store(43119)
+		return newBlockingPairingListener(43119), nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		host.Run(ctx)
+		close(done)
+	}()
+
+	var advertisement discovery.Advertisement
+	select {
+	case advertisement = <-publisher.published:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatalf(
+			"pairing host did not retry the temporary publication failure: listens=%d publishes=%d port=%d",
+			listenCalls.Load(), publisher.calls.Load(), listenerPort.Load(),
+		)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("pairing host did not stop after cancellation")
+	}
+
+	if listenAddress != ":0" {
+		t.Fatalf("pairing listen address = %q, want wildcard ephemeral port", listenAddress)
+	}
+	if publisher.calls.Load() != 2 {
+		t.Fatalf("publish calls = %d, want one failure and one retry", publisher.calls.Load())
+	}
+	if listenCalls.Load() != 2 {
+		t.Fatalf("listen calls = %d, want no-network failure and retry", listenCalls.Load())
+	}
+	if advertisement.Port != int(listenerPort.Load()) {
+		t.Fatalf("published port = %d, want reachable listener port %d", advertisement.Port, listenerPort.Load())
+	}
+}
+
+func TestPrivatePeerListenerRejectsPublicPeerAtAcceptBoundary(t *testing.T) {
+	public := &addressedConn{remote: &net.TCPAddr{IP: net.ParseIP("203.0.113.10"), Port: 43119}}
+	private := &addressedConn{remote: &net.TCPAddr{IP: net.ParseIP("192.168.1.20"), Port: 43119}}
+	listener := &queuedListener{connections: []net.Conn{public, private}}
+
+	accepted, err := (privatePeerListener{Listener: listener}).Accept()
+	if err != nil {
+		t.Fatalf("Accept() error = %v", err)
+	}
+	if accepted != private {
+		t.Fatalf("Accept() returned %v, want private peer", accepted.RemoteAddr())
+	}
+	if public.closes.Load() != 1 {
+		t.Fatalf("public peer closes = %d, want 1", public.closes.Load())
+	}
+}
+
+func TestManagedSSHRuntimeEnsureRestartsDeadAgentForReconnect(t *testing.T) {
+	root := t.TempDir()
+	store := config.Store{Path: filepath.Join(root, "config.json")}
+	if err := store.Save(config.Config{
+		SchemaVersion: config.CurrentSchemaVersion,
+		ActiveDevice:  "pc-1",
+		Devices: map[string]config.Device{
+			"pc-1": {Address: "192.168.1.20", SSHPort: 49222},
+		},
+	}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	secrets := credentials.NewMemoryStore()
+	if err := secrets.Put("pc-1", sshtransport.SSHPrivateKeyCredential, []byte("private-key")); err != nil {
+		t.Fatalf("seed private key: %v", err)
+	}
+
+	var agents []*recordingManagedSSHAgent
+	sshRuntime := &managedSSHRuntime{
+		store: store, secrets: secrets,
+		sshConfigPath:   filepath.Join(root, "ssh_config"),
+		knownHostsPath:  filepath.Join(root, "known_hosts"),
+		agentSocketPath: filepath.Join(root, "agent", "ssh-agent.sock"),
+		controlDir:      filepath.Join(root, "control"),
+		start: func(context.Context, string, []byte) (managedSSHAgent, error) {
+			agent := &recordingManagedSSHAgent{}
+			agents = append(agents, agent)
+			return agent, nil
+		},
+		probe: func(context.Context, string) error {
+			return errors.New("managed ssh-agent socket is stale")
+		},
+	}
+
+	if err := sshRuntime.Ensure(context.Background()); err != nil {
+		t.Fatalf("first Ensure() error = %v", err)
+	}
+	if err := sshRuntime.Ensure(context.Background()); err != nil {
+		t.Fatalf("reconnect Ensure() error = %v", err)
+	}
+	if len(agents) != 2 {
+		t.Fatalf("managed agent starts = %d, want 2", len(agents))
+	}
+	if agents[0].closes.Load() != 1 {
+		t.Fatalf("dead managed agent closes = %d, want 1", agents[0].closes.Load())
+	}
+}
+
+type runtimePairingInstaller struct{}
+
+func (runtimePairingInstaller) Install(context.Context, string, string) (pairing.DeviceInfo, error) {
+	return pairing.DeviceInfo{}, nil
+}
+
+func (runtimePairingInstaller) Revoke(context.Context, string) error { return nil }
+
+type retryingPairingPublisher struct {
+	calls     atomic.Int32
+	published chan discovery.Advertisement
+}
+
+func (p *retryingPairingPublisher) Publish(_ context.Context, advertisement discovery.Advertisement) (discovery.Registration, error) {
+	if p.calls.Add(1) == 1 {
+		return nil, errors.New("temporary mDNS failure")
+	}
+	p.published <- advertisement
+	return &recordingPairingRegistration{}, nil
+}
+
+type recordingPairingRegistration struct{ shutdowns atomic.Int32 }
+
+func (r *recordingPairingRegistration) Shutdown() { r.shutdowns.Add(1) }
+
+type queuedListener struct {
+	mu          sync.Mutex
+	connections []net.Conn
+}
+
+func (l *queuedListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.connections) == 0 {
+		return nil, net.ErrClosed
+	}
+	connection := l.connections[0]
+	l.connections = l.connections[1:]
+	return connection, nil
+}
+
+func (*queuedListener) Close() error   { return nil }
+func (*queuedListener) Addr() net.Addr { return &net.TCPAddr{IP: net.IPv4zero} }
+
+type blockingPairingListener struct {
+	closeOnce sync.Once
+	closed    chan struct{}
+	address   *net.TCPAddr
+}
+
+func newBlockingPairingListener(port int) *blockingPairingListener {
+	return &blockingPairingListener{
+		closed:  make(chan struct{}),
+		address: &net.TCPAddr{IP: net.IPv4zero, Port: port},
+	}
+}
+
+func (l *blockingPairingListener) Accept() (net.Conn, error) {
+	<-l.closed
+	return nil, net.ErrClosed
+}
+
+func (l *blockingPairingListener) Close() error {
+	l.closeOnce.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *blockingPairingListener) Addr() net.Addr { return l.address }
+
+type addressedConn struct {
+	net.Conn
+	remote net.Addr
+	closes atomic.Int32
+}
+
+func (c *addressedConn) Close() error {
+	c.closes.Add(1)
+	return nil
+}
+
+func (c *addressedConn) RemoteAddr() net.Addr { return c.remote }
+
+type recordingManagedSSHAgent struct{ closes atomic.Int32 }
+
+func (a *recordingManagedSSHAgent) Close() error {
+	a.closes.Add(1)
+	return nil
 }
