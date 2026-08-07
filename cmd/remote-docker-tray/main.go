@@ -208,7 +208,10 @@ func (p *presentation) updateCandidates(candidates []localapi.PairingCandidate) 
 		if nameCounts[candidate.Name] > 1 {
 			label += " — " + shortCandidateID(candidate.ID)
 		}
-		item := parent.AddSubMenuItem(label, "Pair with "+candidate.Name)
+		if candidate.Unverified {
+			label += " (verify code)"
+		}
+		item := parent.AddSubMenuItem(label, "Device name is unverified until you compare the pairing code")
 		p.candidates = append(p.candidates, item)
 		go func() {
 			for range item.ClickedCh {

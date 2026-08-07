@@ -98,8 +98,9 @@ type ListDevicesResult struct {
 }
 
 type PairingCandidate struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Unverified bool   `json:"unverified"`
 }
 
 type PairCandidatesResult struct {

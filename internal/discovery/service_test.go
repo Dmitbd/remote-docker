@@ -5,7 +5,6 @@ import (
 	"net"
 	"reflect"
 	"sort"
-	"strings"
 	"testing"
 )
 
@@ -13,27 +12,27 @@ func TestDiscoverFiltersAndDeduplicatesRecords(t *testing.T) {
 	records := make(chan Record, 8)
 	records <- Record{
 		Port:      43119,
-		TXT:       []string{"version=1", "instance=public", "name=Public PC", "pairing=1"},
+		TXT:       []string{"version=1", "instance=public", "pairing=1"},
 		Addresses: []net.IP{net.ParseIP("8.8.8.8")},
 	}
 	records <- Record{
 		Port:      43119,
-		TXT:       []string{"version=2", "instance=wrong-version", "name=Wrong PC", "pairing=1"},
+		TXT:       []string{"version=2", "instance=wrong-version", "pairing=1"},
 		Addresses: []net.IP{net.ParseIP("192.168.1.3")},
 	}
 	records <- Record{
 		Port:      0,
-		TXT:       []string{"version=1", "instance=no-port", "name=No Port PC", "pairing=1"},
+		TXT:       []string{"version=1", "instance=no-port", "pairing=1"},
 		Addresses: []net.IP{net.ParseIP("192.168.1.4")},
 	}
 	records <- Record{
 		Port:      43119,
-		TXT:       []string{"version=1", "instance=pair-session", "name=Windows Workstation", "pairing=1"},
+		TXT:       []string{"version=1", "instance=pair-session", "pairing=1"},
 		Addresses: []net.IP{net.ParseIP("192.168.1.20")},
 	}
 	records <- Record{
 		Port:      43119,
-		TXT:       []string{"version=1", "instance=pair-session", "name=Windows Workstation", "pairing=1"},
+		TXT:       []string{"version=1", "instance=pair-session", "pairing=1"},
 		Addresses: []net.IP{net.ParseIP("fd00::20"), net.ParseIP("192.168.1.20")},
 	}
 	records <- Record{
@@ -56,7 +55,7 @@ func TestDiscoverFiltersAndDeduplicatesRecords(t *testing.T) {
 	}
 
 	pairingPeer := findPeer(t, peers, "pair-session")
-	if !pairingPeer.Pairing || pairingPeer.DeviceID != "" || pairingPeer.Name != "Windows Workstation" || pairingPeer.Port != 43119 {
+	if !pairingPeer.Pairing || pairingPeer.DeviceID != "" || pairingPeer.Port != 43119 {
 		t.Fatalf("pairing peer = %#v", pairingPeer)
 	}
 	addresses := ipStrings(pairingPeer.Addresses)
@@ -70,12 +69,12 @@ func TestDiscoverFiltersAndDeduplicatesRecords(t *testing.T) {
 	}
 }
 
-func TestPairingAdvertisementIncludesValidatedLocalDeviceName(t *testing.T) {
-	pairing, err := PairingAdvertisement("session-7f3a", "Windows Workstation", 43119)
+func TestPairingAdvertisementContainsOnlyOpaqueDiscoveryData(t *testing.T) {
+	pairing, err := PairingAdvertisement("session-7f3a", 43119)
 	if err != nil {
 		t.Fatalf("PairingAdvertisement() error = %v", err)
 	}
-	if want := []string{"version=1", "instance=session-7f3a", "name=Windows Workstation", "pairing=1"}; !reflect.DeepEqual(pairing.TXT, want) {
+	if want := []string{"version=1", "instance=session-7f3a", "pairing=1"}; !reflect.DeepEqual(pairing.TXT, want) {
 		t.Fatalf("pairing TXT = %#v, want %#v", pairing.TXT, want)
 	}
 
@@ -94,17 +93,19 @@ func TestPairingAdvertisementIncludesValidatedLocalDeviceName(t *testing.T) {
 
 func TestAdvertisementRejectsIdentifyingOrMalformedValues(t *testing.T) {
 	for _, instanceID := range []string{"", "Mark's PC", "../../device", "contains/slash"} {
-		if _, err := PairingAdvertisement(instanceID, "Windows Workstation", 43119); err == nil {
+		if _, err := PairingAdvertisement(instanceID, 43119); err == nil {
 			t.Fatalf("PairingAdvertisement(%q) succeeded, want rejection", instanceID)
 		}
 	}
-	if _, err := PairingAdvertisement("opaque-id", "Windows Workstation", 0); err == nil {
+	if _, err := PairingAdvertisement("opaque-id", 0); err == nil {
 		t.Fatal("PairingAdvertisement() accepted missing port")
 	}
-	for _, name := range []string{"", "line\nbreak", strings.Repeat("x", 65)} {
-		if _, err := PairingAdvertisement("opaque-id", name, 43119); err == nil {
-			t.Fatalf("PairingAdvertisement() accepted unsafe name %q", name)
-		}
+	peer, ok := peerFromRecord(Record{
+		Port: 43119, TXT: []string{"version=1", "instance=opaque-id", "name=Leaked Hostname", "pairing=1"},
+		Addresses: []net.IP{net.ParseIP("192.168.1.20")},
+	}, "1")
+	if ok {
+		t.Fatalf("peerFromRecord() accepted identifying TXT data: %#v", peer)
 	}
 }
 

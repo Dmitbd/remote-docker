@@ -734,7 +734,6 @@ func (r *managedSSHRuntime) Close() error {
 
 type windowsPairingHost struct {
 	server            *pairing.Server
-	deviceName        string
 	publisher         discovery.Publisher
 	listen            func(string, string) (net.Listener, error)
 	minRetryBackoff   time.Duration
@@ -751,12 +750,16 @@ func newWindowsPairingHost(installer pairing.Installer) (*windowsPairingHost, er
 	if err != nil {
 		return nil, err
 	}
-	server, err := pairing.NewServer(pairing.ServerIdentity{PrivateKey: privateKey}, pairing.WithInstaller(installer))
+	server, err := pairing.NewServer(
+		pairing.ServerIdentity{PrivateKey: privateKey},
+		pairing.WithInstaller(installer),
+		pairing.WithDisplayName(strings.TrimSpace(deviceName)),
+	)
 	if err != nil {
 		return nil, err
 	}
 	return &windowsPairingHost{
-		server: server, deviceName: strings.TrimSpace(deviceName), publisher: discovery.ZeroconfPublisher{}, listen: net.Listen,
+		server: server, publisher: discovery.ZeroconfPublisher{}, listen: net.Listen,
 		minRetryBackoff: pairingHostMinRetryBackoff, maxRetryBackoff: pairingHostMaxRetryBackoff,
 		republishInterval: pairingHostRepublishInterval,
 	}, nil
@@ -767,8 +770,8 @@ func (h *windowsPairingHost) Run(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	instanceID, err := randomDeviceID()
-	if err != nil {
+	instanceID := h.server.InstanceID()
+	if instanceID == "" {
 		return
 	}
 	minBackoff, maxBackoff, republishInterval := h.durations()
@@ -803,7 +806,7 @@ func (h *windowsPairingHost) serve(
 	if !ok || tcpAddress.Port <= 0 {
 		return false
 	}
-	advertisement, err := discovery.PairingAdvertisement(instanceID, h.deviceName, tcpAddress.Port)
+	advertisement, err := discovery.PairingAdvertisement(instanceID, tcpAddress.Port)
 	if err != nil {
 		return false
 	}

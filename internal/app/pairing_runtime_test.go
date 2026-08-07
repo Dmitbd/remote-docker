@@ -13,42 +13,45 @@ import (
 	"github.com/Dmitbd/remote-docker/internal/pairing"
 )
 
-func TestDiscoveryPairingBootstrapRetriesAddressesForSingleInstance(t *testing.T) {
-	for _, selector := range []string{"", "windows-one"} {
-		t.Run("selector="+selector, func(t *testing.T) {
-			var endpoints []string
-			transport := discoveryPairingTransport{
-				discover: func(context.Context) ([]discovery.Peer, error) {
-					return []discovery.Peer{{
-						InstanceID: "windows-one", Pairing: true, Port: 43119,
-						Addresses: []net.IP{net.ParseIP("192.168.1.20"), net.ParseIP("10.0.0.20")},
-					}}, nil
-				},
-				bootstrap: func(_ context.Context, endpoint string, _ ed25519.PublicKey) (pairing.SessionDescriptor, error) {
-					endpoints = append(endpoints, endpoint)
-					if strings.Contains(endpoint, "10.0.0.20") {
-						return pairing.SessionDescriptor{}, errors.New("unreachable WSL interface")
-					}
-					return pairing.SessionDescriptor{ID: "session-ok"}, nil
-				},
+func TestDiscoveryPairingCandidatesResolveNameThroughTLSWithoutStartingSession(t *testing.T) {
+	serverKey := make(ed25519.PublicKey, ed25519.PublicKeySize)
+	inspectCalls, bootstrapCalls := 0, 0
+	transport := discoveryPairingTransport{
+		discover: func(context.Context) ([]discovery.Peer, error) {
+			return []discovery.Peer{{
+				InstanceID: "windows-one", Pairing: true, Port: 43119,
+				Addresses: []net.IP{net.ParseIP("192.168.1.20")},
+			}}, nil
+		},
+		inspect: func(_ context.Context, endpoint, instanceID string) (pairing.Info, error) {
+			inspectCalls++
+			if endpoint != "https://192.168.1.20:43119" || instanceID != "windows-one" {
+				t.Fatalf("Inspect(%q, %q)", endpoint, instanceID)
 			}
+			return pairing.Info{InstanceID: instanceID, DisplayName: "Windows Workstation", ServerPublicKey: serverKey}, nil
+		},
+		bootstrap: func(context.Context, string, ed25519.PublicKey) (pairing.SessionDescriptor, error) {
+			bootstrapCalls++
+			return pairing.SessionDescriptor{}, nil
+		},
+	}
 
-			target, descriptor, err := transport.Bootstrap(context.Background(), selector, make(ed25519.PublicKey, ed25519.PublicKeySize))
-			if err != nil {
-				t.Fatalf("Bootstrap() error = %v", err)
-			}
-			if target.Address != "192.168.1.20" || descriptor.ID != "session-ok" {
-				t.Fatalf("Bootstrap() = (%#v, %#v), want successful reachable address", target, descriptor)
-			}
-			want := []string{"https://10.0.0.20:43119", "https://192.168.1.20:43119"}
-			if !reflect.DeepEqual(endpoints, want) {
-				t.Fatalf("bootstrap endpoints = %#v, want deterministic retries %#v", endpoints, want)
-			}
-		})
+	targets, err := transport.Candidates(context.Background())
+	if err != nil {
+		t.Fatalf("Candidates() error = %v", err)
+	}
+	want := []pairingTarget{{
+		InstanceID: "windows-one", Name: "Windows Workstation", Address: "192.168.1.20",
+		PairingPort: 43119, ServerPublicKey: serverKey,
+	}}
+	if !reflect.DeepEqual(targets, want) || inspectCalls != 1 || bootstrapCalls != 0 {
+		t.Fatalf("targets=%#v inspect=%d bootstrap=%d, want %#v/1/0", targets, inspectCalls, bootstrapCalls, want)
 	}
 }
 
-func TestDiscoveryPairingBootstrapIPSelectorTriesOnlySelectedAddress(t *testing.T) {
+func TestDiscoveryPairingBootstrapRequiresExplicitInstanceAndPinsInspectedTLSKey(t *testing.T) {
+	serverKey := make(ed25519.PublicKey, ed25519.PublicKeySize)
+	serverKey[0] = 7
 	var endpoints []string
 	transport := discoveryPairingTransport{
 		discover: func(context.Context) ([]discovery.Peer, error) {
@@ -57,18 +60,28 @@ func TestDiscoveryPairingBootstrapIPSelectorTriesOnlySelectedAddress(t *testing.
 				Addresses: []net.IP{net.ParseIP("10.0.0.20"), net.ParseIP("192.168.1.20")},
 			}}, nil
 		},
+		inspect: func(_ context.Context, endpoint, instanceID string) (pairing.Info, error) {
+			if instanceID != "windows-one" {
+				t.Fatalf("instanceID = %q", instanceID)
+			}
+			return pairing.Info{InstanceID: instanceID, DisplayName: "Windows Workstation", ServerPublicKey: serverKey}, nil
+		},
 		bootstrap: func(_ context.Context, endpoint string, _ ed25519.PublicKey) (pairing.SessionDescriptor, error) {
 			endpoints = append(endpoints, endpoint)
-			return pairing.SessionDescriptor{ID: "selected"}, nil
+			return pairing.SessionDescriptor{ID: "selected", ServerPublicKey: serverKey}, nil
 		},
 	}
 
-	target, _, err := transport.Bootstrap(context.Background(), "192.168.1.20", make(ed25519.PublicKey, ed25519.PublicKeySize))
+	if _, _, err := transport.Bootstrap(context.Background(), "", make(ed25519.PublicKey, ed25519.PublicKeySize)); err == nil {
+		t.Fatal("Bootstrap() accepted an empty selector")
+	}
+	target, _, err := transport.Bootstrap(context.Background(), "windows-one", make(ed25519.PublicKey, ed25519.PublicKeySize))
 	if err != nil {
 		t.Fatalf("Bootstrap() error = %v", err)
 	}
-	if target.Address != "192.168.1.20" || !reflect.DeepEqual(endpoints, []string{"https://192.168.1.20:43119"}) {
-		t.Fatalf("target=%#v endpoints=%#v, want only selected IP", target, endpoints)
+	if target.Address != "10.0.0.20" || target.Name != "Windows Workstation" ||
+		!reflect.DeepEqual(target.ServerPublicKey, serverKey) || !reflect.DeepEqual(endpoints, []string{"https://10.0.0.20:43119"}) {
+		t.Fatalf("target=%#v endpoints=%#v, want selected TLS-bound peer", target, endpoints)
 	}
 }
 
@@ -81,15 +94,18 @@ func TestDiscoveryPairingBootstrapRejectsMultipleDistinctInstances(t *testing.T)
 				{InstanceID: "windows-two", Pairing: true, Port: 43119, Addresses: []net.IP{net.ParseIP("192.168.1.20")}},
 			}, nil
 		},
+		inspect: func(context.Context, string, string) (pairing.Info, error) {
+			return pairing.Info{}, errors.New("should not inspect")
+		},
 		bootstrap: func(context.Context, string, ed25519.PublicKey) (pairing.SessionDescriptor, error) {
 			bootstrapCalls++
 			return pairing.SessionDescriptor{}, nil
 		},
 	}
 
-	_, _, err := transport.Bootstrap(context.Background(), "", make(ed25519.PublicKey, ed25519.PublicKeySize))
-	if err == nil || !strings.Contains(err.Error(), "multiple pairing peers") {
-		t.Fatalf("Bootstrap() error = %v, want distinct-instance ambiguity", err)
+	_, _, err := transport.Bootstrap(context.Background(), "missing", make(ed25519.PublicKey, ed25519.PublicKeySize))
+	if err == nil || !strings.Contains(err.Error(), "matching pairing peer") {
+		t.Fatalf("Bootstrap() error = %v, want missing explicit instance", err)
 	}
 	if bootstrapCalls != 0 {
 		t.Fatalf("bootstrap calls = %d, want 0 for ambiguous instances", bootstrapCalls)

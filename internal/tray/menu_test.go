@@ -73,7 +73,7 @@ func TestMenuAvailabilityUsesExplicitPairedStatus(t *testing.T) {
 func TestControllerDiscoversAndPairsSelectedCandidateByOpaqueID(t *testing.T) {
 	t.Parallel()
 
-	candidate := localapi.PairingCandidate{ID: "candidate-1", Name: "Windows Workstation"}
+	candidate := localapi.PairingCandidate{ID: "candidate-1", Name: "Windows Workstation", Unverified: true}
 	client := &recordingClient{results: map[localapi.Method]any{
 		localapi.MethodPairCandidates: localapi.PairCandidatesResult{Candidates: []localapi.PairingCandidate{candidate}},
 		localapi.MethodPairStart:      localapi.PairStartResult{SessionID: "session-1", Code: "654321"},
@@ -85,6 +85,9 @@ func TestControllerDiscoversAndPairsSelectedCandidateByOpaqueID(t *testing.T) {
 	}
 	if !reflect.DeepEqual(model.Candidates, []localapi.PairingCandidate{candidate}) {
 		t.Fatalf("candidates = %#v", model.Candidates)
+	}
+	if model.Message != "Choose a Windows device, then verify the code shown on both devices." {
+		t.Fatalf("candidate message = %q, want explicit unverified-name guidance", model.Message)
 	}
 	model, err = controller.PairCandidate(context.Background(), candidate)
 	if err != nil {

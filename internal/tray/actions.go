@@ -66,7 +66,7 @@ func (c *Controller) DiscoverPairingCandidates(ctx context.Context) (Model, erro
 	if len(result.Candidates) == 0 {
 		c.model.Message = "No Windows pairing devices were found."
 	} else {
-		c.model.Message = "Choose a Windows device to pair."
+		c.model.Message = "Choose a Windows device, then verify the code shown on both devices."
 	}
 	model := cloneModel(c.model)
 	c.mu.Unlock()

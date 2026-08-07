@@ -4,9 +4,13 @@ import (
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base32"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -42,6 +46,36 @@ type SessionDescriptor struct {
 	ServerPublicKey ed25519.PublicKey `json:"server_public_key"`
 	ClientPublicKey ed25519.PublicKey `json:"client_public_key"`
 	ExpiresAt       time.Time         `json:"expires_at"`
+}
+
+// Info is public presentation metadata fetched from the ephemeral pairing
+// service. DisplayName is not authenticated until the OOB code is confirmed.
+type Info struct {
+	InstanceID      string            `json:"instance_id"`
+	DisplayName     string            `json:"display_name"`
+	ServerPublicKey ed25519.PublicKey `json:"server_public_key"`
+}
+
+// InstanceIDFromPublicKey derives the temporary opaque mDNS identity from the
+// same Ed25519 key used by the pairing TLS certificate.
+func InstanceIDFromPublicKey(publicKey ed25519.PublicKey) string {
+	if len(publicKey) != ed25519.PublicKeySize {
+		return ""
+	}
+	digest := sha256.Sum256(publicKey)
+	return base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(digest[:16])
+}
+
+func validDisplayName(name string) bool {
+	if name == "" || len(name) > 64 || !utf8.ValidString(name) || strings.TrimSpace(name) != name {
+		return false
+	}
+	for _, character := range name {
+		if !unicode.IsPrint(character) {
+			return false
+		}
+	}
+	return true
 }
 
 // DeviceInfo contains public identifiers returned after successful pairing.

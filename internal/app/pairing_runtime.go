@@ -34,10 +34,11 @@ import (
 const pairingDiscoveryTimeout = 3 * time.Second
 
 type pairingTarget struct {
-	InstanceID  string
-	Name        string
-	Address     string
-	PairingPort int
+	InstanceID      string
+	Name            string
+	Address         string
+	PairingPort     int
+	ServerPublicKey ed25519.PublicKey
 }
 
 type pairingTransport interface {
@@ -91,7 +92,9 @@ func (c *macPairingCoordinator) Candidates(ctx context.Context) (localapi.PairCa
 		if strings.TrimSpace(target.InstanceID) == "" || strings.TrimSpace(target.Name) == "" {
 			continue
 		}
-		result.Candidates = append(result.Candidates, localapi.PairingCandidate{ID: target.InstanceID, Name: target.Name})
+		result.Candidates = append(result.Candidates, localapi.PairingCandidate{
+			ID: target.InstanceID, Name: target.Name, Unverified: true,
+		})
 	}
 	sort.Slice(result.Candidates, func(i, j int) bool {
 		if result.Candidates[i].Name == result.Candidates[j].Name {
@@ -274,6 +277,7 @@ type discoveryPairingTransport struct {
 	SSHConfigPath string
 	SSHBinary     string
 	discover      func(context.Context) ([]discovery.Peer, error)
+	inspect       func(context.Context, string, string) (pairing.Info, error)
 	bootstrap     func(context.Context, string, ed25519.PublicKey) (pairing.SessionDescriptor, error)
 }
 
@@ -287,22 +291,27 @@ func (t discoveryPairingTransport) Candidates(ctx context.Context) ([]pairingTar
 		if !peer.Pairing || len(peer.Addresses) == 0 {
 			continue
 		}
-		targets = append(targets, pairingTarget{
-			InstanceID:  peer.InstanceID,
-			Name:        peer.Name,
-			Address:     peer.Addresses[0].String(),
-			PairingPort: peer.Port,
-		})
+		target, inspectErr := t.inspectPeer(ctx, peer, peer.Addresses)
+		if inspectErr == nil {
+			targets = append(targets, target)
+		}
 	}
 	return targets, nil
 }
 
 func (t discoveryPairingTransport) Bootstrap(ctx context.Context, selector string, clientPublicKey ed25519.PublicKey) (pairingTarget, pairing.SessionDescriptor, error) {
+	if strings.TrimSpace(selector) == "" {
+		return pairingTarget{}, pairing.SessionDescriptor{}, errors.New("select a pairing peer before starting")
+	}
 	peers, err := t.discoverPeers(ctx)
 	if err != nil {
 		return pairingTarget{}, pairing.SessionDescriptor{}, err
 	}
 	peer, addresses, err := selectPairingPeer(peers, selector)
+	if err != nil {
+		return pairingTarget{}, pairing.SessionDescriptor{}, err
+	}
+	target, err := t.inspectPeer(ctx, peer, addresses)
 	if err != nil {
 		return pairingTarget{}, pairing.SessionDescriptor{}, err
 	}
@@ -312,20 +321,43 @@ func (t discoveryPairingTransport) Bootstrap(ctx context.Context, selector strin
 			return pairing.Bootstrap(ctx, endpoint, key, nil)
 		}
 	}
-	var lastErr error
-	for _, address := range addresses {
-		target := pairingTarget{InstanceID: peer.InstanceID, Name: peer.Name, Address: address.String(), PairingPort: peer.Port}
-		endpoint := "https://" + net.JoinHostPort(target.Address, fmt.Sprintf("%d", target.PairingPort))
-		descriptor, bootstrapErr := bootstrap(ctx, endpoint, clientPublicKey)
-		if bootstrapErr == nil {
-			return target, descriptor, nil
-		}
-		lastErr = bootstrapErr
-		if ctx.Err() != nil {
-			return pairingTarget{}, pairing.SessionDescriptor{}, ctx.Err()
+	endpoint := pairingEndpoint(target)
+	descriptor, err := bootstrap(ctx, endpoint, clientPublicKey)
+	if err != nil {
+		return pairingTarget{}, pairing.SessionDescriptor{}, fmt.Errorf("bootstrap discovered pairing peer: %w", err)
+	}
+	if subtle.ConstantTimeCompare(descriptor.ServerPublicKey, target.ServerPublicKey) != 1 {
+		return pairingTarget{}, pairing.SessionDescriptor{}, errors.New("pairing TLS identity changed after selection")
+	}
+	return target, descriptor, nil
+}
+
+func (t discoveryPairingTransport) inspectPeer(ctx context.Context, peer discovery.Peer, addresses []net.IP) (pairingTarget, error) {
+	inspect := t.inspect
+	if inspect == nil {
+		inspect = func(ctx context.Context, endpoint, instanceID string) (pairing.Info, error) {
+			return pairing.Inspect(ctx, endpoint, instanceID, nil)
 		}
 	}
-	return pairingTarget{}, pairing.SessionDescriptor{}, fmt.Errorf("bootstrap discovered pairing peer: %w", lastErr)
+	var lastErr error
+	for _, address := range addresses {
+		target := pairingTarget{InstanceID: peer.InstanceID, Address: address.String(), PairingPort: peer.Port}
+		info, err := inspect(ctx, pairingEndpoint(target), peer.InstanceID)
+		if err == nil {
+			target.Name = info.DisplayName
+			target.ServerPublicKey = append(ed25519.PublicKey(nil), info.ServerPublicKey...)
+			return target, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return pairingTarget{}, ctx.Err()
+		}
+	}
+	return pairingTarget{}, fmt.Errorf("inspect discovered pairing peer: %w", lastErr)
+}
+
+func pairingEndpoint(target pairingTarget) string {
+	return "https://" + net.JoinHostPort(target.Address, fmt.Sprintf("%d", target.PairingPort))
 }
 
 func (t discoveryPairingTransport) discoverPeers(ctx context.Context) ([]discovery.Peer, error) {

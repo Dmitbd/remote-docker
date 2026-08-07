@@ -25,6 +25,7 @@ import (
 const (
 	pairPath        = "/v1/pair"
 	pairSessionPath = "/v1/pair/session"
+	pairInfoPath    = "/v1/pair/info"
 )
 
 // Installer applies or revokes the one managed Mac authorization on Windows.
@@ -40,14 +41,15 @@ type sessionState struct {
 
 // Server owns one short-lived pairing session.
 type Server struct {
-	mu        sync.Mutex
-	identity  ServerIdentity
-	device    DeviceInfo
-	installer Installer
-	now       func() time.Time
-	random    io.Reader
-	active    *sessionState
-	terminal  map[string]int
+	mu          sync.Mutex
+	identity    ServerIdentity
+	displayName string
+	device      DeviceInfo
+	installer   Installer
+	now         func() time.Time
+	random      io.Reader
+	active      *sessionState
+	terminal    map[string]int
 }
 
 // ServerOption changes a server dependency.
@@ -76,6 +78,13 @@ func WithInstaller(installer Installer) ServerOption {
 	}
 }
 
+// WithDisplayName sets presentation metadata returned only over pairing TLS.
+func WithDisplayName(displayName string) ServerOption {
+	return func(server *Server) {
+		server.displayName = strings.TrimSpace(displayName)
+	}
+}
+
 // NewServer creates a pairing server with an ephemeral Ed25519 identity.
 func NewServer(identity ServerIdentity, options ...ServerOption) (*Server, error) {
 	if len(identity.PrivateKey) != ed25519.PrivateKeySize || len(identity.PublicKey()) != ed25519.PublicKeySize {
@@ -94,7 +103,18 @@ func NewServer(identity ServerIdentity, options ...ServerOption) (*Server, error
 	for _, option := range options {
 		option(server)
 	}
+	if server.displayName != "" && !validDisplayName(server.displayName) {
+		return nil, errors.New("invalid pairing display name")
+	}
 	return server, nil
+}
+
+// InstanceID is the opaque mDNS identity bound to this server's TLS key.
+func (s *Server) InstanceID() string {
+	if s == nil {
+		return ""
+	}
+	return InstanceIDFromPublicKey(s.identity.PublicKey())
 }
 
 // StartSession creates the server's only active pairing window.
@@ -151,6 +171,10 @@ func (s *Server) ActiveSession() (SessionDescriptor, string, bool) {
 // ServeHTTP accepts the one confirmation request that completes pairing.
 func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Content-Type", "application/json")
+	if request.URL.Path == pairInfoPath {
+		s.serveInfo(response, request)
+		return
+	}
 	if request.Method == http.MethodPost && request.URL.Path == pairSessionPath {
 		s.serveStartSession(response, request)
 		return
@@ -176,6 +200,28 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 	}
 	response.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(response).Encode(record)
+}
+
+func (s *Server) serveInfo(response http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet || request.URL.RawQuery != "" || request.ContentLength > 0 || len(request.TransferEncoding) > 0 {
+		writeError(response, http.StatusBadRequest, "invalid pairing info request")
+		return
+	}
+	request.Body = http.MaxBytesReader(response, request.Body, 1)
+	var probe [1]byte
+	if read, _ := request.Body.Read(probe[:]); read != 0 {
+		writeError(response, http.StatusBadRequest, "invalid pairing info request")
+		return
+	}
+	if !validDisplayName(s.displayName) {
+		writeError(response, http.StatusServiceUnavailable, "pairing display name is unavailable")
+		return
+	}
+	response.Header().Set("Cache-Control", "no-store")
+	response.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(response).Encode(Info{
+		InstanceID: s.InstanceID(), DisplayName: s.displayName, ServerPublicKey: s.identity.PublicKey(),
+	})
 }
 
 func (s *Server) serveStartSession(response http.ResponseWriter, request *http.Request) {
@@ -261,6 +307,17 @@ func (s *Server) confirm(ctx context.Context, request confirmRequest) (DeviceRec
 }
 
 func (s *Server) TLSConfig() (*tls.Config, error) {
+	return &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return s.ephemeralCertificate()
+		},
+	}, nil
+}
+
+func (s *Server) ephemeralCertificate() (*tls.Certificate, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	now := s.now()
 	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serial, err := rand.Int(s.random, serialLimit)
@@ -285,14 +342,11 @@ func (s *Server) TLSConfig() (*tls.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create ephemeral pairing certificate: %w", err)
 	}
-	certificate := tls.Certificate{
+	certificate := &tls.Certificate{
 		Certificate: [][]byte{certificateDER},
 		PrivateKey:  s.identity.PrivateKey,
 	}
-	return &tls.Config{
-		MinVersion:   tls.VersionTLS13,
-		Certificates: []tls.Certificate{certificate},
-	}, nil
+	return certificate, nil
 }
 
 // ValidatePrivateBindAddress permits only literal private or loopback IPs.

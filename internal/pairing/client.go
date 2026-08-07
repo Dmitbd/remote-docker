@@ -39,6 +39,61 @@ type HTTPError struct {
 	Message    string
 }
 
+// Inspect fetches display metadata without creating a pairing session. The
+// self-signed TLS key must hash to the opaque identity observed over mDNS.
+// The display name remains unverified until the user confirms the OOB code.
+func Inspect(ctx context.Context, baseURL, expectedInstanceID string, httpClient *http.Client) (Info, error) {
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || expectedInstanceID == "" {
+		return Info{}, errorsNewSecureURL()
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+pairInfoPath, nil)
+	if err != nil {
+		return Info{}, fmt.Errorf("create pairing info request: %w", err)
+	}
+	client := httpClient
+	if client == nil {
+		client = unverifiedTLS13Client(5 * time.Second)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return Info{}, fmt.Errorf("request pairing info: %w", err)
+	}
+	defer response.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(response.Body, (4<<10)+1))
+	if err != nil {
+		return Info{}, fmt.Errorf("read pairing info response: %w", err)
+	}
+	if len(raw) > 4<<10 {
+		return Info{}, errors.New("pairing info response exceeds size limit")
+	}
+	if response.StatusCode != http.StatusOK {
+		return Info{}, &HTTPError{StatusCode: response.StatusCode, Message: "pairing info unavailable"}
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var info Info
+	if err := decoder.Decode(&info); err != nil {
+		return Info{}, fmt.Errorf("decode pairing info response: %w", err)
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return Info{}, errors.New("decode pairing info response: trailing data")
+	}
+	if !validDisplayName(info.DisplayName) || info.InstanceID != expectedInstanceID ||
+		InstanceIDFromPublicKey(info.ServerPublicKey) != expectedInstanceID || response.TLS == nil ||
+		response.TLS.Version != tls.VersionTLS13 || len(response.TLS.PeerCertificates) != 1 {
+		return Info{}, errors.New("pairing info discovery identity does not match TLS")
+	}
+	certificate := response.TLS.PeerCertificates[0]
+	serverPublicKey, ok := certificate.PublicKey.(ed25519.PublicKey)
+	now := time.Now()
+	if !ok || now.Before(certificate.NotBefore) || now.After(certificate.NotAfter) ||
+		subtle.ConstantTimeCompare(serverPublicKey, info.ServerPublicKey) != 1 {
+		return Info{}, errors.New("pairing info discovery identity does not match TLS")
+	}
+	return info, nil
+}
+
 // Bootstrap requests a single pairing session over private-LAN TLS. The
 // returned server key is bound to the TLS certificate and then authenticated
 // out of band by the six-digit comparison code.
@@ -60,13 +115,7 @@ func Bootstrap(ctx context.Context, baseURL string, clientPublicKey ed25519.Publ
 	request.Header.Set("Content-Type", "application/json")
 	client := httpClient
 	if client == nil {
-		transport := http.DefaultTransport.(*http.Transport).Clone()
-		transport.TLSClientConfig = &tls.Config{
-			MinVersion: tls.VersionTLS13,
-			// Trust is completed by certificate/descriptor binding plus the OOB code.
-			InsecureSkipVerify: true, //nolint:gosec
-		}
-		client = &http.Client{Transport: transport, Timeout: 15 * time.Second}
+		client = unverifiedTLS13Client(15 * time.Second)
 	}
 	response, err := client.Do(request)
 	if err != nil {
@@ -99,6 +148,17 @@ func Bootstrap(ctx context.Context, baseURL string, clientPublicKey ed25519.Publ
 		return SessionDescriptor{}, err
 	}
 	return descriptor, nil
+}
+
+func unverifiedTLS13Client(timeout time.Duration) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		// Trust is completed by binding the certificate key to mDNS and then
+		// authenticating that key with the six-digit OOB comparison.
+		InsecureSkipVerify: true, //nolint:gosec
+	}
+	return &http.Client{Transport: transport, Timeout: timeout}
 }
 
 func (e *HTTPError) Error() string {

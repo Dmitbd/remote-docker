@@ -64,13 +64,7 @@ func TestPairingBootstrapOverTLSBindsClientAndServerKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}
-	tlsConfig, err := server.TLSConfig()
-	if err != nil {
-		t.Fatalf("TLSConfig() error = %v", err)
-	}
-	httpServer := httptest.NewUnstartedServer(server)
-	httpServer.TLS = tlsConfig
-	httpServer.StartTLS()
+	httpServer := newPairingTLSTestServer(t, server)
 	defer httpServer.Close()
 
 	clientPublicKey, _, err := ed25519.GenerateKey(nil)
@@ -97,6 +91,61 @@ func TestPairingBootstrapOverTLSBindsClientAndServerKeys(t *testing.T) {
 	assertHTTPStatus(t, err, http.StatusConflict)
 }
 
+func TestPairingInfoIsReadOnlyAndBoundToEphemeralTLSIdentity(t *testing.T) {
+	identity := newServerIdentity(t)
+	server, err := NewServer(identity, WithDisplayName("Windows Workstation"))
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	httpServer := newPairingTLSTestServer(t, server)
+	defer httpServer.Close()
+
+	instanceID := server.InstanceID()
+	info, err := Inspect(context.Background(), httpServer.URL, instanceID, nil)
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	if info.InstanceID != instanceID || info.DisplayName != "Windows Workstation" ||
+		!bytes.Equal(info.ServerPublicKey, identity.PublicKey()) {
+		t.Fatalf("pairing info = %#v", info)
+	}
+	if _, _, active := server.ActiveSession(); active {
+		t.Fatal("Inspect() created a pairing session")
+	}
+}
+
+func TestPairingInfoRejectsDiscoveryIdentityThatDoesNotMatchTLS(t *testing.T) {
+	identity := newServerIdentity(t)
+	server, err := NewServer(identity, WithDisplayName("Windows Workstation"))
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	httpServer := newPairingTLSTestServer(t, server)
+	defer httpServer.Close()
+
+	if _, err := Inspect(context.Background(), httpServer.URL, "different-opaque-instance", nil); err == nil ||
+		!strings.Contains(err.Error(), "discovery identity") {
+		t.Fatalf("Inspect() error = %v, want discovery identity rejection", err)
+	}
+}
+
+func TestPairingInfoEndpointRejectsBodiesAndNonGETMethods(t *testing.T) {
+	server, err := NewServer(newServerIdentity(t), WithDisplayName("Windows Workstation"))
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	for _, request := range []*http.Request{
+		httptest.NewRequest(http.MethodPost, pairInfoPath, nil),
+		httptest.NewRequest(http.MethodGet, pairInfoPath, strings.NewReader("unexpected")),
+	} {
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		if response.Code == http.StatusOK {
+			t.Fatalf("%s info request with body=%t succeeded", request.Method, request.Body != http.NoBody)
+		}
+	}
+}
+
 func TestPairingConfirmInstallsOnlyManagedClientKeyAndReturnsInstallerMetadata(t *testing.T) {
 	installer := &recordingPairInstaller{device: DeviceInfo{
 		SSHHostPublicKey:  "ssh-ed25519 ACTUAL-WINDOWS-HOST",
@@ -117,13 +166,7 @@ func TestPairingConfirmInstallsOnlyManagedClientKeyAndReturnsInstallerMetadata(t
 	if err != nil {
 		t.Fatalf("StartSession() error = %v", err)
 	}
-	tlsConfig, err := server.TLSConfig()
-	if err != nil {
-		t.Fatalf("TLSConfig() error = %v", err)
-	}
-	httpServer := httptest.NewUnstartedServer(server)
-	httpServer.TLS = tlsConfig
-	httpServer.StartTLS()
+	httpServer := newPairingTLSTestServer(t, server)
 	defer httpServer.Close()
 
 	client := Client{
@@ -220,10 +263,14 @@ func TestTLSConfigUsesEphemeralEd25519IdentityAndTLS13(t *testing.T) {
 	if config.MinVersion != tls.VersionTLS13 {
 		t.Fatalf("MinVersion = %d, want TLS 1.3", config.MinVersion)
 	}
-	if len(config.Certificates) != 1 || len(config.Certificates[0].Certificate) != 1 {
-		t.Fatalf("TLS certificates = %#v, want one ephemeral certificate", config.Certificates)
+	if config.GetCertificate == nil || len(config.Certificates) != 0 {
+		t.Fatalf("TLS config = %#v, want dynamically renewed ephemeral certificate", config)
 	}
-	certificate, err := x509.ParseCertificate(config.Certificates[0].Certificate[0])
+	tlsCertificate, err := config.GetCertificate(&tls.ClientHelloInfo{})
+	if err != nil || len(tlsCertificate.Certificate) != 1 {
+		t.Fatalf("GetCertificate() = %#v, %v", tlsCertificate, err)
+	}
+	certificate, err := x509.ParseCertificate(tlsCertificate.Certificate[0])
 	if err != nil {
 		t.Fatalf("ParseCertificate() error = %v", err)
 	}
@@ -298,13 +345,7 @@ func newPairingFixture(t *testing.T) pairingFixture {
 		t.Fatalf("StartSession() error = %v", err)
 	}
 
-	tlsConfig, err := server.TLSConfig()
-	if err != nil {
-		t.Fatalf("TLSConfig() error = %v", err)
-	}
-	httpServer := httptest.NewUnstartedServer(server)
-	httpServer.TLS = tlsConfig
-	httpServer.StartTLS()
+	httpServer := newPairingTLSTestServer(t, server)
 	t.Cleanup(httpServer.Close)
 
 	authorizedKey := "ssh-ed25519 MAC-PAIR-KEY"
@@ -334,6 +375,28 @@ func newServerIdentity(t *testing.T) ServerIdentity {
 		t.Fatalf("GenerateKey(server) error = %v", err)
 	}
 	return ServerIdentity{PrivateKey: privateKey, publicKey: publicKey}
+}
+
+func newPairingTLSTestServer(t *testing.T, server *Server) *httptest.Server {
+	t.Helper()
+	tlsConfig, err := server.TLSConfig()
+	if err != nil {
+		t.Fatalf("TLSConfig() error = %v", err)
+	}
+	// httptest injects its own certificate when Certificates is empty, which
+	// would bypass the production GetCertificate callback and break the
+	// discovery-to-TLS identity binding under test.
+	certificate, err := tlsConfig.GetCertificate(&tls.ClientHelloInfo{})
+	if err != nil {
+		t.Fatalf("GetCertificate() error = %v", err)
+	}
+	tlsConfig = tlsConfig.Clone()
+	tlsConfig.GetCertificate = nil
+	tlsConfig.Certificates = []tls.Certificate{*certificate}
+	httpServer := httptest.NewUnstartedServer(server)
+	httpServer.TLS = tlsConfig
+	httpServer.StartTLS()
+	return httpServer
 }
 
 func assertHTTPStatus(t *testing.T, err error, want int) {

@@ -228,7 +228,7 @@ func TestMacPairingCoordinatorPersistsPinnedDeviceAndRevokesBeforeLocalRemoval(t
 	if err != nil {
 		t.Fatalf("Candidates() error = %v", err)
 	}
-	if want := []localapi.PairingCandidate{{ID: "windows-peer", Name: "Dev PC"}}; !reflect.DeepEqual(candidates.Candidates, want) {
+	if want := []localapi.PairingCandidate{{ID: "windows-peer", Name: "Dev PC", Unverified: true}}; !reflect.DeepEqual(candidates.Candidates, want) {
 		t.Fatalf("candidates = %#v, want %#v", candidates.Candidates, want)
 	}
 
@@ -472,19 +472,9 @@ func TestWindowsPairingHostRetriesAndPublishesOnReachableLANInterface(t *testing
 	if advertisement.Port != int(listenerPort.Load()) {
 		t.Fatalf("published port = %d, want reachable listener port %d", advertisement.Port, listenerPort.Load())
 	}
-	if !containsTXTKey(advertisement.TXT, "name") {
-		t.Fatalf("advertisement TXT = %#v, want local device name", advertisement.TXT)
+	if want := []string{"version=1", "instance=" + host.server.InstanceID(), "pairing=1"}; !reflect.DeepEqual(advertisement.TXT, want) {
+		t.Fatalf("advertisement TXT = %#v, want opaque TLS-bound data %#v", advertisement.TXT, want)
 	}
-}
-
-func containsTXTKey(values []string, key string) bool {
-	prefix := key + "="
-	for _, value := range values {
-		if strings.HasPrefix(value, prefix) && len(value) > len(prefix) {
-			return true
-		}
-	}
-	return false
 }
 
 func TestPrivatePeerListenerRejectsPublicPeerAtAcceptBoundary(t *testing.T) {
