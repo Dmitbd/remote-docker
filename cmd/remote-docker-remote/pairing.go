@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -175,13 +174,17 @@ func writeManagedAuthorization(path string, contents []byte) (returnErr error) {
 }
 
 func readSyncthingDeviceID(ctx context.Context) (string, error) {
-	command := exec.CommandContext(ctx, "/usr/local/bin/syncthing", "device-id", "--home=/var/lib/remote-docker/syncthing")
-	output, err := command.Output()
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if len(output) > 4096 {
-		return "", errors.New("Syncthing device ID output is too large")
+	path := "/var/lib/remote-docker/syncthing/device-id"
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 4096 {
+		return "", errors.New("managed Syncthing device ID is unavailable")
+	}
+	output, err := os.ReadFile(path)
+	if err != nil || strings.TrimSpace(string(output)) == "" {
+		return "", errors.New("managed Syncthing device ID is unavailable")
 	}
 	return strings.TrimSpace(string(output)), nil
 }

@@ -66,6 +66,9 @@ Describe 'Windows package contract' {
         $script | Should -Match 'GetFolderPath\(\[Environment\+SpecialFolder\]::ProgramFiles\)'
         $script | Should -Match 'Join-Path \$programData ''RemoteDocker'''
         $script | Should -Match 'Join-Path \$programFiles ''Remote Docker\\RemoteDockerAgent\.exe'''
+        $script | Should -Match 'Invoke-External\s+-FilePath\s+\$agentExecutable\s+-ArgumentList\s+@\(''--prepare-wsl''\)'
+        $script | Should -Match '''remote-docker-remote'',\s*''runtime-status'''
+        $script | Should -Not -Match 'syncthing generate --home=/var/lib/remote-docker|ssh-keygen'
         $script | Should -Match 'Join-Path \$PSScriptRoot ''\.\.\\assets\\remote-docker-rootfs\.tar\.zst'''
         $script | Should -Match '-Profile\s+Private'
         $script | Should -Match '-Program\s+\$agentExecutable'
@@ -91,6 +94,8 @@ Describe 'Windows package contract' {
 
         $script | Should -Match 'GetFolderPath\(\[Environment\+SpecialFolder\]::CommonApplicationData\)'
         $script | Should -Match 'Join-Path \$programData ''RemoteDocker'''
+        $script | Should -Match 'RemoteDockerAgent\.exe'
+        $script | Should -Match '--delete-wsl-credential'
         $script | Should -Match 'ValidateSet\(''DELETE-REMOTE-DOCKER-DATA''\)'
         $script | Should -Match '\$DataRemovalConfirmation\s+-ne\s+''DELETE-REMOTE-DOCKER-DATA'''
         $script | Should -Not -Match '\[string\]\$InstallRoot'

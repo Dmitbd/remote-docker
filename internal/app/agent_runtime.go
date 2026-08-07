@@ -105,7 +105,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 
 	var pairingCoordinator runtimePairingCoordinator
 	var pairHost *windowsPairingHost
-	var localSync *localSyncthingRuntime
+	var localSync localSyncLifecycle
 	if runtime.GOOS == "windows" {
 		installer := provision.WSLPairingInstaller{}
 		host, err := newWindowsPairingHost(installer)
@@ -114,13 +114,14 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 		}
 		pairHost = host
 		pairingCoordinator = windowsPairingCoordinator{server: host.server, installer: installer}
+		localSync = provision.WSLRuntimeIdentityPreparer{Secrets: secrets}
 	} else {
 		syncthingExecutable := options.SyncthingExecutable
 		if syncthingExecutable == "" {
 			syncthingExecutable = "/usr/local/libexec/remote-docker/syncthing"
 		}
 		applicationRoot := filepath.Dir(configPath)
-		localSync = newLocalSyncthingRuntime(localSyncthingOptions{
+		macSync := newLocalSyncthingRuntime(localSyncthingOptions{
 			Store: store, Secrets: secrets, Executable: syncthingExecutable,
 			PersistentConfigDir: filepath.Join(applicationRoot, "syncthing", "config"),
 			DataDir:             filepath.Join(applicationRoot, "syncthing", "data"),
@@ -133,8 +134,9 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 			Docker:    dockercli.Runner{}, DockerCLI: dockerCLI, DockerContext: defaultContextName,
 			SSHConfigPath: sshConfigPath, KnownHostsPath: knownHostsPath,
 			AgentSocketPath: agentSocketPath, ControlDir: controlDir,
-			ClientDeviceID: localSync.DeviceID,
+			ClientDeviceID: macSync.DeviceID,
 		})
+		localSync = macSync
 	}
 
 	observer := &productionAgentObserver{

@@ -10,7 +10,9 @@ $managedDistroName = 'remote-docker'
 $managedRelease = 'remote-docker-managed-v1'
 $firewallRuleGroup = 'Remote Docker Managed Rules'
 $programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+$programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
 $installRoot = [System.IO.Path]::GetFullPath((Join-Path $programData 'RemoteDocker'))
+$agentExecutable = [System.IO.Path]::GetFullPath((Join-Path $programFiles 'Remote Docker\RemoteDockerAgent.exe'))
 
 function Assert-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -102,5 +104,11 @@ if ($PSCmdlet.ShouldProcess("WSL distribution '$managedDistroName' and '$install
     }
     if (Test-Path -LiteralPath $installRoot) {
         Remove-Item -LiteralPath $installRoot -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $agentExecutable -PathType Leaf) {
+        & $agentExecutable --delete-wsl-credential
+        if ($LASTEXITCODE -ne 0) {
+            throw "Managed WSL credential cleanup failed with exit code $LASTEXITCODE."
+        }
     }
 }

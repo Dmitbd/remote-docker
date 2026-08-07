@@ -271,6 +271,24 @@ func TestManagedProcessOwnsChildBeyondStartupContext(t *testing.T) {
 	}
 }
 
+func TestSyncthingAPIKeyMaterializationRoundTripKeepsPersistentConfigSecretFree(t *testing.T) {
+	original := []byte(`<configuration><gui><address>127.0.0.1:8384</address><apikey></apikey></gui></configuration>`)
+	materialized, err := MaterializeConfigAPIKey(original, []byte("runtime-only-api-key"))
+	if err != nil {
+		t.Fatalf("MaterializeConfigAPIKey() error = %v", err)
+	}
+	if !bytes.Contains(materialized, []byte("runtime-only-api-key")) {
+		t.Fatalf("materialized config = %q", materialized)
+	}
+	sanitized, err := SanitizeConfigAPIKey(materialized)
+	if err != nil {
+		t.Fatalf("SanitizeConfigAPIKey() error = %v", err)
+	}
+	if bytes.Contains(sanitized, []byte("runtime-only-api-key")) || !bytes.Contains(sanitized, []byte("<apikey></apikey>")) {
+		t.Fatalf("sanitized config = %q", sanitized)
+	}
+}
+
 func TestManagedProcessStartFailureCleansRuntimeIdentity(t *testing.T) {
 	options := testProcessOptions(t)
 	launcher := &capturingLauncher{startErr: errors.New("cannot start")}

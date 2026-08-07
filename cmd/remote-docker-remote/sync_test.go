@@ -20,7 +20,9 @@ func TestDefaultRemoteSyncRuntimeBoundsLoopbackRequests(t *testing.T) {
 		t.Fatalf("default sync runtime type = %T", defaultRemoteSyncRuntime())
 	}
 	if runtime.Endpoint != "http://127.0.0.1:8384" || runtime.HTTPClient == nil ||
-		runtime.HTTPClient.Timeout <= 0 || runtime.HTTPClient.Timeout > 30*time.Second {
+		runtime.HTTPClient.Timeout <= 0 || runtime.HTTPClient.Timeout > 30*time.Second ||
+		runtime.ConfigPath != "/run/remote-docker/syncthing/config.xml" ||
+		runtime.PersistentConfigPath != "/var/lib/remote-docker/syncthing/config.xml" {
 		t.Fatalf("default remote Syncthing runtime = %#v", runtime)
 	}
 }
@@ -32,6 +34,7 @@ func TestRemoteSyncthingOperationsUseLoopbackAPIAndPairedIdentityOnly(t *testing
 		t.Fatalf("write managed authorization: %v", err)
 	}
 	configPath := filepath.Join(root, "config.xml")
+	persistentConfigPath := filepath.Join(root, "persistent-config.xml")
 	if err := os.WriteFile(configPath, []byte(`<configuration><gui><apikey>remote-api-key</apikey></gui></configuration>`), 0o600); err != nil {
 		t.Fatalf("write Syncthing config: %v", err)
 	}
@@ -65,7 +68,7 @@ func TestRemoteSyncthingOperationsUseLoopbackAPIAndPairedIdentityOnly(t *testing
 	defer server.Close()
 
 	operations := remoteSyncthingOperations{
-		Endpoint: server.URL, ConfigPath: configPath, AuthorizedKeysPath: authorizedKeysPath,
+		Endpoint: server.URL, ConfigPath: configPath, PersistentConfigPath: persistentConfigPath, AuthorizedKeysPath: authorizedKeysPath,
 		HTTPClient: server.Client(),
 	}
 	params := remoteSyncConfigureParams{
@@ -87,6 +90,10 @@ func TestRemoteSyncthingOperationsUseLoopbackAPIAndPairedIdentityOnly(t *testing
 	}
 	if err := operations.Revoke(context.Background(), "MAC-SYNC"); err != nil {
 		t.Fatalf("Revoke() error = %v", err)
+	}
+	persistentConfig, err := os.ReadFile(persistentConfigPath)
+	if err != nil || bytes.Contains(persistentConfig, []byte("remote-api-key")) || !bytes.Contains(persistentConfig, []byte("<apikey></apikey>")) {
+		t.Fatalf("persistent config = %q error=%v", persistentConfig, err)
 	}
 	wantRequests := []string{
 		"PUT /rest/config/devices", "PUT /rest/config/folders", "POST /rest/db/ignores?folder=0123456789abcdef",
@@ -134,52 +141,5 @@ func TestRemoteSyncthingOperationsRejectForeignDeviceAndUnsafeFolder(t *testing.
 		} else if strings.Contains(err.Error(), params.DeviceID) || strings.Contains(err.Error(), params.Folders[0].Path) {
 			t.Fatalf("validation error leaked request data: %v", err)
 		}
-	}
-}
-
-func TestSyncBootstrapHardensOnlyExactRegularConfig(t *testing.T) {
-	root := t.TempDir()
-	configPath := filepath.Join(root, "config.xml")
-	input := []byte(`<configuration>
-  <gui><address>0.0.0.0:8384</address><apikey>wsl-api-key</apikey></gui>
-  <options>
-    <listenAddress>default</listenAddress>
-    <globalAnnounceEnabled>true</globalAnnounceEnabled><localAnnounceEnabled>true</localAnnounceEnabled>
-    <relaysEnabled>true</relaysEnabled><startBrowser>true</startBrowser><urAccepted>0</urAccepted>
-    <upgradeToPreReleases>true</upgradeToPreReleases>
-  </options>
-</configuration>`)
-	if err := os.WriteFile(configPath, input, 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	if code := runSyncBootstrap(syncBootstrapRuntime{ConfigPath: configPath}, &bytes.Buffer{}); code != 0 {
-		t.Fatalf("runSyncBootstrap() code = %d", code)
-	}
-	hardened, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("read hardened config: %v", err)
-	}
-	for _, required := range []string{
-		"<address>127.0.0.1:8384</address>", "<apikey>wsl-api-key</apikey>",
-		"<listenAddress>tcp://0.0.0.0:22000</listenAddress>", "<relaysEnabled>false</relaysEnabled>",
-	} {
-		if !bytes.Contains(hardened, []byte(required)) {
-			t.Fatalf("hardened config missing %q: %s", required, hardened)
-		}
-	}
-
-	target := filepath.Join(root, "foreign.xml")
-	if err := os.WriteFile(target, input, 0o600); err != nil {
-		t.Fatalf("write foreign config: %v", err)
-	}
-	link := filepath.Join(root, "config-link.xml")
-	if err := os.Symlink(target, link); err != nil {
-		t.Fatalf("create config symlink: %v", err)
-	}
-	if code := runSyncBootstrap(syncBootstrapRuntime{ConfigPath: link}, &bytes.Buffer{}); code == 0 {
-		t.Fatal("runSyncBootstrap() accepted a symlink")
-	}
-	if after, _ := os.ReadFile(target); !bytes.Equal(after, input) {
-		t.Fatal("rejected symlink changed its target")
 	}
 }

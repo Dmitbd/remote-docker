@@ -185,9 +185,12 @@ func StartManagedProcess(ctx context.Context, options ProcessOptions) (*ManagedP
 		if keyErr != nil {
 			return nil, fmt.Errorf("read Syncthing API credential: %w", keyErr)
 		}
-		materialized, rewriteErr := rewriteXMLTextFile(runtimeConfigPath, map[string]string{
-			"configuration/gui/apikey": string(apiKey),
-		})
+		runtimeConfig, readErr := os.ReadFile(runtimeConfigPath)
+		if readErr != nil {
+			clear(apiKey)
+			return nil, readErr
+		}
+		materialized, rewriteErr := MaterializeConfigAPIKey(runtimeConfig, apiKey)
 		clear(apiKey)
 		if rewriteErr != nil {
 			return nil, rewriteErr
@@ -373,21 +376,24 @@ func persistRuntimeConfig(runtimeDir, persistentDir string) error {
 	if err != nil {
 		return err
 	}
-	sanitized, err := rewriteXMLText(contents, map[string]string{
-		"configuration/gui/apikey": "",
-	})
+	sanitized, err := SanitizeConfigAPIKey(contents)
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(filepath.Join(persistentDir, "config.xml"), sanitized, 0o600)
 }
 
-func rewriteXMLTextFile(path string, replacements map[string]string) ([]byte, error) {
-	contents, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
+// MaterializeConfigAPIKey injects the credential into a private runtime copy.
+func MaterializeConfigAPIKey(config, apiKey []byte) ([]byte, error) {
+	if len(apiKey) == 0 {
+		return nil, errors.New("Syncthing API credential is empty")
 	}
-	return rewriteXMLText(contents, replacements)
+	return rewriteXMLText(config, map[string]string{"configuration/gui/apikey": string(apiKey)})
+}
+
+// SanitizeConfigAPIKey removes the credential before configuration is persisted.
+func SanitizeConfigAPIKey(config []byte) ([]byte, error) {
+	return rewriteXMLText(config, map[string]string{"configuration/gui/apikey": ""})
 }
 
 type commandLauncher struct{}

@@ -199,10 +199,11 @@ func hardenGeneratedConfig(data []byte) ([]byte, []byte, error) {
 	return []byte(strings.TrimSpace(extracted.GUI.APIKey)), hardened, nil
 }
 
-// HardenWSLConfig keeps the local REST credential in the service-owned WSL
-// config while disabling discovery, relays, telemetry, browser startup, and
-// all non-loopback GUI access. The sync listener remains reachable through the
-// Windows-managed private bridge only.
+// HardenWSLConfig prepares the generated runtime copy while disabling
+// discovery, relays, telemetry, browser startup, and all non-loopback GUI
+// access. Callers extract and remove the REST credential before persisting the
+// secret-free copy. The sync listener remains reachable only through the
+// Windows-managed private bridge.
 func HardenWSLConfig(data []byte) ([]byte, error) {
 	var extracted struct {
 		GUI struct {

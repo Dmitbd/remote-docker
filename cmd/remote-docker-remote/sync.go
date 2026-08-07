@@ -17,76 +17,6 @@ import (
 
 const remoteSyncthingCredentialOwner = "remote-syncthing"
 
-type syncBootstrapRuntime struct {
-	ConfigPath string
-}
-
-func defaultSyncBootstrapRuntime() syncBootstrapRuntime {
-	return syncBootstrapRuntime{ConfigPath: "/var/lib/remote-docker/syncthing/config.xml"}
-}
-
-func runSyncBootstrap(runtime syncBootstrapRuntime, errorOutput io.Writer) int {
-	path := runtime.ConfigPath
-	if !filepath.IsAbs(path) {
-		_, _ = io.WriteString(errorOutput, "managed Syncthing config path is invalid\n")
-		return 1
-	}
-	before, err := os.Lstat(path)
-	if err != nil || !before.Mode().IsRegular() {
-		_, _ = io.WriteString(errorOutput, "managed Syncthing config is unavailable\n")
-		return 1
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		_, _ = io.WriteString(errorOutput, "managed Syncthing config is unavailable\n")
-		return 1
-	}
-	opened, statErr := file.Stat()
-	data, readErr := io.ReadAll(io.LimitReader(file, (2<<20)+1))
-	closeErr := file.Close()
-	if statErr != nil || !os.SameFile(before, opened) || readErr != nil || closeErr != nil || len(data) > 2<<20 {
-		_, _ = io.WriteString(errorOutput, "managed Syncthing config is invalid\n")
-		return 1
-	}
-	hardened, err := syncer.HardenWSLConfig(data)
-	if err != nil {
-		_, _ = io.WriteString(errorOutput, "managed Syncthing config is invalid\n")
-		return 1
-	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".config.xml.tmp-*")
-	if err != nil {
-		_, _ = io.WriteString(errorOutput, "cannot harden managed Syncthing config\n")
-		return 1
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if err := temporary.Chmod(0o600); err != nil {
-		temporary.Close()
-		return 1
-	}
-	if _, err := temporary.Write(hardened); err != nil {
-		temporary.Close()
-		return 1
-	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return 1
-	}
-	if err := temporary.Close(); err != nil {
-		return 1
-	}
-	current, err := os.Lstat(path)
-	if err != nil || !current.Mode().IsRegular() || !os.SameFile(before, current) {
-		_, _ = io.WriteString(errorOutput, "managed Syncthing config changed during hardening\n")
-		return 1
-	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		_, _ = io.WriteString(errorOutput, "cannot harden managed Syncthing config\n")
-		return 1
-	}
-	return 0
-}
-
 type remoteSyncFolder struct {
 	ID   string `json:"id"`
 	Path string `json:"path"`
@@ -134,21 +64,23 @@ func (o remoteSyncthingOperations) Revoke(ctx context.Context, deviceID string) 
 	if err := client.ReplaceDevices(ctx, nil); err != nil {
 		return errors.New("remove managed sync device")
 	}
-	return nil
+	return o.persistSecretFreeConfig()
 }
 
 type remoteSyncthingOperations struct {
-	Endpoint           string
-	ConfigPath         string
-	AuthorizedKeysPath string
-	HTTPClient         *http.Client
+	Endpoint             string
+	ConfigPath           string
+	PersistentConfigPath string
+	AuthorizedKeysPath   string
+	HTTPClient           *http.Client
 }
 
 func defaultRemoteSyncRuntime() remoteSyncRuntime {
 	return remoteSyncthingOperations{
-		Endpoint: "http://127.0.0.1:8384", ConfigPath: "/var/lib/remote-docker/syncthing/config.xml",
-		AuthorizedKeysPath: "/var/lib/remote-docker/authorized_keys",
-		HTTPClient:         &http.Client{Timeout: 10 * time.Second},
+		Endpoint: "http://127.0.0.1:8384", ConfigPath: "/run/remote-docker/syncthing/config.xml",
+		PersistentConfigPath: "/var/lib/remote-docker/syncthing/config.xml",
+		AuthorizedKeysPath:   "/var/lib/remote-docker/authorized_keys",
+		HTTPClient:           &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
@@ -188,6 +120,29 @@ func (o remoteSyncthingOperations) Configure(ctx context.Context, params remoteS
 		if err := client.SetIgnores(ctx, folder.ID, syncer.DefaultIgnores); err != nil {
 			return errors.New("configure managed sync ignores")
 		}
+	}
+	return o.persistSecretFreeConfig()
+}
+
+func (o remoteSyncthingOperations) persistSecretFreeConfig() error {
+	runtimePath := o.ConfigPath
+	if runtimePath == "" {
+		runtimePath = "/run/remote-docker/syncthing/config.xml"
+	}
+	persistentPath := o.PersistentConfigPath
+	if persistentPath == "" {
+		persistentPath = "/var/lib/remote-docker/syncthing/config.xml"
+	}
+	contents, err := readRuntimeFile(runtimePath)
+	if err != nil {
+		return errors.New("read managed Syncthing runtime config")
+	}
+	sanitized, err := syncer.SanitizeConfigAPIKey(contents)
+	if err != nil {
+		return errors.New("sanitize managed Syncthing runtime config")
+	}
+	if err := writeRuntimeFile(persistentPath, sanitized, 0o600, -1, -1); err != nil {
+		return errors.New("persist managed Syncthing config")
 	}
 	return nil
 }
@@ -238,7 +193,7 @@ func (o remoteSyncthingOperations) client() (*syncer.Client, error) {
 	}
 	configPath := o.ConfigPath
 	if configPath == "" {
-		configPath = "/var/lib/remote-docker/syncthing/config.xml"
+		configPath = "/run/remote-docker/syncthing/config.xml"
 	}
 	httpClient := o.HTTPClient
 	if httpClient == nil {

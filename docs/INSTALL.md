@@ -9,6 +9,7 @@ The first public release is not available yet. These instructions describe the i
 - A Mac supported by the published macOS package.
 - A Windows 11 x64 PC with hardware virtualization enabled.
 - Administrator access for the initial Windows setup only.
+- Use the same Windows account for provisioning and the normal Agent session; the WSL identity key is protected in that account's Windows Credential Manager.
 - Both computers connected to the same trusted private Wi-Fi or Ethernet network.
 - Enough Windows disk space for WSL2, images, build cache, and project data.
 
@@ -27,6 +28,8 @@ Docker Desktop is not required. Do not expose Docker TCP ports 2375 or 2376 on e
 
 5. Restart Windows if the helper reports that WSL features were enabled, then run the helper again.
 6. Confirm that the Remote Docker tray application reports that the managed environment is ready for pairing.
+
+The Windows Agent keeps the WSL identity decryption key in Windows Credential Manager. Only an encrypted identity bundle and secret-free Syncthing configuration remain in the managed WSL filesystem. Private identity files are materialized below `/run` only while the managed services load them.
 
 The helper creates a dedicated WSL2 distribution. It does not use Docker Desktop and does not alter unrelated WSL distributions.
 

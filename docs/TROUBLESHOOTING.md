@@ -40,6 +40,8 @@ The macOS installer never overwrites an unrelated Docker command. Decide which i
 
 Never confirm different six-digit codes. If a previously paired SSH identity changes, stop and determine why. After a deliberate reinstall that changed the managed identity, unpair and pair again rather than editing known-host files manually.
 
+If Windows Credential Manager was cleared, do not delete or regenerate files inside the managed WSL distribution. The encrypted identity bundle intentionally cannot be opened without its original Windows credential. Restore the Windows credential from a trusted system backup or use the explicit data-removal and clean-provisioning flow.
+
 ## A bind path is rejected
 
 Register the containing source directory:

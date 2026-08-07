@@ -2,18 +2,43 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"time"
 
 	"github.com/Dmitbd/remote-docker/internal/app"
+	"github.com/Dmitbd/remote-docker/internal/credentials"
 	"github.com/Dmitbd/remote-docker/internal/localapi"
+	"github.com/Dmitbd/remote-docker/internal/provision"
 )
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	if len(os.Args) == 2 && os.Args[1] == "--prepare-wsl" {
+		if err := (provision.WSLRuntimeIdentityPreparer{Secrets: credentials.NewKeyringStore()}).Prepare(ctx); err != nil {
+			fmt.Fprintln(os.Stderr, "remote-docker-agent: cannot prepare managed WSL runtime")
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == "--delete-wsl-credential" {
+		err := credentials.NewKeyringStore().Delete(
+			provision.WindowsRuntimeCredentialOwner,
+			provision.WindowsRuntimeIdentityKeyCredential,
+		)
+		if err != nil && !errors.Is(err, credentials.ErrNotFound) {
+			fmt.Fprintln(os.Stderr, "remote-docker-agent: cannot remove managed WSL credential")
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) != 1 {
+		fmt.Fprintln(os.Stderr, "remote-docker-agent: unsupported arguments")
+		os.Exit(2)
+	}
 	executablePath, err := os.Executable()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "remote-docker-agent: cannot locate executable")

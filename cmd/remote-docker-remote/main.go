@@ -50,11 +50,21 @@ func main() {
 		os.Exit(runPairingInstall(context.Background(), defaultPairingRuntime(), os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
 	case "pairing-revoke":
 		os.Exit(runPairingRevoke(defaultPairingRuntime(), os.Args[2:], os.Stderr))
-	case "sync-bootstrap":
+	case "runtime-prepare":
 		if len(os.Args) != 2 {
 			os.Exit(2)
 		}
-		os.Exit(runSyncBootstrap(defaultSyncBootstrapRuntime(), os.Stderr))
+		os.Exit(runRuntimePrepare(context.Background(), os.Stdin, os.Stderr))
+	case "runtime-status":
+		if len(os.Args) != 2 {
+			os.Exit(2)
+		}
+		os.Exit(runRuntimeStatus(context.Background()))
+	case "runtime-identity-state":
+		if len(os.Args) != 2 {
+			os.Exit(2)
+		}
+		os.Exit(runRuntimeIdentityState(os.Stdout))
 	default:
 		os.Exit(2)
 	}

@@ -148,25 +148,22 @@ set -eu
 install -d -m 0755 /etc/remote-docker
 printf '%s\n' '{"schema_version":1,"managed_by":"remote-docker"}' > /etc/remote-docker/managed.json
 systemctl daemon-reload
-systemctl enable docker.service remote-docker-remote.service syncthing@remote-docker.service
-if [ ! -f /var/lib/remote-docker/syncthing/config.xml ]; then
-  runuser --user remote-docker -- /usr/local/bin/syncthing generate --home=/var/lib/remote-docker/syncthing --no-port-probing
-fi
-runuser --user remote-docker -- /usr/local/bin/remote-docker-remote sync-bootstrap
-systemctl start docker.service remote-docker-remote.service syncthing@remote-docker.service
+systemctl disable ssh.socket ssh.service syncthing@remote-docker.service remote-docker.target >/dev/null 2>&1 || true
 '@
     Invoke-External -FilePath 'wsl.exe' -ArgumentList @(
         '--distribution', $managedDistroName, '--user', 'root', '--exec', '/bin/sh', '-c', $firstBoot
     ) -Description 'Managed WSL first boot'
 }
 
-Invoke-External -FilePath 'wsl.exe' -ArgumentList @(
-    '--distribution', $managedDistroName, '--exec', '/usr/local/bin/remote-docker-remote', 'health'
-) -Description 'Managed WSL health check'
-
 if (-not (Test-Path -LiteralPath $agentExecutable -PathType Leaf)) {
     throw "Windows Agent executable was not found at '$agentExecutable'."
 }
+
+Invoke-External -FilePath $agentExecutable -ArgumentList @('--prepare-wsl') -Description 'Managed WSL identity preparation'
+Invoke-External -FilePath 'wsl.exe' -ArgumentList @(
+    '--distribution', $managedDistroName, '--user', 'root', '--exec',
+    '/usr/local/bin/remote-docker-remote', 'runtime-status'
+) -Description 'Managed WSL health check'
 
 $firewallRules = @(
     @{ Name = 'RemoteDocker.Managed.SSH'; DisplayName = 'Remote Docker Managed SSH'; Port = $SshBridgePort },

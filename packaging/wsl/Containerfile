@@ -46,8 +46,10 @@ RUN set -eux; \
     useradd --create-home --shell /bin/sh --groups docker remote-docker; \
     passwd --lock remote-docker; \
     install -d -m 0700 -o remote-docker -g remote-docker /var/lib/remote-docker; \
+    install -d -m 0700 -o root -g root /var/lib/remote-docker-private; \
     install -d -m 0700 -o remote-docker -g remote-docker /var/lib/remote-docker/syncthing; \
-	install -d -m 0700 -o remote-docker -g remote-docker /Users; \
+    install -d -m 0700 -o remote-docker -g remote-docker /var/lib/remote-docker/syncthing/data; \
+    install -d -m 0700 -o remote-docker -g remote-docker /Users; \
     install -d -m 0755 /etc/remote-docker; \
     install -m 0600 -o remote-docker -g remote-docker /dev/null /var/lib/remote-docker/authorized_keys; \
     printf '%s\n' 'remote-docker-managed-v1' > /etc/remote-docker-release; \

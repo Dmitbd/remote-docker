@@ -77,7 +77,7 @@ Published TCP ports are forwarded back to the same `localhost` ports on the Mac,
 
 ## Security
 
-The Docker API is never exposed as an unsecured port on Wi-Fi. Paired devices communicate through an authenticated encrypted channel, and access can be revoked by removing the pairing.
+The Docker API is never exposed as an unsecured port on Wi-Fi. Paired devices communicate through an authenticated encrypted channel, and access can be revoked by removing the pairing. Private WSL service identities are encrypted at rest with a key protected by Windows Credential Manager and are materialized only in the Linux runtime filesystem while services load them.
 
 The initial version is intended for two trusted computers on the same private local network.
 

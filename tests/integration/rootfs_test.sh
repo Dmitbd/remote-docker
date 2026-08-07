@@ -49,9 +49,14 @@ if [[ "${1:-}" == "--source" ]]; then
   require_contains "${source_root}/build-rootfs.sh" 'artifact_tmp='
   require_contains "${source_root}/build-rootfs.sh" 'mv .*artifact_tmp.*artifact'
   require_contains "${source_root}/Containerfile" 'COPY --from=syncthing-asset'
+  require_contains "${source_root}/Containerfile" '/var/lib/remote-docker-private'
   require_not_contains "${source_root}/Containerfile" 'github\.com/syncthing|curl .*syncthing'
   require_not_contains "${source_root}/etc/docker/daemon.json" '2375|2376|tcp://'
   require_contains "${source_root}/etc/ssh/sshd_config.d/remote-docker.conf" '^PasswordAuthentication no$'
+  require_contains "${source_root}/etc/ssh/sshd_config.d/remote-docker.conf" '^HostKey /run/remote-docker/ssh_host_ed25519_key$'
+  require_not_contains "${source_root}/etc/systemd/system/ssh.service.d/remote-docker.conf" 'ssh-keygen|/etc/remote-docker/ssh_host_ed25519_key'
+  require_contains "${source_root}/etc/systemd/system/syncthing@.service" '--config=/run/remote-docker/syncthing'
+  require_contains "${source_root}/etc/systemd/system/syncthing@.service" '--data=/var/lib/remote-docker/syncthing/data'
   require_contains "${source_root}/etc/ssh/sshd_config.d/remote-docker.conf" '^PermitOpen 127\.0\.0\.1:\*$'
   require_contains "${source_root}/usr/local/libexec/remote-docker/authorized-command" 'docker system dial-stdio'
   require_contains "${source_root}/usr/local/libexec/remote-docker/authorized-command" 'remote-docker-remote rpc'
@@ -72,6 +77,7 @@ zstd -q -dc "${artifact}" | tar -xf - -C "${extract_root}"
 
 require_file "${extract_root}/etc/passwd"
 require_file "${extract_root}/etc/shadow"
+[[ -d "${extract_root}/var/lib/remote-docker-private" ]] || fail "missing root-owned encrypted identity directory"
 require_contains "${extract_root}/etc/passwd" '^remote-docker:[^:]*:[0-9]+:[0-9]+:[^:]*:[^:]*:/bin/sh$'
 require_contains "${extract_root}/etc/group" '^docker:'
 require_contains "${extract_root}/etc/shadow" '^remote-docker:!'
@@ -92,6 +98,13 @@ for path in \
   require_file "${extract_root}/${path}"
 done
 
+for private_path in \
+  etc/remote-docker/ssh_host_ed25519_key \
+  var/lib/remote-docker/syncthing/cert.pem \
+  var/lib/remote-docker/syncthing/key.pem; do
+  [[ ! -e "${extract_root}/${private_path}" ]] || fail "persistent private identity exists at ${private_path}"
+done
+
 require_not_contains "${extract_root}/etc/docker/daemon.json" '2375|2376|tcp://'
 require_contains "${extract_root}/etc/ssh/sshd_config.d/remote-docker.conf" '^PermitTTY no$'
 require_contains "${extract_root}/etc/ssh/sshd_config.d/remote-docker.conf" '^X11Forwarding no$'
@@ -100,6 +113,8 @@ require_contains "${extract_root}/etc/ssh/sshd_config.d/remote-docker.conf" '^Pe
 require_contains "${extract_root}/etc/ssh/sshd_config.d/remote-docker.conf" '^PermitListen 127\.0\.0\.1:\*$'
 require_contains "${extract_root}/etc/ssh/sshd_config.d/remote-docker.conf" '^PasswordAuthentication no$'
 require_contains "${extract_root}/etc/ssh/sshd_config.d/remote-docker.conf" '^PermitRootLogin no$'
+require_contains "${extract_root}/etc/ssh/sshd_config.d/remote-docker.conf" '^HostKey /run/remote-docker/ssh_host_ed25519_key$'
+require_not_contains "${extract_root}/etc/systemd/system/ssh.service.d/remote-docker.conf" 'ssh-keygen|/etc/remote-docker/ssh_host_ed25519_key'
 require_not_contains "${extract_root}/usr/local/libexec/remote-docker/authorized-command" 'eval|bash -c|sh -c'
 
 if [[ "$(uname -s)" == "Linux" ]]; then

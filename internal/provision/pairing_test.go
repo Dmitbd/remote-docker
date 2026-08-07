@@ -45,7 +45,7 @@ func TestWSLPairingInstallerUsesExactAllowlistedCommandsWithoutShell(t *testing.
 	}
 }
 
-func TestRootfsKeepsManagedAuthorizationWritableOnlyByServiceUser(t *testing.T) {
+func TestRootfsMaterializesSSHPrivateIdentityOnlyBelowRuntimeDirectory(t *testing.T) {
 	containerfile, err := os.ReadFile(filepath.Join("..", "..", "packaging", "wsl", "Containerfile"))
 	if err != nil {
 		t.Fatalf("read Containerfile: %v", err)
@@ -64,10 +64,10 @@ func TestRootfsKeepsManagedAuthorizationWritableOnlyByServiceUser(t *testing.T) 
 	if !strings.Contains(string(sshd), "AuthorizedKeysFile /var/lib/remote-docker/authorized_keys") {
 		t.Fatalf("sshd does not use the service-user managed authorized_keys")
 	}
-	if !strings.Contains(string(sshd), "HostKey /etc/remote-docker/ssh_host_ed25519_key") ||
-		!strings.Contains(string(sshService), "ssh-keygen -q -t ed25519") ||
-		!strings.Contains(string(sshService), "/etc/remote-docker/ssh_host_ed25519_key") {
-		t.Fatal("sshd does not generate and retain the public host identity returned during pairing")
+	if !strings.Contains(string(sshd), "HostKey /run/remote-docker/ssh_host_ed25519_key") ||
+		!strings.Contains(string(sshService), "ConditionPathExists=/run/remote-docker/ssh_host_ed25519_key") ||
+		strings.Contains(string(sshService), "ssh-keygen") || strings.Contains(string(sshd), "HostKey /etc/remote-docker") {
+		t.Fatal("sshd is not gated on the Windows-owned runtime identity")
 	}
 }
 
@@ -113,15 +113,14 @@ func TestRootfsHardensSyncthingBeforeStartAndAllowsOnlyMacWorkspaceRoot(t *testi
 		t.Fatal("remote helper builder downloads the unrelated full module graph")
 	}
 	policy := string(override)
-	if !strings.Contains(policy, "ReadWritePaths=/var/lib/remote-docker -/Users") || strings.Contains(policy, "-/workspace") {
+	if !strings.Contains(policy, "ReadWritePaths=/var/lib/remote-docker /run/remote-docker -/Users") || strings.Contains(policy, "-/workspace") {
 		t.Fatalf("Syncthing filesystem policy = %q", policy)
 	}
 	script := string(provision)
-	generate := strings.Index(script, "syncthing generate --home=/var/lib/remote-docker/syncthing --no-port-probing")
-	harden := strings.Index(script, "remote-docker-remote sync-bootstrap")
-	start := strings.Index(script, "systemctl start docker.service remote-docker-remote.service syncthing@remote-docker.service")
-	if generate < 0 || harden <= generate || start <= harden {
-		t.Fatalf("Syncthing bootstrap order is unsafe: generate=%d harden=%d start=%d", generate, harden, start)
+	if strings.Contains(script, "syncthing generate --home=/var/lib/remote-docker/syncthing") ||
+		strings.Contains(script, "ssh-keygen") || !strings.Contains(script, "--prepare-wsl") ||
+		!strings.Contains(script, "remote-docker-remote', 'runtime-status'") {
+		t.Fatalf("Windows provisioning does not delegate private identity custody to the Agent: %s", script)
 	}
 }
 
