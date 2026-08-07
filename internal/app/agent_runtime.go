@@ -34,6 +34,7 @@ import (
 	"github.com/Dmitbd/remote-docker/internal/sshtransport"
 	"github.com/Dmitbd/remote-docker/internal/syncer"
 	"github.com/Dmitbd/remote-docker/internal/windowsbridge"
+	"github.com/Dmitbd/remote-docker/internal/workspace"
 	"golang.org/x/crypto/ssh"
 	sshagent "golang.org/x/crypto/ssh/agent"
 )
@@ -50,8 +51,13 @@ const (
 // ProductionAgentOptions identifies the installed executable and persisted
 // non-secret config. Empty platform paths use per-user defaults.
 type ProductionAgentOptions struct {
-	ConfigPath     string
-	ExecutablePath string
+	ConfigPath          string
+	ExecutablePath      string
+	SyncthingExecutable string
+}
+
+type localSyncLifecycle interface {
+	Run(context.Context, time.Duration) error
 }
 
 // AgentRuntime owns the concrete controller, health observer, pairing host,
@@ -61,6 +67,7 @@ type AgentRuntime struct {
 	restorer       *infrastructureRestorer
 	pairHost       *windowsPairingHost
 	ssh            *managedSSHRuntime
+	localSync      localSyncLifecycle
 	startupRecover func(context.Context) error
 }
 
@@ -98,6 +105,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 
 	var pairingCoordinator runtimePairingCoordinator
 	var pairHost *windowsPairingHost
+	var localSync *localSyncthingRuntime
 	if runtime.GOOS == "windows" {
 		installer := provision.WSLPairingInstaller{}
 		host, err := newWindowsPairingHost(installer)
@@ -107,12 +115,25 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 		pairHost = host
 		pairingCoordinator = windowsPairingCoordinator{server: host.server, installer: installer}
 	} else {
+		syncthingExecutable := options.SyncthingExecutable
+		if syncthingExecutable == "" {
+			syncthingExecutable = "/usr/local/libexec/remote-docker/syncthing"
+		}
+		applicationRoot := filepath.Dir(configPath)
+		localSync = newLocalSyncthingRuntime(localSyncthingOptions{
+			Store: store, Secrets: secrets, Executable: syncthingExecutable,
+			PersistentConfigDir: filepath.Join(applicationRoot, "syncthing", "config"),
+			DataDir:             filepath.Join(applicationRoot, "syncthing", "data"),
+			RuntimeRoot:         filepath.Join(applicationRoot, "run", "syncthing"),
+			HTTPClient:          httpClient,
+		})
 		pairingCoordinator = newMacPairingCoordinator(macPairingOptions{
 			Store: store, Secrets: secrets,
 			Transport: discoveryPairingTransport{SSHConfigPath: sshConfigPath},
 			Docker:    dockercli.Runner{}, DockerCLI: dockerCLI, DockerContext: defaultContextName,
 			SSHConfigPath: sshConfigPath, KnownHostsPath: knownHostsPath,
 			AgentSocketPath: agentSocketPath, ControlDir: controlDir,
+			ClientDeviceID: localSync.DeviceID,
 		})
 	}
 
@@ -148,9 +169,18 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 		_ = device
 		return portrelay.Reconciler{Source: source, Sink: supervisor}, nil
 	})
+	syncInspector := productionSyncInspector{secrets: secrets, httpClient: httpClient}
+	var syncReadiness SyncReadiness
+	if runtime.GOOS != "windows" {
+		syncReadiness = productionSyncReadiness{
+			store: store, secrets: secrets, httpClient: httpClient,
+			remote: sshRemoteSync{store: store, sshConfigPath: sshConfigPath},
+		}
+	}
 	controller := &productionAgentController{
 		store: store, pairing: pairingCoordinator,
-		sync: productionSyncInspector{secrets: secrets, httpClient: httpClient},
+		sync:           syncInspector,
+		dockerPreparer: &productionDockerPreparer{store: store, sync: syncReadiness},
 	}
 	agent := NewAgent(observer, restorer, controller)
 	controller.diagnostics = newProductionDiagnosticsWithOptions(productionDiagnosticsOptions{
@@ -172,7 +202,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 		return err
 	}
 	return &AgentRuntime{
-		agent: agent, restorer: restorer, pairHost: pairHost, ssh: sshRuntime,
+		agent: agent, restorer: restorer, pairHost: pairHost, ssh: sshRuntime, localSync: localSync,
 		startupRecover: selectStartupRecovery(runtime.GOOS, agent.Reconnect, startupSelfHeal),
 	}, nil
 }
@@ -185,22 +215,42 @@ func (r *AgentRuntime) Run(ctx context.Context, interval time.Duration) error {
 	if r == nil || r.agent == nil || r.restorer == nil {
 		return errors.New("production background agent runtime is incomplete")
 	}
-	r.restorer.Bind(ctx)
+	lifecycleCtx, cancelLifecycle := context.WithCancel(ctx)
+	defer cancelLifecycle()
+	r.restorer.Bind(lifecycleCtx)
 	if r.pairHost != nil {
-		go r.pairHost.Run(ctx)
+		go r.pairHost.Run(lifecycleCtx)
 	}
-	go func() {
-		<-ctx.Done()
-		_ = r.ssh.Close()
-	}()
-	recoveryCtx, cancel := context.WithTimeout(ctx, startupRecoveryTimeout)
+	if r.ssh != nil {
+		defer r.ssh.Close()
+	}
+	var localSyncDone chan error
+	if r.localSync != nil {
+		localSyncDone = make(chan error, 1)
+		go func() { localSyncDone <- r.localSync.Run(lifecycleCtx, interval) }()
+	}
+	recoveryCtx, cancel := context.WithTimeout(lifecycleCtx, startupRecoveryTimeout)
 	startupRecover := r.startupRecover
 	if startupRecover == nil {
 		startupRecover = r.agent.Reconnect
 	}
 	_ = startupRecover(recoveryCtx)
 	cancel()
-	return r.agent.Run(ctx, interval)
+	if localSyncDone == nil {
+		return r.agent.Run(lifecycleCtx, interval)
+	}
+	agentDone := make(chan error, 1)
+	go func() { agentDone <- r.agent.Run(lifecycleCtx, interval) }()
+	select {
+	case err := <-agentDone:
+		cancelLifecycle()
+		<-localSyncDone
+		return err
+	case err := <-localSyncDone:
+		cancelLifecycle()
+		<-agentDone
+		return err
+	}
 }
 
 func selectStartupRecovery(
@@ -226,12 +276,71 @@ type runtimePairingCoordinator interface {
 }
 
 type productionAgentController struct {
-	store       config.Store
-	pairing     runtimePairingCoordinator
-	sync        productionSyncInspector
-	diagnostics productionDiagnostics
-	afterPair   func(context.Context)
-	mu          sync.Mutex
+	store          config.Store
+	pairing        runtimePairingCoordinator
+	sync           productionSyncInspector
+	dockerPreparer dockerPreparer
+	diagnostics    productionDiagnostics
+	afterPair      func(context.Context)
+	mu             sync.Mutex
+}
+
+type dockerPreparer interface {
+	Prepare(context.Context, localapi.PrepareDockerParams) error
+}
+
+type productionDockerPreparer struct {
+	store config.Store
+	sync  SyncReadiness
+	ports PortProbe
+}
+
+func (p *productionDockerPreparer) Prepare(ctx context.Context, params localapi.PrepareDockerParams) error {
+	analysis := dockercli.Analysis{BindSources: append([]string(nil), params.BindSources...)}
+	for _, port := range params.StaticTCPPorts {
+		analysis.StaticTCPPorts = append(analysis.StaticTCPPorts, dockercli.Port{
+			HostIP: port.HostIP, HostPort: port.HostPort, ContainerPort: port.ContainerPort,
+		})
+	}
+	for _, reason := range params.Unsupported {
+		analysis.Unsupported = append(analysis.Unsupported, dockercli.Reason{
+			Code: dockercli.ReasonCode(reason.Code), Detail: reason.Detail,
+		})
+	}
+	preflight := Preflight{
+		Analyzer: preparedDockerAnalysis{analysis: analysis},
+		Resolver: storedWorkspaceResolver{store: p.store},
+		Sync:     p.sync, Ports: p.ports,
+	}
+	invocation := dockercli.Invocation{Dir: params.WorkingDirectory}
+	if err := preflight.Check(ctx, invocation, nil, io.Discard); err != nil {
+		return needsAction(err.Error())
+	}
+	return nil
+}
+
+type preparedDockerAnalysis struct {
+	analysis dockercli.Analysis
+}
+
+func (a preparedDockerAnalysis) Analyze(context.Context, dockercli.Invocation, dockercli.Executor) (dockercli.Analysis, error) {
+	return a.analysis, nil
+}
+
+type storedWorkspaceResolver struct {
+	store config.Store
+}
+
+func (r storedWorkspaceResolver) Resolve(source, cwd string) (workspace.ResolvedPath, error) {
+	cfg, err := loadAgentConfig(r.store)
+	if err != nil {
+		return workspace.ResolvedPath{}, err
+	}
+	registered := make([]workspace.Workspace, 0, len(cfg.Workspaces))
+	for id, item := range cfg.Workspaces {
+		registered = append(registered, workspace.Workspace{ID: id, LocalRoot: item.Path})
+	}
+	return workspace.ResolveBind(source, cwd, registered)
 }
 
 func (c *productionAgentController) Handle(ctx context.Context, method localapi.Method, raw json.RawMessage) (any, error) {
@@ -285,6 +394,18 @@ func (c *productionAgentController) Handle(ctx context.Context, method localapi.
 			return nil, unavailable("cannot read sync configuration")
 		}
 		return c.sync.Status(ctx, cfg)
+	case localapi.MethodPrepareDocker:
+		var params localapi.PrepareDockerParams
+		if err := decodeControlParams(raw, &params); err != nil {
+			return nil, err
+		}
+		if c.dockerPreparer == nil {
+			return nil, needsAction("workspace synchronization is not ready")
+		}
+		if err := c.dockerPreparer.Prepare(ctx, params); err != nil {
+			return nil, err
+		}
+		return localapi.PrepareDockerResult{Ready: true}, nil
 	case localapi.MethodDoctor:
 		return c.diagnostics.Doctor(ctx), nil
 	case localapi.MethodRecover:
@@ -479,6 +600,7 @@ func knownHostPinned(path, alias, expected string) (bool, error) {
 type productionSyncInspector struct {
 	secrets    credentials.Store
 	httpClient *http.Client
+	endpoint   string
 }
 
 func (i productionSyncInspector) client(cfg config.Config) (*syncer.Client, config.Device, error) {
@@ -486,7 +608,11 @@ func (i productionSyncInspector) client(cfg config.Config) (*syncer.Client, conf
 	if cfg.ActiveDevice == "" || !ok || strings.TrimSpace(device.SyncthingDeviceID) == "" {
 		return nil, config.Device{}, errors.New("paired Syncthing device is unavailable")
 	}
-	client, err := syncer.NewClient("http://127.0.0.1:8384", cfg.ActiveDevice, i.secrets, i.httpClient)
+	endpoint := i.endpoint
+	if endpoint == "" {
+		endpoint = localSyncthingEndpoint
+	}
+	client, err := syncer.NewClient(endpoint, localSyncthingCredentialOwner, i.secrets, i.httpClient)
 	return client, device, err
 }
 

@@ -14,8 +14,10 @@ func TestStoreRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "config.json")
 	store := Store{Path: path}
 	want := Config{
-		SchemaVersion: 1,
-		ActiveDevice:  "pc-1",
+		SchemaVersion:          1,
+		ActiveDevice:           "pc-1",
+		LocalSyncthingDeviceID: "LOCAL-SYNC-DEVICE",
+		LocalSyncthingIdentity: []byte("encrypted-identity"),
 		Devices: map[string]Device{
 			"pc-1": {
 				Name:              "Dev PC",
@@ -108,8 +110,9 @@ func TestStoreReplacesExistingConfig(t *testing.T) {
 
 func TestConfigJSONContainsNoSecretFields(t *testing.T) {
 	data, err := json.Marshal(Config{
-		SchemaVersion: 1,
-		ActiveDevice:  "pc-1",
+		SchemaVersion:          1,
+		ActiveDevice:           "pc-1",
+		LocalSyncthingIdentity: []byte("encrypted-identity"),
 		Devices: map[string]Device{
 			"pc-1": {Name: "Dev PC", Address: "192.168.1.20", SSHPort: 2222},
 		},

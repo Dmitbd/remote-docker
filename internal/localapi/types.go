@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const CurrentSchemaVersion = 2
+const CurrentSchemaVersion = 3
 
 type Method string
 
@@ -21,6 +21,7 @@ const (
 	MethodWorkspaceList   Method = "WorkspaceList"
 	MethodWorkspaceRemove Method = "WorkspaceRemove"
 	MethodSyncStatus      Method = "SyncStatus"
+	MethodPrepareDocker   Method = "PrepareDocker"
 	MethodDoctor          Method = "Doctor"
 	MethodRecover         Method = "Recover"
 )
@@ -29,7 +30,7 @@ func (m Method) valid() bool {
 	switch m {
 	case MethodStatus, MethodListDevices, MethodPairCandidates, MethodPairStart, MethodPairConfirm,
 		MethodUnpair, MethodWorkspaceAdd, MethodWorkspaceList,
-		MethodWorkspaceRemove, MethodSyncStatus, MethodDoctor, MethodRecover:
+		MethodWorkspaceRemove, MethodSyncStatus, MethodPrepareDocker, MethodDoctor, MethodRecover:
 		return true
 	default:
 		return false
@@ -154,6 +155,30 @@ type SyncFolderStatus struct {
 
 type SyncStatusResult struct {
 	Folders []SyncFolderStatus `json:"folders"`
+}
+
+// PrepareDockerParams contains only the invocation metadata required for the
+// owner-scoped agent to enforce bind synchronization and port policy.
+type PrepareDockerParams struct {
+	BindSources      []string            `json:"bind_sources,omitempty"`
+	StaticTCPPorts   []DockerPort        `json:"static_tcp_ports,omitempty"`
+	Unsupported      []DockerUnsupported `json:"unsupported,omitempty"`
+	WorkingDirectory string              `json:"working_directory"`
+}
+
+type DockerPort struct {
+	HostIP        string `json:"host_ip,omitempty"`
+	HostPort      int    `json:"host_port"`
+	ContainerPort int    `json:"container_port"`
+}
+
+type DockerUnsupported struct {
+	Code   string `json:"code"`
+	Detail string `json:"detail"`
+}
+
+type PrepareDockerResult struct {
+	Ready bool `json:"ready"`
 }
 
 type DoctorCheck struct {

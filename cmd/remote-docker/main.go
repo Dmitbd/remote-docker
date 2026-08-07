@@ -27,5 +27,6 @@ func main() {
 		Env:            os.Environ(),
 		Dir:            workingDirectory,
 		Stdin:          os.Stdin,
+		Preflight:      app.LocalAgentDockerPreflight{},
 	}, os.Args[1:], os.Stdout, os.Stderr))
 }

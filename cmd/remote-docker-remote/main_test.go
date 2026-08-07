@@ -121,8 +121,9 @@ func TestRPCPairingRevokeUsesManagedAuthorizationRuntime(t *testing.T) {
 	}
 	input := strings.NewReader(`{"jsonrpc":"2.0","id":7,"method":"pairing.revoke","params":{"device_id":"mac-device"}}` + "\n")
 	var output bytes.Buffer
-	if code := runRPCWithRuntime(input, &output, &bytes.Buffer{}, runtime); code != 0 {
-		t.Fatalf("runRPCWithRuntime() code = %d", code)
+	syncOperations := &recordingRemoteSync{}
+	if code := runRPCWithAllOperations(input, &output, &bytes.Buffer{}, runtime, nil, syncOperations); code != 0 {
+		t.Fatalf("runRPCWithAllOperations() code = %d", code)
 	}
 	var result response
 	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
@@ -133,6 +134,9 @@ func TestRPCPairingRevokeUsesManagedAuthorizationRuntime(t *testing.T) {
 	}
 	if contents, _ := os.ReadFile(runtime.AuthorizedKeysPath); len(contents) != 0 {
 		t.Fatalf("authorized keys after RPC revoke = %q", contents)
+	}
+	if syncOperations.revoked != "mac-device" {
+		t.Fatalf("revoked Syncthing device = %q, want mac-device", syncOperations.revoked)
 	}
 }
 
@@ -177,6 +181,40 @@ func TestRPCDiagnosticsExposeTypedObservationAndExactRecoveryOnly(t *testing.T) 
 	}
 }
 
+func TestRPCSyncMethodsAcceptOnlyTypedManagedOperations(t *testing.T) {
+	syncOperations := &recordingRemoteSync{}
+	input := strings.NewReader(
+		`{"jsonrpc":"2.0","id":20,"method":"sync.configure","params":{"device_id":"MAC-SYNC","folders":[{"id":"0123456789abcdef","path":"/Users/demo/project"}]}}` + "\n" +
+			`{"jsonrpc":"2.0","id":21,"method":"sync.scan","params":{"folder_id":"0123456789abcdef"}}` + "\n" +
+			`{"jsonrpc":"2.0","id":22,"method":"sync.status","params":{"folder_id":"0123456789abcdef","device_id":"MAC-SYNC"}}` + "\n" +
+			`{"jsonrpc":"2.0","id":23,"method":"sync.exec","params":{"command":"rm -rf /"}}` + "\n",
+	)
+	var output bytes.Buffer
+	if code := runRPCWithAllOperations(input, &output, &bytes.Buffer{}, pairingRuntime{}, nil, syncOperations); code != 0 {
+		t.Fatalf("runRPCWithAllOperations() code = %d", code)
+	}
+	decoder := json.NewDecoder(&output)
+	var configured, scanned, status, rejected response
+	for _, destination := range []*response{&configured, &scanned, &status, &rejected} {
+		if err := decoder.Decode(destination); err != nil {
+			t.Fatalf("decode sync response: %v", err)
+		}
+	}
+	if configured.Error != nil || configured.Result["configured"] != true || scanned.Error != nil || scanned.Result["scanned"] != true {
+		t.Fatalf("configure=%#v scan=%#v", configured, scanned)
+	}
+	if status.Error != nil || status.Result["state"] != "idle" || status.Result["connected"] != true {
+		t.Fatalf("status response = %#v", status)
+	}
+	if rejected.Error == nil || rejected.Error.Code != -32601 {
+		t.Fatalf("arbitrary sync response = %#v", rejected)
+	}
+	if syncOperations.configure.DeviceID != "MAC-SYNC" || len(syncOperations.configure.Folders) != 1 ||
+		syncOperations.scanned != "0123456789abcdef" || syncOperations.statusDevice != "MAC-SYNC" {
+		t.Fatalf("recorded sync operations = %#v", syncOperations)
+	}
+}
+
 func TestRemoteSystemOperationsUseExactAllowlistedCommands(t *testing.T) {
 	tests := []struct {
 		operation systemdOperation
@@ -218,6 +256,35 @@ type recordingRemoteDiagnostics struct {
 	observeErr  error
 	restartErr  error
 	restarts    int
+}
+
+type recordingRemoteSync struct {
+	configure    remoteSyncConfigureParams
+	scanned      string
+	statusFolder string
+	statusDevice string
+	revoked      string
+}
+
+func (r *recordingRemoteSync) Revoke(_ context.Context, deviceID string) error {
+	r.revoked = deviceID
+	return nil
+}
+
+func (r *recordingRemoteSync) Configure(_ context.Context, params remoteSyncConfigureParams) error {
+	r.configure = params
+	return nil
+}
+
+func (r *recordingRemoteSync) Scan(_ context.Context, folderID string) error {
+	r.scanned = folderID
+	return nil
+}
+
+func (r *recordingRemoteSync) Status(_ context.Context, folderID, deviceID string) (remoteSyncStatus, error) {
+	r.statusFolder = folderID
+	r.statusDevice = deviceID
+	return remoteSyncStatus{State: "idle", Connected: true}, nil
 }
 
 func (r *recordingRemoteDiagnostics) Observe(context.Context) (remoteDiagnosticObservation, error) {

@@ -179,6 +179,25 @@ func StartManagedProcess(ctx context.Context, options ProcessOptions) (*ManagedP
 	if err := copyPersistentConfig(options.PersistentConfigDir, runtimeDir); err != nil {
 		return nil, err
 	}
+	runtimeConfigPath := filepath.Join(runtimeDir, "config.xml")
+	if _, err := os.Stat(runtimeConfigPath); err == nil {
+		apiKey, keyErr := options.Secrets.Get(options.DeviceID, SyncthingAPIKeyCredential)
+		if keyErr != nil {
+			return nil, fmt.Errorf("read Syncthing API credential: %w", keyErr)
+		}
+		materialized, rewriteErr := rewriteXMLTextFile(runtimeConfigPath, map[string]string{
+			"configuration/gui/apikey": string(apiKey),
+		})
+		clear(apiKey)
+		if rewriteErr != nil {
+			return nil, rewriteErr
+		}
+		if err := os.WriteFile(runtimeConfigPath, materialized, 0o600); err != nil {
+			return nil, fmt.Errorf("materialize Syncthing API credential: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("inspect Syncthing runtime config: %w", err)
+	}
 	if err := os.WriteFile(filepath.Join(runtimeDir, "cert.pem"), identity.CertificatePEM, 0o600); err != nil {
 		return nil, fmt.Errorf("materialize Syncthing certificate: %w", err)
 	}
@@ -190,6 +209,9 @@ func StartManagedProcess(ctx context.Context, options ProcessOptions) (*ManagedP
 	if launcher == nil {
 		launcher = commandLauncher{}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("start Syncthing: %w", err)
+	}
 	args := []string{
 		"--no-browser",
 		"--no-restart",
@@ -199,7 +221,7 @@ func StartManagedProcess(ctx context.Context, options ProcessOptions) (*ManagedP
 		"--config=" + runtimeDir,
 		"--data=" + options.DataDir,
 	}
-	child, err := launcher.Start(ctx, options.Executable, args)
+	child, err := launcher.Start(context.WithoutCancel(ctx), options.Executable, args)
 	if err != nil {
 		return nil, fmt.Errorf("start Syncthing: %w", err)
 	}
@@ -351,7 +373,21 @@ func persistRuntimeConfig(runtimeDir, persistentDir string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(persistentDir, "config.xml"), contents, 0o600)
+	sanitized, err := rewriteXMLText(contents, map[string]string{
+		"configuration/gui/apikey": "",
+	})
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(persistentDir, "config.xml"), sanitized, 0o600)
+}
+
+func rewriteXMLTextFile(path string, replacements map[string]string) ([]byte, error) {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return rewriteXMLText(contents, replacements)
 }
 
 type commandLauncher struct{}

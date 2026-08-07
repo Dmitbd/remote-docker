@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Dmitbd/remote-docker/internal/dockercli"
+	"github.com/Dmitbd/remote-docker/internal/localapi"
 )
 
 const defaultContextName = "remote-docker"
@@ -20,11 +21,60 @@ type Runtime struct {
 	DockerCLIPath  string
 	ContextName    string
 	Executor       dockercli.Executor
-	Preflight      *Preflight
+	Preflight      DockerPreflight
 	ControlClient  ControlClient
 	Env            []string
 	Dir            string
 	Stdin          io.Reader
+}
+
+// DockerPreflight gates one invocation without executing the user's command.
+type DockerPreflight interface {
+	Check(context.Context, dockercli.Invocation, dockercli.Executor, io.Writer) error
+}
+
+// LocalAgentDockerPreflight delegates the production safety gate to the
+// owner-only background-agent transport. Environment values and stdin are
+// intentionally never serialized.
+type LocalAgentDockerPreflight struct {
+	Client ControlClient
+}
+
+func (p LocalAgentDockerPreflight) Check(
+	ctx context.Context,
+	invocation dockercli.Invocation,
+	real dockercli.Executor,
+	_ io.Writer,
+) error {
+	analysis, err := dockercli.Analyze(ctx, invocation, real)
+	if err != nil {
+		return fmt.Errorf("analyze Docker command: %w", err)
+	}
+	params := localapi.PrepareDockerParams{
+		BindSources: append([]string(nil), analysis.BindSources...), WorkingDirectory: invocation.Dir,
+	}
+	for _, port := range analysis.StaticTCPPorts {
+		params.StaticTCPPorts = append(params.StaticTCPPorts, localapi.DockerPort{
+			HostIP: port.HostIP, HostPort: port.HostPort, ContainerPort: port.ContainerPort,
+		})
+	}
+	for _, reason := range analysis.Unsupported {
+		params.Unsupported = append(params.Unsupported, localapi.DockerUnsupported{
+			Code: string(reason.Code), Detail: reason.Detail,
+		})
+	}
+	client := p.Client
+	if client == nil {
+		client = localapi.Client{}
+	}
+	var result localapi.PrepareDockerResult
+	if err := client.Call(ctx, localapi.MethodPrepareDocker, params, &result); err != nil {
+		return err
+	}
+	if !result.Ready {
+		return errors.New("background agent did not prepare the Docker invocation")
+	}
+	return nil
 }
 
 func runDocker(ctx context.Context, runtime Runtime, args []string, stdout, stderr io.Writer) int {

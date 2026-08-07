@@ -4,10 +4,12 @@ const CurrentSchemaVersion = 1
 
 // Config contains non-secret application settings.
 type Config struct {
-	SchemaVersion int                  `json:"schemaVersion"`
-	ActiveDevice  string               `json:"activeDevice,omitempty"`
-	Devices       map[string]Device    `json:"devices,omitempty"`
-	Workspaces    map[string]Workspace `json:"workspaces,omitempty"`
+	SchemaVersion          int                  `json:"schemaVersion"`
+	ActiveDevice           string               `json:"activeDevice,omitempty"`
+	LocalSyncthingDeviceID string               `json:"localSyncthingDeviceId,omitempty"`
+	LocalSyncthingIdentity []byte               `json:"localSyncthingIdentity,omitempty"`
+	Devices                map[string]Device    `json:"devices,omitempty"`
+	Workspaces             map[string]Workspace `json:"workspaces,omitempty"`
 }
 
 // Device describes a paired remote host without storing its credentials.

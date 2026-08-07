@@ -88,6 +88,12 @@ func (c *Client) SetIgnores(ctx context.Context, folderID string, ignores []stri
 	return c.doJSON(ctx, http.MethodPost, "/rest/db/ignores", query, body, nil)
 }
 
+// Scan requests an immediate scan of one exact managed folder.
+func (c *Client) Scan(ctx context.Context, folderID string) error {
+	query := url.Values{"folder": []string{folderID}}
+	return c.doJSON(ctx, http.MethodPost, "/rest/db/scan", query, nil, nil)
+}
+
 // FolderStatus reads one folder's current convergence state.
 func (c *Client) FolderStatus(ctx context.Context, folderID string) (FolderStatus, error) {
 	query := url.Values{"folder": []string{folderID}}

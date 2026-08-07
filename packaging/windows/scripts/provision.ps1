@@ -149,6 +149,10 @@ install -d -m 0755 /etc/remote-docker
 printf '%s\n' '{"schema_version":1,"managed_by":"remote-docker"}' > /etc/remote-docker/managed.json
 systemctl daemon-reload
 systemctl enable docker.service remote-docker-remote.service syncthing@remote-docker.service
+if [ ! -f /var/lib/remote-docker/syncthing/config.xml ]; then
+  runuser --user remote-docker -- /usr/local/bin/syncthing generate --home=/var/lib/remote-docker/syncthing --no-port-probing
+fi
+runuser --user remote-docker -- /usr/local/bin/remote-docker-remote sync-bootstrap
 systemctl start docker.service remote-docker-remote.service syncthing@remote-docker.service
 '@
     Invoke-External -FilePath 'wsl.exe' -ArgumentList @(

@@ -44,6 +44,12 @@ if [[ "${1:-}" == "--source" ]]; then
   done
   require_contains "${source_root}/Containerfile" 'SYNCTHING_VERSION=2\.1\.1'
   require_contains "${source_root}/Containerfile" '0b960a67a0391156c2ca45943ed1ceaad9ae1fc3772d967e6aafc5a7c662565d'
+  require_contains "${source_root}/build-rootfs.sh" 'REMOTE_DOCKER_ASSET_CACHE'
+  require_contains "${source_root}/build-rootfs.sh" '--build-context .*syncthing-asset='
+  require_contains "${source_root}/build-rootfs.sh" 'artifact_tmp='
+  require_contains "${source_root}/build-rootfs.sh" 'mv .*artifact_tmp.*artifact'
+  require_contains "${source_root}/Containerfile" 'COPY --from=syncthing-asset'
+  require_not_contains "${source_root}/Containerfile" 'github\.com/syncthing|curl .*syncthing'
   require_not_contains "${source_root}/etc/docker/daemon.json" '2375|2376|tcp://'
   require_contains "${source_root}/etc/ssh/sshd_config.d/remote-docker.conf" '^PasswordAuthentication no$'
   require_contains "${source_root}/etc/ssh/sshd_config.d/remote-docker.conf" '^PermitOpen 127\.0\.0\.1:\*$'

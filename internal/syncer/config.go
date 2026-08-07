@@ -79,6 +79,18 @@ func NewDeviceConfig(deviceID, name, privateIP string, bridgePort int) (DeviceCo
 	}, nil
 }
 
+// NewPassiveDeviceConfig permits only authenticated incoming connections from
+// one already-paired device. With discovery and relays disabled, "dynamic"
+// does not publish or discover an address.
+func NewPassiveDeviceConfig(deviceID, name string) (DeviceConfig, error) {
+	if strings.TrimSpace(deviceID) == "" || len(deviceID) > 128 || strings.TrimSpace(deviceID) != deviceID {
+		return DeviceConfig{}, errors.New("Syncthing device ID is invalid")
+	}
+	return DeviceConfig{
+		DeviceID: deviceID, Name: name, Addresses: []string{"dynamic"}, Compression: "metadata",
+	}, nil
+}
+
 // NewFolderConfig returns a send-receive workspace with bounded conflicts.
 func NewFolderConfig(id, remotePath, pairedDeviceID string) FolderConfig {
 	return FolderConfig{

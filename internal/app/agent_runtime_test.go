@@ -57,6 +57,11 @@ func TestProductionAgentRuntimeServesPersistedStateOverLocalSocket(t *testing.T)
 	if err != nil {
 		t.Fatalf("NewProductionAgentRuntime() error = %v", err)
 	}
+	controller, ok := runtimeAgent.agent.controller.(*productionAgentController)
+	preparer, prepared := controller.dockerPreparer.(*productionDockerPreparer)
+	if !ok || !prepared || preparer.sync == nil {
+		t.Fatal("production runtime did not wire the Docker preflight preparer")
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -137,9 +142,10 @@ func TestAgentRuntimeRunInvokesBoundedStartupRecoveryOnce(t *testing.T) {
 		return portrelay.Reconciler{}, nil
 	})
 	agent := NewAgent(nil, restorer, nil)
+	localSync := &recordingLocalSyncLifecycle{started: make(chan struct{}), stopped: make(chan struct{})}
 	calls := 0
 	runtimeAgent := &AgentRuntime{
-		agent: agent, restorer: restorer, ssh: &managedSSHRuntime{},
+		agent: agent, restorer: restorer, ssh: &managedSSHRuntime{}, localSync: localSync,
 		startupRecover: func(recoveryCtx context.Context) error {
 			calls++
 			if _, ok := recoveryCtx.Deadline(); !ok {
@@ -155,6 +161,29 @@ func TestAgentRuntimeRunInvokesBoundedStartupRecoveryOnce(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("startup recovery calls = %d, want one bounded self-heal wave", calls)
 	}
+	select {
+	case <-localSync.started:
+	default:
+		t.Fatal("local Syncthing lifecycle was not started")
+	}
+	select {
+	case <-localSync.stopped:
+	default:
+		t.Fatal("local Syncthing lifecycle was not stopped")
+	}
+}
+
+type recordingLocalSyncLifecycle struct {
+	started chan struct{}
+	stopped chan struct{}
+	once    sync.Once
+}
+
+func (r *recordingLocalSyncLifecycle) Run(ctx context.Context, _ time.Duration) error {
+	r.once.Do(func() { close(r.started) })
+	<-ctx.Done()
+	close(r.stopped)
+	return ctx.Err()
 }
 
 func TestStartupRecoveryUsesTypedDiagnosticsOnlyOnWindows(t *testing.T) {
@@ -175,6 +204,33 @@ func TestStartupRecoveryUsesTypedDiagnosticsOnlyOnWindows(t *testing.T) {
 	if reconnects != 1 || selfHeals != 1 {
 		t.Fatalf("Darwin startup calls reconnect=%d self-heal=%d, want reconnect only", reconnects, selfHeals)
 	}
+}
+
+func TestProductionAgentControllerPreparesDockerWithoutExecutingUserCommand(t *testing.T) {
+	preparer := &recordingDockerPreparer{}
+	controller := &productionAgentController{dockerPreparer: preparer}
+	raw := []byte(`{"bind_sources":["/Users/demo/project"],"working_directory":"/Users/demo/project"}`)
+
+	result, err := controller.Handle(context.Background(), localapi.MethodPrepareDocker, raw)
+	if err != nil {
+		t.Fatalf("PrepareDocker error = %v", err)
+	}
+	if result != (localapi.PrepareDockerResult{Ready: true}) {
+		t.Fatalf("PrepareDocker result = %#v", result)
+	}
+	if !reflect.DeepEqual(preparer.params.BindSources, []string{"/Users/demo/project"}) ||
+		preparer.params.WorkingDirectory != "/Users/demo/project" {
+		t.Fatalf("preparer params = %#v", preparer.params)
+	}
+}
+
+type recordingDockerPreparer struct {
+	params localapi.PrepareDockerParams
+}
+
+func (p *recordingDockerPreparer) Prepare(_ context.Context, params localapi.PrepareDockerParams) error {
+	p.params = params
+	return nil
 }
 
 func TestProductionDiagnosticsReturnsOrderedSafeChecks(t *testing.T) {
@@ -219,6 +275,7 @@ func TestMacPairingCoordinatorPersistsPinnedDeviceAndRevokesBeforeLocalRemoval(t
 	coordinator := newMacPairingCoordinator(macPairingOptions{
 		Store: store, Secrets: secrets, Transport: transport, Docker: docker,
 		DockerCLI: "docker-real", DockerContext: "remote-docker",
+		ClientDeviceID:  func(context.Context) (string, error) { return "LOCAL-SYNC", nil },
 		SSHConfigPath:   filepath.Join(root, "ssh_config"),
 		KnownHostsPath:  filepath.Join(root, "known_hosts"),
 		AgentSocketPath: filepath.Join(root, "ssh-agent.sock"),
@@ -254,7 +311,7 @@ func TestMacPairingCoordinatorPersistsPinnedDeviceAndRevokesBeforeLocalRemoval(t
 	}
 	device := cfg.Devices[confirmed.Device.ID]
 	if cfg.ActiveDevice != confirmed.Device.ID || device.SSHHostPublicKey != transport.hostKey ||
-		device.SyncthingDeviceID != "WINDOWS-SYNC" || device.ClientDeviceID == "" ||
+		device.SyncthingDeviceID != "WINDOWS-SYNC" || device.ClientDeviceID != "LOCAL-SYNC" ||
 		device.SSHPort != 49222 || device.SyncPort != 49220 {
 		t.Fatalf("persisted device = %#v config=%#v", device, cfg)
 	}

@@ -51,6 +51,9 @@ func TestClientUsesAPIKeyAndExactSyncthingEndpoints(t *testing.T) {
 	if err := client.SetIgnores(ctx, "folder", []string{"(?d).git"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := client.Scan(ctx, "folder"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := client.FolderStatus(ctx, "folder"); err != nil {
 		t.Fatal(err)
 	}
@@ -62,6 +65,7 @@ func TestClientUsesAPIKeyAndExactSyncthingEndpoints(t *testing.T) {
 		"PUT /rest/config/devices",
 		"PUT /rest/config/folders",
 		"POST /rest/db/ignores",
+		"POST /rest/db/scan",
 		"GET /rest/db/status",
 		"GET /rest/system/connections",
 	}
@@ -123,6 +127,13 @@ func TestHardenedSyncthingConfig(t *testing.T) {
 	}
 	if _, err := NewDeviceConfig("REMOTE", "Public", "203.0.113.4", 49220); err == nil {
 		t.Fatal("public device address accepted")
+	}
+	passive, err := NewPassiveDeviceConfig("MAC", "Paired Mac")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"dynamic"}; !reflect.DeepEqual(passive.Addresses, want) || passive.AutoAcceptFolders || passive.Introducer {
+		t.Fatalf("passive device config = %#v", passive)
 	}
 
 	folder := NewFolderConfig("workspace-1", "/Users/demo/projects/sample", "REMOTE")

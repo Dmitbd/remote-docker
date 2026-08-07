@@ -72,6 +72,7 @@ func TestAgentLocalAPIDispatchesEveryControlMethod(t *testing.T) {
 		MethodWorkspaceList,
 		MethodWorkspaceRemove,
 		MethodSyncStatus,
+		MethodPrepareDocker,
 		MethodDoctor,
 		MethodRecover,
 	}
@@ -179,6 +180,12 @@ func TestAgentLocalAPIRejectsSchemaMismatchBeforeDispatch(t *testing.T) {
 	assertRemoteCode(t, err, ErrorSchemaMismatch)
 	if err := <-serveDone; err != nil {
 		t.Fatalf("ServeConn() error = %v", err)
+	}
+}
+
+func TestPrepareDockerShipsInSchemaVersionThree(t *testing.T) {
+	if CurrentSchemaVersion != 3 {
+		t.Fatalf("CurrentSchemaVersion = %d, want 3 for prepare-docker contract", CurrentSchemaVersion)
 	}
 }
 

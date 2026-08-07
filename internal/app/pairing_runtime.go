@@ -59,6 +59,7 @@ type macPairingOptions struct {
 	KnownHostsPath  string
 	AgentSocketPath string
 	ControlDir      string
+	ClientDeviceID  func(context.Context) (string, error)
 }
 
 type pendingPairing struct {
@@ -135,8 +136,12 @@ func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (loc
 		return localapi.PairStartResult{}, unavailable("cannot encode SSH pairing identity")
 	}
 	privateKeyPEM := pem.EncodeToMemory(privateBlock)
-	clientDeviceID, err := randomDeviceID()
-	if err != nil {
+	clientDeviceIDProvider := c.options.ClientDeviceID
+	if clientDeviceIDProvider == nil {
+		clientDeviceIDProvider = func(context.Context) (string, error) { return randomDeviceID() }
+	}
+	clientDeviceID, err := clientDeviceIDProvider(ctx)
+	if err != nil || strings.TrimSpace(clientDeviceID) == "" {
 		clearSecret(privateKeyPEM)
 		return localapi.PairStartResult{}, unavailable("cannot create client device identity")
 	}

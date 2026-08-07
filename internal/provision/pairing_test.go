@@ -88,6 +88,43 @@ func TestRootfsAllowsOnlyExactManagedSystemdRecoveryElevation(t *testing.T) {
 	}
 }
 
+func TestRootfsHardensSyncthingBeforeStartAndAllowsOnlyMacWorkspaceRoot(t *testing.T) {
+	containerfile, err := os.ReadFile(filepath.Join("..", "..", "packaging", "wsl", "Containerfile"))
+	if err != nil {
+		t.Fatalf("read Containerfile: %v", err)
+	}
+	override, err := os.ReadFile(filepath.Join("..", "..", "packaging", "wsl", "etc", "systemd", "system", "syncthing@remote-docker.service.d", "override.conf"))
+	if err != nil {
+		t.Fatalf("read Syncthing override: %v", err)
+	}
+	provision, err := os.ReadFile(filepath.Join("..", "..", "packaging", "windows", "scripts", "provision.ps1"))
+	if err != nil {
+		t.Fatalf("read provision script: %v", err)
+	}
+	if !strings.Contains(string(containerfile), "install -d -m 0700 -o remote-docker -g remote-docker /Users") {
+		t.Fatal("Containerfile does not create the dedicated macOS workspace root")
+	}
+	for _, source := range []string{"COPY internal/credentials ./internal/credentials", "COPY internal/syncer ./internal/syncer"} {
+		if !strings.Contains(string(containerfile), source) {
+			t.Fatalf("Containerfile does not include remote helper dependency %q", source)
+		}
+	}
+	if strings.Contains(string(containerfile), "RUN go mod download") {
+		t.Fatal("remote helper builder downloads the unrelated full module graph")
+	}
+	policy := string(override)
+	if !strings.Contains(policy, "ReadWritePaths=/var/lib/remote-docker -/Users") || strings.Contains(policy, "-/workspace") {
+		t.Fatalf("Syncthing filesystem policy = %q", policy)
+	}
+	script := string(provision)
+	generate := strings.Index(script, "syncthing generate --home=/var/lib/remote-docker/syncthing --no-port-probing")
+	harden := strings.Index(script, "remote-docker-remote sync-bootstrap")
+	start := strings.Index(script, "systemctl start docker.service remote-docker-remote.service syncthing@remote-docker.service")
+	if generate < 0 || harden <= generate || start <= harden {
+		t.Fatalf("Syncthing bootstrap order is unsafe: generate=%d harden=%d start=%d", generate, harden, start)
+	}
+}
+
 type recordingPairingRunner struct {
 	output string
 	binary string

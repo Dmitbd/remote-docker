@@ -10,7 +10,46 @@ import (
 	"testing"
 
 	"github.com/Dmitbd/remote-docker/internal/dockercli"
+	"github.com/Dmitbd/remote-docker/internal/localapi"
 )
+
+func TestLocalAgentDockerPreflightBlocksDockerUntilAgentPreparesInvocation(t *testing.T) {
+	client := &recordingDockerControlClient{}
+	executor := &capturingExecutor{}
+	runtime := Runtime{
+		ProgramName: "docker", DockerCLIPath: "/bundle/docker-real", ContextName: "remote-docker",
+		Executor: executor, Dir: "/Users/demo/project", Env: []string{"SAFE=value"},
+		Preflight: LocalAgentDockerPreflight{Client: client},
+	}
+
+	code := RunRuntime(context.Background(), runtime, []string{"run", "-v", "/Users/demo/project:/app", "image"}, io.Discard, io.Discard)
+
+	if code != 0 || !executor.called {
+		t.Fatalf("RunRuntime() code=%d docker_called=%t, want prepared Docker execution", code, executor.called)
+	}
+	if client.method != localapi.MethodPrepareDocker {
+		t.Fatalf("local method = %q, want %q", client.method, localapi.MethodPrepareDocker)
+	}
+	params, ok := client.params.(localapi.PrepareDockerParams)
+	if !ok || params.WorkingDirectory != "/Users/demo/project" ||
+		!reflect.DeepEqual(params.BindSources, []string{"/Users/demo/project"}) || len(params.StaticTCPPorts) != 0 {
+		t.Fatalf("prepare params = %#v", client.params)
+	}
+}
+
+type recordingDockerControlClient struct {
+	method localapi.Method
+	params any
+}
+
+func (c *recordingDockerControlClient) Call(_ context.Context, method localapi.Method, params any, result any) error {
+	c.method = method
+	c.params = params
+	if prepared, ok := result.(*localapi.PrepareDockerResult); ok {
+		prepared.Ready = true
+	}
+	return nil
+}
 
 func TestRunRuntimeDelegatesRemoteDockerSubcommand(t *testing.T) {
 	executor := &capturingExecutor{err: codedProcessError{code: 23}}

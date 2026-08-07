@@ -50,17 +50,22 @@ func main() {
 		os.Exit(runPairingInstall(context.Background(), defaultPairingRuntime(), os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
 	case "pairing-revoke":
 		os.Exit(runPairingRevoke(defaultPairingRuntime(), os.Args[2:], os.Stderr))
+	case "sync-bootstrap":
+		if len(os.Args) != 2 {
+			os.Exit(2)
+		}
+		os.Exit(runSyncBootstrap(defaultSyncBootstrapRuntime(), os.Stderr))
 	default:
 		os.Exit(2)
 	}
 }
 
 func runRPC(input io.Reader, output, errorOutput io.Writer) int {
-	return runRPCWithOperations(input, output, errorOutput, defaultPairingRuntime(), remoteSystemOperations{})
+	return runRPCWithAllOperations(input, output, errorOutput, defaultPairingRuntime(), remoteSystemOperations{}, defaultRemoteSyncRuntime())
 }
 
 func runRPCWithRuntime(input io.Reader, output, errorOutput io.Writer, pairingRuntime pairingRuntime) int {
-	return runRPCWithOperations(input, output, errorOutput, pairingRuntime, remoteSystemOperations{})
+	return runRPCWithAllOperations(input, output, errorOutput, pairingRuntime, remoteSystemOperations{}, nil)
 }
 
 func runRPCWithOperations(
@@ -68,6 +73,16 @@ func runRPCWithOperations(
 	output, errorOutput io.Writer,
 	pairingRuntime pairingRuntime,
 	diagnosticsRuntime remoteDiagnosticsRuntime,
+) int {
+	return runRPCWithAllOperations(input, output, errorOutput, pairingRuntime, diagnosticsRuntime, nil)
+}
+
+func runRPCWithAllOperations(
+	input io.Reader,
+	output, errorOutput io.Writer,
+	pairingRuntime pairingRuntime,
+	diagnosticsRuntime remoteDiagnosticsRuntime,
+	syncRuntime remoteSyncRuntime,
 ) int {
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), 1<<20)
@@ -91,6 +106,8 @@ func runRPCWithOperations(
 			decoder.DisallowUnknownFields()
 			if err := decoder.Decode(&params); err != nil {
 				outgoing.Error = &rpcError{Code: -32602, Message: "invalid params"}
+			} else if syncRuntime != nil && syncRuntime.Revoke(context.Background(), params.DeviceID) != nil {
+				outgoing.Error = &rpcError{Code: -32001, Message: "managed pairing revocation failed"}
 			} else if code := runPairingRevoke(pairingRuntime, []string{"--device", params.DeviceID}, io.Discard); code != 0 {
 				outgoing.Error = &rpcError{Code: -32001, Message: "managed pairing revocation failed"}
 			} else {
@@ -123,6 +140,36 @@ func runRPCWithOperations(
 					outgoing.Result = map[string]any{"restarted": true}
 				}
 			}
+		} else if incoming.Method == "sync.configure" {
+			var params remoteSyncConfigureParams
+			if syncRuntime == nil || decodeRPCParams(incoming.Params, &params) != nil {
+				outgoing.Error = &rpcError{Code: -32602, Message: "invalid params"}
+			} else if err := syncRuntime.Configure(context.Background(), params); err != nil {
+				outgoing.Error = &rpcError{Code: -32004, Message: "managed sync configuration failed"}
+			} else {
+				outgoing.Result = map[string]any{"configured": true}
+			}
+		} else if incoming.Method == "sync.scan" {
+			var params remoteSyncFolderParams
+			if syncRuntime == nil || decodeRPCParams(incoming.Params, &params) != nil {
+				outgoing.Error = &rpcError{Code: -32602, Message: "invalid params"}
+			} else if err := syncRuntime.Scan(context.Background(), params.FolderID); err != nil {
+				outgoing.Error = &rpcError{Code: -32005, Message: "managed sync scan failed"}
+			} else {
+				outgoing.Result = map[string]any{"scanned": true}
+			}
+		} else if incoming.Method == "sync.status" {
+			var params remoteSyncStatusParams
+			if syncRuntime == nil || decodeRPCParams(incoming.Params, &params) != nil {
+				outgoing.Error = &rpcError{Code: -32602, Message: "invalid params"}
+			} else if status, err := syncRuntime.Status(context.Background(), params.FolderID, params.DeviceID); err != nil {
+				outgoing.Error = &rpcError{Code: -32006, Message: "managed sync status failed"}
+			} else {
+				outgoing.Result = map[string]any{
+					"state": status.State, "need_total_items": status.NeedTotalItems,
+					"pull_errors": status.PullErrors, "connected": status.Connected,
+				}
+			}
 		} else {
 			outgoing.Error = &rpcError{Code: -32601, Message: "method not available in this build stage"}
 		}
@@ -136,4 +183,16 @@ func runRPCWithOperations(
 		return 1
 	}
 	return 0
+}
+
+func decodeRPCParams(raw json.RawMessage, destination any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return fmt.Errorf("unexpected trailing params")
+	}
+	return nil
 }
