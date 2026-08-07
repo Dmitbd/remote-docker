@@ -5,13 +5,23 @@ set -eu
 # definition in that user's launchd domain without creating root-owned state.
 docker_link="/usr/local/bin/docker"
 managed_docker="/usr/local/libexec/remote-docker/bin/docker"
+docker_link_owner="/usr/local/libexec/remote-docker/.docker-link-owner"
+docker_link_owner_value="remote-docker-managed-link-v1"
 if [ -e "${docker_link}" ] || [ -L "${docker_link}" ]; then
-  if [ ! -L "${docker_link}" ] || [ "$(readlink "${docker_link}")" != "${managed_docker}" ]; then
+  if [ ! -L "${docker_link}" ] || \
+    [ "$(readlink "${docker_link}")" != "${managed_docker}" ] || \
+    [ ! -f "${docker_link_owner}" ] || \
+    [ "$(cat "${docker_link_owner}")" != "${docker_link_owner_value}" ]; then
     printf '%s\n' "Remote Docker refused to replace the existing command at ${docker_link}." >&2
     exit 1
   fi
 else
-  ln -s "${managed_docker}" "${docker_link}"
+  printf '%s\n' "${docker_link_owner_value}" >"${docker_link_owner}"
+  if ! ln -s "${managed_docker}" "${docker_link}"; then
+    rm -f "${docker_link_owner}"
+    printf '%s\n' "Remote Docker could not reserve ${docker_link}; no existing command was replaced." >&2
+    exit 1
+  fi
 fi
 
 console_user="$(stat -f '%Su' /dev/console 2>/dev/null || true)"

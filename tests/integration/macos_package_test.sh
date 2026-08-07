@@ -96,7 +96,10 @@ grep -F 'preserve pairing and workspace state' "${libexec}/uninstall" >/dev/null
 grep -F 'ln -s "${managed_docker}" "${docker_link}"' "${scripts}/postinstall" >/dev/null || fail "postinstall does not create the managed docker command atomically"
 for guard in "${scripts}/preinstall" "${scripts}/postinstall" "${libexec}/uninstall"; do
   grep -F '[ "$(readlink "${docker_link}")"' "${guard}" >/dev/null || fail "${guard} does not verify ownership of /usr/local/bin/docker"
+  grep -F 'docker_link_owner' "${guard}" >/dev/null || fail "${guard} does not require the installer ownership marker"
+  grep -F 'remote-docker-managed-link-v1' "${guard}" >/dev/null || fail "${guard} does not verify the ownership marker value"
 done
+grep -F 'printf ' "${scripts}/postinstall" | grep -F '"${docker_link_owner_value}"' >/dev/null || fail "postinstall does not record ownership of its managed docker link"
 grep -F 'rm -f "${docker_link}"' "${libexec}/uninstall" >/dev/null || fail "uninstall cannot remove its own exact managed docker link"
 
 /usr/bin/ruby -rjson -e 'JSON.parse(File.read(ARGV.fetch(0)))' "${repo_root}/packaging/versions.json"
