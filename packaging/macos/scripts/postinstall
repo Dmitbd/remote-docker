@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+# LaunchAgents are owner-scoped. If a GUI user is present, load the installed
+# definition in that user's launchd domain without creating root-owned state.
+console_user="$(stat -f '%Su' /dev/console 2>/dev/null || true)"
+case "${console_user}" in
+  ""|root|loginwindow) exit 0 ;;
+esac
+console_uid="$(id -u "${console_user}" 2>/dev/null || true)"
+case "${console_uid}" in
+  ""|*[!0-9]*) exit 0 ;;
+esac
+
+domain="gui/${console_uid}"
+label="io.github.dmitbd.remote-docker.agent"
+plist="/Library/LaunchAgents/${label}.plist"
+launchctl bootout "${domain}/${label}" >/dev/null 2>&1 || true
+if ! launchctl bootstrap "${domain}" "${plist}" >/dev/null 2>&1; then
+  printf '%s\n' "Remote Docker was installed; its background agent will start at the next login." >&2
+fi
+exit 0

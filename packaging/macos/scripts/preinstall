@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+compose_link="/usr/local/libexec/docker/cli-plugins/docker-compose"
+owned_target="/usr/local/libexec/remote-docker/cli-plugins/docker-compose"
+if [ -e "${compose_link}" ] || [ -L "${compose_link}" ]; then
+  if [ ! -L "${compose_link}" ] || [ "$(readlink "${compose_link}")" != "${owned_target}" ]; then
+    printf '%s\n' "Remote Docker cannot replace an existing Docker Compose plugin at ${compose_link}." >&2
+    exit 1
+  fi
+fi
+exit 0

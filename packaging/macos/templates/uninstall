@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+# This helper removes only package-owned executables and metadata. It must
+# preserve /usr/local/bin/docker and unrelated Docker data.
+# It must also preserve pairing and workspace state in the user's Library.
+
+compose_link="/usr/local/libexec/docker/cli-plugins/docker-compose"
+
+console_user="$(stat -f '%Su' /dev/console 2>/dev/null || true)"
+if [ -n "${console_user}" ] && [ "${console_user}" != root ] && [ "${console_user}" != loginwindow ]; then
+  console_uid="$(id -u "${console_user}" 2>/dev/null || true)"
+  case "${console_uid}" in
+    ""|*[!0-9]*) ;;
+    *) launchctl bootout "gui/${console_uid}/io.github.dmitbd.remote-docker.agent" >/dev/null 2>&1 || true ;;
+  esac
+fi
+
+if [ -L "${compose_link}" ] && [ "$(readlink "${compose_link}")" = "/usr/local/libexec/remote-docker/cli-plugins/docker-compose" ]; then
+  rm -f "/usr/local/libexec/docker/cli-plugins/docker-compose"
+fi
+rm -f "/Library/LaunchAgents/io.github.dmitbd.remote-docker.agent.plist"
+rm -f "/etc/paths.d/remote-docker"
+rm -f "/usr/local/bin/remote-docker"
+rm -rf "/Applications/Remote Docker.app"
+rm -rf "/usr/local/libexec/remote-docker"

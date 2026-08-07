@@ -1,0 +1,8 @@
+6231d8d3b8f5552ec6cbf6d685bdd5482e1e703214b120e89b3bf0d7bf1ef725  go1.26.5.darwin-amd64.tar.gz
+efb87ff28af9a188d0536ef5d42e63dd52ba8263cd7344a993cc48dd11dedb6a  go1.26.5.darwin-arm64.tar.gz
+4dd10d89a3481de4903a791f6ea84f30fc18b892e9ae8b8035b4d1ddd9351e73  docker-29.6.1-macos-amd64.tgz
+2e38a0fc5e90520f32bfa4b951984f4684e46042ef855ed2c6a98f015e4284ba  docker-29.6.1-macos-arm64.tgz
+c6f6915295918b59c2848e8978612691fdbbef05cae8cae3b78b10aec3e3dbc7  docker-compose-darwin-x86_64
+4cad7fc67dd089a598a15598ad38d04e6f23bf299846d26b2c572f1f96a7c49f  docker-compose-darwin-aarch64
+d96b74c61908e3dfc75c57d40b7489ca0d9cff2e9bc82c383e1b537a84b6d16d  syncthing-macos-amd64-v2.1.1.zip
+0484ec8508ae49a45f3a23b8b5d652e03e2dcdb8492911244f805e13f61bd6c1  syncthing-macos-arm64-v2.1.1.zip
