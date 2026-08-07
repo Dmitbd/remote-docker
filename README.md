@@ -2,7 +2,7 @@
 
 Run Docker on a Windows PC while keeping your development workflow on a Mac.
 
-> Status: early development. The architecture is defined, but the first working release is not available yet.
+> Status: pre-release development. Signed packages and real Mac-to-Windows acceptance are required before the first public release.
 
 ## Why
 
@@ -36,7 +36,7 @@ localhost port forwarding                Containers, images and volumes
 
 Only Docker operations are remote. Other commands continue to run normally on the Mac.
 
-## Planned setup
+## Setup overview
 
 1. Install the Windows agent.
 2. Let it create and validate a dedicated WSL2 environment with Docker Engine.
@@ -47,9 +47,13 @@ Only Docker operations are remote. Other commands continue to run normally on th
 
 Docker Desktop is not required on either computer after the remote environment is ready.
 
+Detailed release-candidate instructions are in [Install Remote Docker](docs/INSTALL.md). Recovery and safety guidance is in [Troubleshooting Remote Docker](docs/TROUBLESHOOTING.md).
+
 ## Data model
 
 Project directories used as bind mounts are synchronized between the Mac and the managed WSL2 environment. This allows source changes to reach containers and files generated inside containers to return to the Mac.
+
+The first release supports registered source directories below the normal macOS `/Users` root. External-volume bind mounts are rejected explicitly.
 
 Heavy Docker data remains on Windows:
 
@@ -88,6 +92,8 @@ The initial version is intended for two trusted computers on the same private lo
 
 Kubernetes, internet access, multi-host clustering, UDP forwarding, and a full Docker Desktop-style dashboard are outside the first release.
 
-## Project state
+## Release gate
 
-Development will start with a minimal secure connection and Docker compatibility prototype. Bind-mount synchronization, port forwarding, recovery, and performance validation will follow.
+The repository contains the client, agents, managed WSL environment, package definitions, and focused automated tests. A release is considered ready only after Windows CI, signing and notarization, clean-machine installation, Docker and Compose compatibility, two-way source synchronization, reconnect behavior, LAN security checks, and performance measurements all pass on a real Mac and Windows pair.
+
+Until that gate is complete, build artifacts are development previews rather than a supported release.
