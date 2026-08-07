@@ -3,6 +3,16 @@ set -eu
 
 compose_link="/usr/local/libexec/docker/cli-plugins/docker-compose"
 owned_target="/usr/local/libexec/remote-docker/cli-plugins/docker-compose"
+docker_link="/usr/local/bin/docker"
+managed_docker="/usr/local/libexec/remote-docker/bin/docker"
+
+if [ -e "${docker_link}" ] || [ -L "${docker_link}" ]; then
+  if [ ! -L "${docker_link}" ] || [ "$(readlink "${docker_link}")" != "${managed_docker}" ]; then
+    printf '%s\n' "Remote Docker will not replace the existing command at ${docker_link}. Remove or relocate it explicitly, then run the installer again." >&2
+    exit 1
+  fi
+fi
+
 if [ -e "${compose_link}" ] || [ -L "${compose_link}" ]; then
   if [ ! -L "${compose_link}" ] || [ "$(readlink "${compose_link}")" != "${owned_target}" ]; then
     printf '%s\n' "Remote Docker cannot replace an existing Docker Compose plugin at ${compose_link}." >&2

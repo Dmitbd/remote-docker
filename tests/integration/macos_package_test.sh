@@ -3,6 +3,9 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 build_script="${repo_root}/packaging/macos/build-pkg.sh"
+archive_validator="${repo_root}/packaging/macos/validate-archive.sh"
+checksum_verifier="${repo_root}/packaging/macos/verify-checksum.sh"
+package_inspector="${repo_root}/packaging/macos/inspect-pkg.sh"
 test_root="$(mktemp -d "${TMPDIR:-/private/tmp}/remote-docker-package-test.XXXXXX")"
 trap 'rm -rf "${test_root}"' EXIT
 
@@ -28,6 +31,9 @@ assert_plist_value() {
 }
 
 [[ -x "${build_script}" ]] || fail "missing executable build script"
+[[ -x "${archive_validator}" ]] || fail "missing executable archive validator"
+[[ -x "${checksum_verifier}" ]] || fail "missing executable checksum verifier"
+[[ -x "${package_inspector}" ]] || fail "missing executable package metadata inspector"
 
 export REMOTE_DOCKER_APP_SIGN_IDENTITY="PACKAGE_TEST_SECRET_APP_IDENTITY"
 export REMOTE_DOCKER_INSTALLER_SIGN_IDENTITY="PACKAGE_TEST_SECRET_INSTALLER_IDENTITY"
@@ -79,14 +85,19 @@ compose_link="${payload}/usr/local/libexec/docker/cli-plugins/docker-compose"
 [[ "$(readlink "${compose_link}")" == "/usr/local/libexec/remote-docker/cli-plugins/docker-compose" ]] || fail "Compose discovery link escapes the owned plugin"
 
 [[ ! -e "${payload}/usr/local/bin/docker" ]] || fail "package payload targets an existing docker command"
-if find "${scripts}" -type f -exec grep -E '(^|[[:space:]])(rm|unlink)[[:space:]].*(/usr/local/bin/docker|\.docker|Library/(Application Support|Caches)/RemoteDocker)' {} + | grep .; then
+if find "${scripts}" -type f -exec grep -E '(^|[[:space:]])(rm|unlink)[[:space:]].*(\.docker|Library/(Application Support|Caches)/RemoteDocker)' {} + | grep .; then
   fail "package scripts can remove Docker data or user Remote Docker state"
 fi
-if grep -E '^[[:space:]]*(rm|unlink)[[:space:]].*(\$HOME|\$\{|[*?]|/usr/local/bin/docker|\.docker|Library/(Application Support|Caches)/RemoteDocker)' "${libexec}/uninstall"; then
+if grep -E '^[[:space:]]*(rm|unlink)[[:space:]].*(\$HOME|\$\{|[*?]|\.docker|Library/(Application Support|Caches)/RemoteDocker)' "${libexec}/uninstall" | grep -Fv 'rm -f "${docker_link}"'; then
   fail "uninstall helper contains a broad, variable, or state-destroying target"
 fi
 grep -F 'preserve /usr/local/bin/docker' "${libexec}/uninstall" >/dev/null || fail "uninstall contract does not explicitly preserve an existing docker command"
 grep -F 'preserve pairing and workspace state' "${libexec}/uninstall" >/dev/null || fail "uninstall contract does not explicitly preserve user state"
+grep -F 'ln -s "${managed_docker}" "${docker_link}"' "${scripts}/postinstall" >/dev/null || fail "postinstall does not create the managed docker command atomically"
+for guard in "${scripts}/preinstall" "${scripts}/postinstall" "${libexec}/uninstall"; do
+  grep -F '[ "$(readlink "${docker_link}")"' "${guard}" >/dev/null || fail "${guard} does not verify ownership of /usr/local/bin/docker"
+done
+grep -F 'rm -f "${docker_link}"' "${libexec}/uninstall" >/dev/null || fail "uninstall cannot remove its own exact managed docker link"
 
 /usr/bin/ruby -rjson -e 'JSON.parse(File.read(ARGV.fetch(0)))' "${repo_root}/packaging/versions.json"
 for key in go docker_cli compose syncthing; do
@@ -97,12 +108,38 @@ for key in go docker_cli compose syncthing; do
     [[ "$(grep -Ec "^[0-9a-f]{64}  ${filename}$" "${repo_root}/packaging/checksums.txt")" == "1" ]] || fail "${filename} is not pinned exactly once"
   done
 done
-grep -F 'verify_checksum "${download_path}" "${filename}"' "${build_script}" >/dev/null || fail "downloads are not verified before use"
+grep -F 'verify-checksum.sh" "${checksums_file}" "${download_path}" "${filename}"' "${build_script}" >/dev/null || fail "downloads are not verified before use"
 grep -F 'xattr -crs "${payload}"' "${build_script}" >/dev/null || fail "payload xattrs are not cleared without following package symlinks"
 grep -F -- "--filter '(^|/)\\._'" "${build_script}" >/dev/null || fail "pkgbuild does not exclude AppleDouble metadata"
 for extractor in 'tar -x' 'unzip -q'; do
   grep -F "${extractor}" "${build_script}" >/dev/null || fail "build script does not handle expected archive type"
 done
+
+mkdir -p "${test_root}/safe-archive/go" "${test_root}/unsafe-archive/go"
+printf '%s\n' safe >"${test_root}/safe-archive/go/tool"
+tar -czf "${test_root}/safe.tar.gz" -C "${test_root}/safe-archive" go
+"${archive_validator}" tar "${test_root}/safe.tar.gz" go
+ln -s /private/tmp "${test_root}/unsafe-archive/go/escape"
+tar -czf "${test_root}/unsafe.tar.gz" -C "${test_root}/unsafe-archive" go
+if "${archive_validator}" tar "${test_root}/unsafe.tar.gz" go >/dev/null 2>&1; then
+  fail "archive validator accepted a symlink entry"
+fi
+
+printf '%s\n' corrupted >"${test_root}/go1.26.5.darwin-arm64.tar.gz"
+if "${checksum_verifier}" "${repo_root}/packaging/checksums.txt" \
+  "${test_root}/go1.26.5.darwin-arm64.tar.gz" go1.26.5.darwin-arm64.tar.gz >/dev/null 2>&1; then
+  fail "checksum verifier accepted a corrupt cached artifact"
+fi
+
+mkdir -p "${test_root}/dirty-package-root"
+printf '%s\n' forbidden >"${test_root}/dirty-package-root/._forbidden"
+pkgbuild --root "${test_root}/dirty-package-root" \
+  --identifier io.github.dmitbd.remote-docker.metadata-test --version 0 --install-location / \
+  "${test_root}/dirty.pkg" >/dev/null
+if "${package_inspector}" "${test_root}/dirty.pkg" >/dev/null 2>&1; then
+  fail "package metadata inspector accepted an AppleDouble BOM entry"
+fi
+grep -F 'refusing signed or notarized package with metadata contamination' "${build_script}" >/dev/null || fail "release build does not fail closed on metadata contamination"
 
 if grep -R -F 'PACKAGE_TEST_SECRET_' "${test_root}/layout" >/dev/null; then
   fail "signing or notarization secret was persisted in package layout"

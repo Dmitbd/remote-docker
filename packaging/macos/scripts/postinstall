@@ -3,6 +3,17 @@ set -eu
 
 # LaunchAgents are owner-scoped. If a GUI user is present, load the installed
 # definition in that user's launchd domain without creating root-owned state.
+docker_link="/usr/local/bin/docker"
+managed_docker="/usr/local/libexec/remote-docker/bin/docker"
+if [ -e "${docker_link}" ] || [ -L "${docker_link}" ]; then
+  if [ ! -L "${docker_link}" ] || [ "$(readlink "${docker_link}")" != "${managed_docker}" ]; then
+    printf '%s\n' "Remote Docker refused to replace the existing command at ${docker_link}." >&2
+    exit 1
+  fi
+else
+  ln -s "${managed_docker}" "${docker_link}"
+fi
+
 console_user="$(stat -f '%Su' /dev/console 2>/dev/null || true)"
 case "${console_user}" in
   ""|root|loginwindow) exit 0 ;;

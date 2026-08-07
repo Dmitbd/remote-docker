@@ -136,17 +136,6 @@ asset_value() {
     "${versions_file}" "${asset}" "${target_arch}" "${field}"
 }
 
-verify_checksum() {
-  local download_path="$1" filename="$2" expected actual
-  expected="$(awk -v name="${filename}" '$2 == name { print $1 }' "${checksums_file}")"
-  [[ "${expected}" =~ ^[0-9a-f]{64}$ ]] || { printf 'missing checksum for %s\n' "${filename}" >&2; return 1; }
-  actual="$(shasum -a 256 "${download_path}" | awk '{ print $1 }')"
-  [[ "${actual}" == "${expected}" ]] || {
-    printf 'checksum mismatch for %s\n' "${filename}" >&2
-    return 1
-  }
-}
-
 fetch_verified() {
   local asset="$1" filename url download_path cache_root
   filename="$(asset_value "${asset}" filename)"
@@ -166,25 +155,12 @@ fetch_verified() {
       --connect-timeout 20 --max-time 600 --retry 3 \
       "${url}" --output "${download_path}"
   fi
-  verify_checksum "${download_path}" "${filename}"
+  "${script_dir}/verify-checksum.sh" "${checksums_file}" "${download_path}" "${filename}"
   if [[ -n "${cache_root}" && ! -e "${cache_root}/${filename}" ]]; then
     mkdir -p "${cache_root}"
     cp "${download_path}" "${cache_root}/${filename}"
   fi
   printf '%s\n' "${download_path}"
-}
-
-validate_archive_members() {
-  local archive="$1" kind="$2" members
-  case "${kind}" in
-    tar) members="$(tar -tzf "${archive}")" ;;
-    zip) members="$(unzip -Z1 "${archive}")" ;;
-    *) return 1 ;;
-  esac
-  if printf '%s\n' "${members}" | grep -E '(^/|(^|/)\.\.(/|$))' >/dev/null; then
-    printf 'archive contains an unsafe path: %s\n' "${archive}" >&2
-    return 1
-  fi
 }
 
 build_payload() {
@@ -194,9 +170,9 @@ build_payload() {
   compose_binary="$(fetch_verified compose)"
   syncthing_archive="$(fetch_verified syncthing)"
 
-  validate_archive_members "${go_archive}" tar
-  validate_archive_members "${docker_archive}" tar
-  validate_archive_members "${syncthing_archive}" zip
+  "${script_dir}/validate-archive.sh" tar "${go_archive}" go
+  "${script_dir}/validate-archive.sh" tar "${docker_archive}" docker
+  "${script_dir}/validate-archive.sh" zip "${syncthing_archive}" "$(basename "${syncthing_archive}" .zip)"
 
   go_root="${work_root}/toolchain"
   mkdir -p "${go_root}" "${work_root}/docker" "${work_root}/syncthing"
@@ -286,7 +262,7 @@ if [[ "${layout_only}" == "true" ]]; then
 fi
 
 [[ "$(uname -s)" == "Darwin" ]] || { printf 'macOS package builds require macOS\n' >&2; exit 1; }
-for tool in curl tar unzip shasum pkgbuild xattr /usr/bin/ruby; do
+for tool in curl tar unzip shasum pkgbuild pkgutil lsbom xattr /usr/bin/ruby; do
   command -v "${tool}" >/dev/null || { printf 'required build tool is missing: %s\n' "${tool}" >&2; exit 1; }
 done
 
@@ -307,6 +283,14 @@ pkgbuild \
   --install-location / \
   --ownership recommended \
   "${unsigned_pkg}"
+
+if ! "${script_dir}/inspect-pkg.sh" "${unsigned_pkg}"; then
+  if [[ -n "${REMOTE_DOCKER_APP_SIGN_IDENTITY:-}${REMOTE_DOCKER_INSTALLER_SIGN_IDENTITY:-}${REMOTE_DOCKER_NOTARY_KEYCHAIN_PROFILE:-}" ]]; then
+    printf '%s\n' "refusing signed or notarized package with metadata contamination" >&2
+    exit 1
+  fi
+  printf '%s\n' "warning: unsigned development package contains host provenance metadata; release signing is blocked" >&2
+fi
 
 final_pkg="${output_dir}/Remote-Docker-${app_version}-${target_arch}.pkg"
 installer_identity="${REMOTE_DOCKER_INSTALLER_SIGN_IDENTITY:-}"
