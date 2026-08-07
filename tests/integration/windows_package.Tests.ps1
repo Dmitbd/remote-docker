@@ -1,20 +1,23 @@
-$ErrorActionPreference = 'Stop'
+BeforeAll {
+    $ErrorActionPreference = 'Stop'
 
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$windowsPackaging = Join-Path $repoRoot 'packaging\windows'
-$wixSource = Join-Path $windowsPackaging 'RemoteDocker.wxs'
-$buildScript = Join-Path $windowsPackaging 'build-msi.ps1'
-$updateScript = Join-Path $windowsPackaging 'install-agent.ps1'
-$nugetConfig = Join-Path $windowsPackaging 'nuget.config'
-$provisionScript = Join-Path $windowsPackaging 'scripts\provision.ps1'
-$uninstallScript = Join-Path $windowsPackaging 'scripts\uninstall.ps1'
-$ciWorkflow = Join-Path $repoRoot '.github\workflows\ci.yml'
-$releaseWorkflow = Join-Path $repoRoot '.github\workflows\release.yml'
+    $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+    $windowsPackaging = Join-Path $repoRoot 'packaging\windows'
+    $wixSource = Join-Path $windowsPackaging 'RemoteDocker.wxs'
+    $buildScript = Join-Path $windowsPackaging 'build-msi.ps1'
+    $updateScript = Join-Path $windowsPackaging 'install-agent.ps1'
+    $nugetConfig = Join-Path $windowsPackaging 'nuget.config'
+    $provisionScript = Join-Path $windowsPackaging 'scripts\provision.ps1'
+    $uninstallScript = Join-Path $windowsPackaging 'scripts\uninstall.ps1'
+    $ciWorkflow = Join-Path $repoRoot '.github\workflows\ci.yml'
+    $releaseWorkflow = Join-Path $repoRoot '.github\workflows\release.yml'
+    $testScript = Join-Path $PSScriptRoot 'windows_package.Tests.ps1'
 
-function Read-RepositoryFile {
-    param([Parameter(Mandatory = $true)][string]$Path)
+    function Read-RepositoryFile {
+        param([Parameter(Mandatory = $true)][string]$Path)
 
-    (Get-Content -LiteralPath $Path -Raw).Replace("`r`n", "`n")
+        (Get-Content -LiteralPath $Path -Raw).Replace("`r`n", "`n")
+    }
 }
 
 Describe 'Windows package contract' {
@@ -220,7 +223,7 @@ Describe 'Windows package contract' {
             $uninstallScript,
             $ciWorkflow,
             $releaseWorkflow,
-            $PSCommandPath
+            $testScript
         )
         $internalPattern = 'S' + 'ber|Co' + 'work|Mid' + 'gard|Ygg' + 'drasil'
 
