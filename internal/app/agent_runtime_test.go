@@ -128,6 +128,35 @@ func TestProductionAgentRuntimeServesPersistedStateOverLocalSocket(t *testing.T)
 	}
 }
 
+func TestProductionDiagnosticsReturnsOrderedSafeChecks(t *testing.T) {
+	checks := newProductionDiagnostics(func(context.Context) AgentStatus {
+		return AgentStatus{State: AgentReady, Message: "Bearer not-a-secret-in-output"}
+	}, nil).Doctor(context.Background()).Checks
+	wantNames := []string{
+		"lan_reachability", "ssh_identity", "wsl_running", "systemd_target",
+		"docker_socket", "disk", "syncthing", "port_relays",
+	}
+	if len(checks) != len(wantNames) {
+		t.Fatalf("check count = %d, want %d", len(checks), len(wantNames))
+	}
+	for index, want := range wantNames {
+		if checks[index].Name != want {
+			t.Fatalf("check[%d].Name = %q, want %q", index, checks[index].Name, want)
+		}
+		if strings.Contains(checks[index].Message, "not-a-secret-in-output") {
+			t.Fatalf("check[%d] leaked observer message: %#v", index, checks[index])
+		}
+	}
+	if !checks[0].OK || !checks[1].OK || !checks[4].OK || !checks[6].OK {
+		t.Fatalf("connected checks = %#v, want LAN/SSH/Docker/Syncthing ready", checks)
+	}
+	for _, index := range []int{2, 3, 5, 7} {
+		if checks[index].OK || checks[index].Message != "diagnostic check is unavailable" {
+			t.Fatalf("unavailable check[%d] = %#v", index, checks[index])
+		}
+	}
+}
+
 func TestMacPairingCoordinatorPersistsPinnedDeviceAndRevokesBeforeLocalRemoval(t *testing.T) {
 	root := t.TempDir()
 	store := config.Store{Path: filepath.Join(root, "config.json")}

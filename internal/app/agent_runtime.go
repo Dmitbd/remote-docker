@@ -24,6 +24,7 @@ import (
 
 	"github.com/Dmitbd/remote-docker/internal/config"
 	"github.com/Dmitbd/remote-docker/internal/credentials"
+	"github.com/Dmitbd/remote-docker/internal/diagnostics"
 	"github.com/Dmitbd/remote-docker/internal/discovery"
 	"github.com/Dmitbd/remote-docker/internal/dockercli"
 	"github.com/Dmitbd/remote-docker/internal/localapi"
@@ -151,6 +152,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 	agent := NewAgent(observer, restorer, controller)
 	controller.status = agent.Status
 	controller.recover = agent.Reconnect
+	controller.diagnostics = newProductionDiagnostics(agent.Refresh, agent.Reconnect)
 	controller.afterPair = func(ctx context.Context) { _ = agent.Reconnect(ctx) }
 	return &AgentRuntime{agent: agent, restorer: restorer, pairHost: pairHost, ssh: sshRuntime}, nil
 }
@@ -184,13 +186,14 @@ type runtimePairingCoordinator interface {
 }
 
 type productionAgentController struct {
-	store     config.Store
-	pairing   runtimePairingCoordinator
-	sync      productionSyncInspector
-	status    func() AgentStatus
-	recover   func(context.Context) error
-	afterPair func(context.Context)
-	mu        sync.Mutex
+	store       config.Store
+	pairing     runtimePairingCoordinator
+	sync        productionSyncInspector
+	status      func() AgentStatus
+	recover     func(context.Context) error
+	diagnostics productionDiagnostics
+	afterPair   func(context.Context)
+	mu          sync.Mutex
 }
 
 func (c *productionAgentController) Handle(ctx context.Context, method localapi.Method, raw json.RawMessage) (any, error) {
@@ -243,19 +246,23 @@ func (c *productionAgentController) Handle(ctx context.Context, method localapi.
 		}
 		return c.sync.Status(ctx, cfg)
 	case localapi.MethodDoctor:
-		status := AgentStatus{State: AgentNeedsAction, Message: "background agent status is unavailable"}
-		if c.status != nil {
-			status = c.status()
-		}
-		return localapi.DoctorResult{Checks: []localapi.DoctorCheck{{
-			Name: "agent_state", OK: status.State == AgentReady, Message: status.Message,
-		}}}, nil
+		return c.diagnostics.Doctor(ctx), nil
 	case localapi.MethodRecover:
+		if c.status != nil && c.status().State == AgentUnpaired {
+			// Preserve the established remediation response for an unpaired
+			// client before entering the environment-recovery ladder.
+			if c.recover == nil {
+				return nil, unavailable("recovery infrastructure is unavailable")
+			}
+			if err := c.recover(ctx); err != nil {
+				return nil, err
+			}
+		}
+		if _, err := c.diagnostics.Recover(ctx); err != nil {
+			return nil, unavailable(diagnostics.ErrRecoveryFailed.Error())
+		}
 		if c.recover == nil {
 			return nil, unavailable("recovery infrastructure is unavailable")
-		}
-		if err := c.recover(ctx); err != nil {
-			return nil, err
 		}
 		status := c.status()
 		return localapi.RecoverResult{State: string(status.State), Message: status.Message}, nil
@@ -316,6 +323,89 @@ func (c *productionAgentController) listWorkspaces() (localapi.WorkspaceListResu
 	}
 	sort.Slice(result.Workspaces, func(i, j int) bool { return result.Workspaces[i].ID < result.Workspaces[j].ID })
 	return result, nil
+}
+
+// productionDiagnostics adapts the existing background-agent runtime to the
+// fixed public diagnostics contract. It does not build shell commands and only
+// exposes stable public reasons.
+type productionDiagnostics struct {
+	observe   func(context.Context) AgentStatus
+	reconnect func(context.Context) error
+}
+
+func newProductionDiagnostics(observe func(context.Context) AgentStatus, reconnect func(context.Context) error) productionDiagnostics {
+	return productionDiagnostics{observe: observe, reconnect: reconnect}
+}
+
+func (d productionDiagnostics) Doctor(ctx context.Context) localapi.DoctorResult {
+	var status AgentStatus
+	observed := false
+	current := func(context.Context) AgentStatus {
+		if !observed && d.observe != nil {
+			status = d.observe(ctx)
+			observed = true
+		}
+		return status
+	}
+	readyForConnection := diagnostics.CheckFunc(func(checkCtx context.Context) error {
+		state := current(checkCtx).State
+		if state == AgentUnpaired || state == AgentNeedsAction || state == "" {
+			return errors.New("remote connection is not ready")
+		}
+		return nil
+	})
+	sshReady := diagnostics.CheckFunc(func(checkCtx context.Context) error {
+		switch current(checkCtx).State {
+		case AgentEngineStarting, AgentSyncing, AgentReady:
+			return nil
+		default:
+			return errors.New("pinned SSH identity is not ready")
+		}
+	})
+	dockerReady := diagnostics.CheckFunc(func(checkCtx context.Context) error {
+		switch current(checkCtx).State {
+		case AgentSyncing, AgentReady:
+			return nil
+		default:
+			return errors.New("Docker socket is not ready")
+		}
+	})
+	syncReady := diagnostics.CheckFunc(func(checkCtx context.Context) error {
+		if current(checkCtx).State != AgentReady {
+			return errors.New("Syncthing connection is not ready")
+		}
+		return nil
+	})
+	results := (diagnostics.Runner{Operations: diagnostics.Operations{
+		LANReachability: readyForConnection,
+		SSHIdentity:     sshReady,
+		// The current paired-agent protocol has no read-only WSL, systemd,
+		// disk, or relay-status endpoint. Leaving these typed operations absent
+		// reports their stable unavailable result without pretending success.
+		DockerSocket: dockerReady,
+		Syncthing:    syncReady,
+	}}).Check(ctx)
+	checks := make([]localapi.DoctorCheck, 0, len(results))
+	for _, result := range results {
+		checks = append(checks, localapi.DoctorCheck{
+			Name: string(result.Name), OK: result.OK, Message: result.Reason,
+		})
+	}
+	return localapi.DoctorResult{Checks: checks}
+}
+
+func (d productionDiagnostics) Recover(ctx context.Context) (diagnostics.RecoveryResult, error) {
+	return (diagnostics.Recoverer{Operations: diagnostics.RecoveryOperations{
+		Reconnect: diagnostics.RecoveryFunc(func(recoveryCtx context.Context) error {
+			if d.reconnect == nil {
+				return diagnostics.ErrRecoveryUnavailable
+			}
+			return d.reconnect(recoveryCtx)
+		}),
+		// The production protocol intentionally does not yet expose arbitrary
+		// Windows/WSL process control. The remaining typed ladder positions are
+		// reported unavailable rather than issuing an unsafe command.
+	}}).Recover(ctx)
 }
 
 func (c *productionAgentController) removeWorkspace(id string) (map[string]bool, error) {
