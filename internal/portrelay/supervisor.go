@@ -69,6 +69,31 @@ func NewSupervisor(starter ForwardStarter, minimum, maximum time.Duration) *Supe
 	}
 }
 
+// Healthy reports whether every desired relay has a live app-owned forward.
+// It is read-only: it never starts, stops, or reconciles a process.
+func (s *Supervisor) Healthy() bool {
+	if s == nil || s.starter == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.starting) != 0 || len(s.desired) != len(s.active) {
+		return false
+	}
+	for port, wanted := range s.desired {
+		active, ok := s.active[port]
+		if !ok || active.mapping.Key() != wanted.Key() || active.process == nil {
+			return false
+		}
+		select {
+		case <-active.process.Done():
+			return false
+		default:
+		}
+	}
+	return true
+}
+
 // Apply reconciles the complete desired snapshot and never kills foreign processes.
 func (s *Supervisor) Apply(ctx context.Context, snapshot Snapshot) error {
 	if s == nil || s.starter == nil {

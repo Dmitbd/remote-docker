@@ -155,8 +155,15 @@ type DoctorResult struct {
 }
 
 type RecoverResult struct {
-	State   string `json:"state"`
-	Message string `json:"message,omitempty"`
+	State    string           `json:"state"`
+	Message  string           `json:"message,omitempty"`
+	Attempts []RecoverAttempt `json:"attempts,omitempty"`
+}
+
+type RecoverAttempt struct {
+	Step   string `json:"step"`
+	OK     bool   `json:"ok"`
+	Reason string `json:"reason,omitempty"`
 }
 
 type wireRequest struct {

@@ -1,51 +1,70 @@
 package diagnostics
 
-import (
-	"errors"
-	"regexp"
-	"strings"
+import "errors"
+
+// Reason is one stable, explicitly allowlisted message that may cross the
+// owner-only local API boundary. Arbitrary operation errors are never
+// published, even when they do not look like credentials.
+type Reason string
+
+const (
+	ReasonCheckUnavailable         Reason = "diagnostic check is unavailable"
+	ReasonCheckFailed              Reason = "diagnostic check failed"
+	ReasonRecoveryUnavailable      Reason = "recovery operation is unavailable"
+	ReasonRecoveryOperationFailed  Reason = "recovery operation failed"
+	ReasonRecoveryNotConfirmed     Reason = "recovery action did not restore readiness"
+	ReasonRemoteConnectionNotReady Reason = "remote connection is not ready"
+	ReasonSSHIdentityNotReady      Reason = "pinned SSH identity is not ready"
+	ReasonWSLNotRunning            Reason = "managed WSL distribution is not running"
+	ReasonSystemdTargetNotReady    Reason = "managed systemd target is not ready"
+	ReasonDockerSocketNotReady     Reason = "Docker socket is not ready"
+	ReasonDiskUnavailable          Reason = "managed environment disk is not ready"
+	ReasonSyncthingNotReady        Reason = "Syncthing connection is not ready"
+	ReasonPortRelaysNotReady       Reason = "port relays are not ready"
 )
 
-var (
-	pemPrivateKeyPattern = regexp.MustCompile(`(?s)-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----.*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----`)
-	envSecretPattern     = regexp.MustCompile(`(?mi)^([A-Z_][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASS|API_KEY|APIKEY|AUTH|CREDENTIAL)[A-Z0-9_]*)\s*=\s*[^\r\n]*$`)
-	bearerPattern        = regexp.MustCompile(`(?mi)(authorization\s*:\s*bearer\s+)[^\s\r\n,;]+`)
-	headerSecretPattern  = regexp.MustCompile(`(?mi)((?:x-api-key|x-api-token|syncthing-api-key|pairing-token)\s*:\s*)[^\r\n]+`)
-	jsonSecretPattern    = regexp.MustCompile(`(?i)("(?:auth|identitytoken|registrytoken|password|token|api_key|apikey|pairing_token)"\s*:\s*")[^"]*(")`)
-	urlCredentialPattern = regexp.MustCompile(`([a-z][a-z0-9+.-]*://)[^/@\s:]+:[^/@\s]+@`)
-	labelSecretPattern   = regexp.MustCompile(`(?mi)((?:pairing[_ -]?token|syncthing[_ -]?(?:api[_ -]?)?key|(?:api[_ -]?)?key|token|secret|password|credential)\s*[:=]\s*)[^\s\r\n,;]+`)
-)
+var allowedReasons = map[Reason]struct{}{
+	ReasonCheckUnavailable:         {},
+	ReasonCheckFailed:              {},
+	ReasonRecoveryUnavailable:      {},
+	ReasonRecoveryOperationFailed:  {},
+	ReasonRecoveryNotConfirmed:     {},
+	ReasonRemoteConnectionNotReady: {},
+	ReasonSSHIdentityNotReady:      {},
+	ReasonWSLNotRunning:            {},
+	ReasonSystemdTargetNotReady:    {},
+	ReasonDockerSocketNotReady:     {},
+	ReasonDiskUnavailable:          {},
+	ReasonSyncthingNotReady:        {},
+	ReasonPortRelaysNotReady:       {},
+}
 
-// RedactReason returns a stable diagnostic reason with common credentials
-// removed, including multiline private keys and composite transport errors.
-func RedactReason(err error) string {
+type publicReasonError struct {
+	reason Reason
+}
+
+func (e publicReasonError) Error() string { return string(e.reason) }
+
+// NewPublicError marks an allowlisted reason as safe for publication. Unknown
+// Reason values remain untrusted and are replaced by the caller's fallback.
+func NewPublicError(reason Reason) error {
+	return publicReasonError{reason: reason}
+}
+
+// ReasonForError returns an explicitly allowlisted reason or the supplied
+// stable fallback. It deliberately does not inspect or redact err.Error().
+func ReasonForError(err error, fallback Reason) string {
 	if err == nil {
 		return ""
 	}
-	return RedactString(err.Error())
-}
-
-// RedactString removes credential-bearing values while retaining useful,
-// non-sensitive context such as host names and the operation that failed.
-func RedactString(reason string) string {
-	if reason == "" {
-		return ""
+	var public publicReasonError
+	if errors.As(err, &public) {
+		if _, ok := allowedReasons[public.reason]; ok {
+			return string(public.reason)
+		}
 	}
-	redacted := pemPrivateKeyPattern.ReplaceAllString(reason, "[REDACTED PRIVATE KEY]")
-	redacted = envSecretPattern.ReplaceAllString(redacted, "${1}=[REDACTED]")
-	redacted = bearerPattern.ReplaceAllString(redacted, "${1}[REDACTED]")
-	redacted = headerSecretPattern.ReplaceAllString(redacted, "${1}[REDACTED]")
-	redacted = jsonSecretPattern.ReplaceAllString(redacted, "${1}[REDACTED]${2}")
-	redacted = urlCredentialPattern.ReplaceAllString(redacted, "${1}[REDACTED]@")
-	redacted = labelSecretPattern.ReplaceAllString(redacted, "${1}[REDACTED]")
-	return strings.TrimSpace(redacted)
-}
-
-// PublicError removes a wrapped diagnostic cause before it crosses a public
-// boundary. Callers may use errors.Is on the returned stable sentinel.
-func PublicError(public error) error {
-	if public == nil {
-		return nil
+	if _, ok := allowedReasons[fallback]; !ok {
+		fallback = ReasonCheckFailed
 	}
-	return errors.New(public.Error())
+	return string(fallback)
 }

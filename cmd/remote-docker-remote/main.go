@@ -56,10 +56,19 @@ func main() {
 }
 
 func runRPC(input io.Reader, output, errorOutput io.Writer) int {
-	return runRPCWithRuntime(input, output, errorOutput, defaultPairingRuntime())
+	return runRPCWithOperations(input, output, errorOutput, defaultPairingRuntime(), remoteSystemOperations{})
 }
 
 func runRPCWithRuntime(input io.Reader, output, errorOutput io.Writer, pairingRuntime pairingRuntime) int {
+	return runRPCWithOperations(input, output, errorOutput, pairingRuntime, remoteSystemOperations{})
+}
+
+func runRPCWithOperations(
+	input io.Reader,
+	output, errorOutput io.Writer,
+	pairingRuntime pairingRuntime,
+	diagnosticsRuntime remoteDiagnosticsRuntime,
+) int {
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), 1<<20)
 	encoder := json.NewEncoder(output)
@@ -86,6 +95,31 @@ func runRPCWithRuntime(input io.Reader, output, errorOutput io.Writer, pairingRu
 				outgoing.Error = &rpcError{Code: -32001, Message: "managed pairing revocation failed"}
 			} else {
 				outgoing.Result = map[string]any{"revoked": true}
+			}
+		} else if incoming.Method == "diagnostics.observe" && len(incoming.Params) == 0 {
+			if diagnosticsRuntime == nil {
+				outgoing.Error = &rpcError{Code: -32002, Message: "managed diagnostics observation failed"}
+			} else {
+				observation, err := diagnosticsRuntime.Observe(context.Background())
+				if err != nil {
+					outgoing.Error = &rpcError{Code: -32002, Message: "managed diagnostics observation failed"}
+				} else {
+					outgoing.Result = map[string]any{
+						"wsl_running":    observation.WSLRunning,
+						"systemd_target": observation.SystemdTarget,
+						"disk_available": observation.DiskAvailable,
+					}
+				}
+			}
+		} else if incoming.Method == "recovery.restart-systemd" && len(incoming.Params) == 0 {
+			if diagnosticsRuntime == nil {
+				outgoing.Error = &rpcError{Code: -32003, Message: "managed systemd recovery failed"}
+			} else {
+				if err := diagnosticsRuntime.RestartSystemdTarget(context.Background()); err != nil {
+					outgoing.Error = &rpcError{Code: -32003, Message: "managed systemd recovery failed"}
+				} else {
+					outgoing.Result = map[string]any{"restarted": true}
+				}
 			}
 		} else {
 			outgoing.Error = &rpcError{Code: -32601, Message: "method not available in this build stage"}

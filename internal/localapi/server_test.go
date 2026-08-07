@@ -106,6 +106,27 @@ func TestAgentLocalAPIDispatchesEveryControlMethod(t *testing.T) {
 	}
 }
 
+func TestRecoverResultKeepsExistingFieldsAndAddsSafeAttempts(t *testing.T) {
+	result := RecoverResult{
+		State: "Ready", Message: "connected",
+		Attempts: []RecoverAttempt{{Step: "reconnect", OK: true}},
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal RecoverResult: %v", err)
+	}
+	var legacy struct {
+		State   string `json:"state"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(encoded, &legacy); err != nil {
+		t.Fatalf("legacy decode RecoverResult: %v", err)
+	}
+	if legacy.State != "Ready" || legacy.Message != "connected" || !strings.Contains(string(encoded), `"attempts"`) {
+		t.Fatalf("RecoverResult JSON = %s, legacy=%#v", encoded, legacy)
+	}
+}
+
 func TestAgentLocalAPIRejectsTCPListener(t *testing.T) {
 	listener := fakeListener{addr: fakeAddr{network: "tcp", address: "127.0.0.1:49152"}}
 	err := (Server{}).Serve(context.Background(), listener)

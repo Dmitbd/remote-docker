@@ -5,7 +5,6 @@ package diagnostics
 
 import (
 	"context"
-	"errors"
 )
 
 // CheckName is a stable, safe name intended for public diagnostic output.
@@ -35,7 +34,7 @@ var orderedCheckNames = []CheckName{
 
 // ErrCheckUnavailable is the public result for an operation not supplied by a
 // platform runtime. It deliberately contains no machine-specific details.
-var ErrCheckUnavailable = errors.New("diagnostic check is unavailable")
+var ErrCheckUnavailable = NewPublicError(ReasonCheckUnavailable)
 
 // Check is one non-mutating diagnostic operation.
 type Check interface {
@@ -129,11 +128,11 @@ func (r Runner) Check(ctx context.Context) []Result {
 	for _, name := range orderedCheckNames {
 		operation := r.Operations.get(name)
 		if operation == nil {
-			results = append(results, Result{Name: name, Reason: ErrCheckUnavailable.Error()})
+			results = append(results, Result{Name: name, Reason: string(ReasonCheckUnavailable)})
 			continue
 		}
 		if err := operation.Check(ctx); err != nil {
-			results = append(results, Result{Name: name, Reason: RedactReason(err)})
+			results = append(results, Result{Name: name, Reason: ReasonForError(err, ReasonCheckFailed)})
 			continue
 		}
 		results = append(results, Result{Name: name, OK: true})

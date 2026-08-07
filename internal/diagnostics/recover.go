@@ -24,7 +24,7 @@ var orderedRecoverySteps = []RecoveryStep{
 
 var (
 	// ErrRecoveryUnavailable is used for a missing typed recovery operation.
-	ErrRecoveryUnavailable = errors.New("recovery operation is unavailable")
+	ErrRecoveryUnavailable = NewPublicError(ReasonRecoveryUnavailable)
 	// ErrRecoveryFailed is deliberately generic so internal or secret causes
 	// cannot cross the local API boundary.
 	ErrRecoveryFailed = errors.New("remote environment recovery did not complete")
@@ -55,6 +55,22 @@ type RecoveryOperations struct {
 	RestartSystemdUnit RecoveryOperation
 }
 
+// Readiness performs a fresh health observation after a recovery action. A
+// recovery action is never considered successful based only on its exit code.
+type Readiness interface {
+	Ready(context.Context) (bool, error)
+}
+
+// ReadinessFunc adapts a typed readiness observation function.
+type ReadinessFunc func(context.Context) (bool, error)
+
+func (f ReadinessFunc) Ready(ctx context.Context) (bool, error) {
+	if f == nil {
+		return false, ErrRecoveryUnavailable
+	}
+	return f(ctx)
+}
+
 func (o RecoveryOperations) get(step RecoveryStep) RecoveryOperation {
 	switch step {
 	case RecoveryReconnect:
@@ -83,11 +99,12 @@ type RecoveryResult struct {
 	Attempts []Attempt    `json:"attempts"`
 }
 
-// Recoverer performs the fixed recovery ladder and stops after the first
-// successful action. No Docker cleanup, volume removal, or WSL deregistration
-// action exists in its type system.
+// Recoverer performs the fixed recovery ladder and stops only after a fresh
+// observation confirms readiness. No Docker cleanup, volume removal, or WSL
+// deregistration action exists in its type system.
 type Recoverer struct {
 	Operations RecoveryOperations
+	Readiness  Readiness
 }
 
 // Recover performs recovery in the only supported order.
@@ -96,16 +113,27 @@ func (r Recoverer) Recover(ctx context.Context) (RecoveryResult, error) {
 	for _, step := range orderedRecoverySteps {
 		operation := r.Operations.get(step)
 		if operation == nil {
-			result.Attempts = append(result.Attempts, Attempt{Step: step, Reason: ErrRecoveryUnavailable.Error()})
+			result.Attempts = append(result.Attempts, Attempt{Step: step, Reason: string(ReasonRecoveryUnavailable)})
 			continue
 		}
-		if err := operation.Recover(ctx); err != nil {
-			result.Attempts = append(result.Attempts, Attempt{Step: step, Reason: RedactReason(err)})
-			continue
+		actionErr := operation.Recover(ctx)
+		ready := false
+		if r.Readiness != nil {
+			observed, _ := r.Readiness.Ready(ctx)
+			ready = observed
 		}
-		result.Step = step
-		result.Attempts = append(result.Attempts, Attempt{Step: step, OK: true})
-		return result, nil
+		if ready {
+			result.Step = step
+			result.Attempts = append(result.Attempts, Attempt{Step: step, OK: true})
+			return result, nil
+		}
+		if actionErr != nil {
+			result.Attempts = append(result.Attempts, Attempt{
+				Step: step, Reason: ReasonForError(actionErr, ReasonRecoveryOperationFailed),
+			})
+		} else {
+			result.Attempts = append(result.Attempts, Attempt{Step: step, Reason: string(ReasonRecoveryNotConfirmed)})
+		}
 	}
 	return result, ErrRecoveryFailed
 }

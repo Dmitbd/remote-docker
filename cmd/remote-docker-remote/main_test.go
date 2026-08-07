@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -132,6 +134,95 @@ func TestRPCPairingRevokeUsesManagedAuthorizationRuntime(t *testing.T) {
 	if contents, _ := os.ReadFile(runtime.AuthorizedKeysPath); len(contents) != 0 {
 		t.Fatalf("authorized keys after RPC revoke = %q", contents)
 	}
+}
+
+func TestRPCDiagnosticsExposeTypedObservationAndExactRecoveryOnly(t *testing.T) {
+	operations := &recordingRemoteDiagnostics{
+		observation: remoteDiagnosticObservation{WSLRunning: true, SystemdTarget: true, DiskAvailable: true},
+	}
+	input := strings.NewReader(
+		`{"jsonrpc":"2.0","id":8,"method":"diagnostics.observe"}` + "\n" +
+			`{"jsonrpc":"2.0","id":9,"method":"recovery.restart-systemd"}` + "\n" +
+			`{"jsonrpc":"2.0","id":10,"method":"recovery.exec","params":{"command":"docker system prune"}}` + "\n",
+	)
+	var output bytes.Buffer
+	if code := runRPCWithOperations(input, &output, &bytes.Buffer{}, pairingRuntime{}, operations); code != 0 {
+		t.Fatalf("runRPCWithOperations() code = %d", code)
+	}
+	decoder := json.NewDecoder(&output)
+	var observed response
+	if err := decoder.Decode(&observed); err != nil {
+		t.Fatalf("decode observation: %v", err)
+	}
+	if observed.Error != nil || observed.Result["wsl_running"] != true || observed.Result["systemd_target"] != true || observed.Result["disk_available"] != true {
+		t.Fatalf("observation response = %#v", observed)
+	}
+	var restarted response
+	if err := decoder.Decode(&restarted); err != nil {
+		t.Fatalf("decode restart: %v", err)
+	}
+	if restarted.Error != nil || restarted.Result["restarted"] != true || operations.restarts != 1 {
+		t.Fatalf("restart response = %#v, calls=%d", restarted, operations.restarts)
+	}
+	var rejected response
+	if err := decoder.Decode(&rejected); err != nil {
+		t.Fatalf("decode rejected recovery: %v", err)
+	}
+	if rejected.Error == nil || rejected.Error.Code != -32601 {
+		t.Fatalf("arbitrary recovery response = %#v", rejected)
+	}
+}
+
+func TestRemoteSystemOperationsUseExactAllowlistedCommands(t *testing.T) {
+	tests := []struct {
+		operation systemdOperation
+		binary    string
+		args      []string
+	}{
+		{operation: systemdTargetActive, binary: "/usr/bin/systemctl", args: []string{"is-active", "--quiet", "remote-docker.target"}},
+		{operation: systemdTargetRestart, binary: "/usr/bin/sudo", args: []string{"--non-interactive", "/usr/bin/systemctl", "restart", "remote-docker.target"}},
+	}
+	for _, tt := range tests {
+		binary, args, ok := systemdInvocation(tt.operation)
+		if !ok || binary != tt.binary || !reflect.DeepEqual(args, tt.args) {
+			t.Fatalf("%s invocation = (%q, %#v, %t), want (%q, %#v, true)", tt.operation, binary, args, ok, tt.binary, tt.args)
+		}
+	}
+	if _, _, ok := systemdInvocation(systemdOperation("arbitrary")); ok {
+		t.Fatal("arbitrary systemd operation received an invocation")
+	}
+}
+
+func TestRPCDiagnosticsReturnStableErrorsWithoutCommandOutput(t *testing.T) {
+	secret := "Authorization: Bearer remote-system-secret"
+	operations := &recordingRemoteDiagnostics{observeErr: errors.New(secret), restartErr: errors.New(secret)}
+	input := strings.NewReader(
+		`{"jsonrpc":"2.0","id":11,"method":"diagnostics.observe"}` + "\n" +
+			`{"jsonrpc":"2.0","id":12,"method":"recovery.restart-systemd"}` + "\n",
+	)
+	var output bytes.Buffer
+	if code := runRPCWithOperations(input, &output, &bytes.Buffer{}, pairingRuntime{}, operations); code != 0 {
+		t.Fatalf("runRPCWithOperations() code = %d", code)
+	}
+	if strings.Contains(output.String(), "remote-system-secret") || strings.Contains(output.String(), secret) {
+		t.Fatalf("RPC response leaked operation output: %s", &output)
+	}
+}
+
+type recordingRemoteDiagnostics struct {
+	observation remoteDiagnosticObservation
+	observeErr  error
+	restartErr  error
+	restarts    int
+}
+
+func (r *recordingRemoteDiagnostics) Observe(context.Context) (remoteDiagnosticObservation, error) {
+	return r.observation, r.observeErr
+}
+
+func (r *recordingRemoteDiagnostics) RestartSystemdTarget(context.Context) error {
+	r.restarts++
+	return r.restartErr
 }
 
 func testAuthorizedLine(t *testing.T, deviceID string) string {

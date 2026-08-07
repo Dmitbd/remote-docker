@@ -71,6 +71,23 @@ func TestRootfsKeepsManagedAuthorizationWritableOnlyByServiceUser(t *testing.T) 
 	}
 }
 
+func TestRootfsAllowsOnlyExactManagedSystemdRecoveryElevation(t *testing.T) {
+	sudoers, err := os.ReadFile(filepath.Join("..", "..", "packaging", "wsl", "etc", "sudoers.d", "remote-docker-recovery"))
+	if err != nil {
+		t.Fatalf("read recovery sudoers policy: %v", err)
+	}
+	policy := strings.TrimSpace(string(sudoers))
+	want := "remote-docker ALL=(root) NOPASSWD: /usr/bin/systemctl restart remote-docker.target"
+	if policy != want {
+		t.Fatalf("recovery sudoers policy = %q, want exact allowlisted command %q", policy, want)
+	}
+	for _, forbidden := range []string{"ALL=(ALL)", "systemctl *", "/usr/bin/docker", "docker system", "/usr/bin/wsl", "NOPASSWD: ALL"} {
+		if strings.Contains(policy, forbidden) {
+			t.Fatalf("recovery sudoers policy contains broad capability %q: %s", forbidden, policy)
+		}
+	}
+}
+
 type recordingPairingRunner struct {
 	output string
 	binary string

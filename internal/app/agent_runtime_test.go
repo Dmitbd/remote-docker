@@ -16,6 +16,7 @@ import (
 
 	"github.com/Dmitbd/remote-docker/internal/config"
 	"github.com/Dmitbd/remote-docker/internal/credentials"
+	"github.com/Dmitbd/remote-docker/internal/diagnostics"
 	"github.com/Dmitbd/remote-docker/internal/discovery"
 	"github.com/Dmitbd/remote-docker/internal/dockercli"
 	"github.com/Dmitbd/remote-docker/internal/localapi"
@@ -111,12 +112,13 @@ func TestProductionAgentRuntimeServesPersistedStateOverLocalSocket(t *testing.T)
 	if status.State != string(AgentUnpaired) {
 		t.Fatalf("status = %#v, want Unpaired", status)
 	}
-	var remote *localapi.RemoteError
 	var recovered localapi.RecoverResult
 	err = client.Call(ctx, localapi.MethodRecover, nil, &recovered)
-	remote = nil
-	if !errors.As(err, &remote) || remote.Code != localapi.ErrorNeedsAction {
-		t.Fatalf("Recover error = %T %v, want needs_action", err, err)
+	if err != nil {
+		t.Fatalf("Recover error = %v", err)
+	}
+	if recovered.State != string(AgentUnpaired) || recovered.Message != "pair a device to continue" || len(recovered.Attempts) == 0 {
+		t.Fatalf("Recover result = %#v, want safe unpaired state and attempts", recovered)
 	}
 
 	cancel()
@@ -128,10 +130,63 @@ func TestProductionAgentRuntimeServesPersistedStateOverLocalSocket(t *testing.T)
 	}
 }
 
+func TestAgentRuntimeRunInvokesBoundedStartupRecoveryOnce(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	restorer := newInfrastructureRestorer(func() (portrelay.Reconciler, error) {
+		return portrelay.Reconciler{}, nil
+	})
+	agent := NewAgent(nil, restorer, nil)
+	calls := 0
+	runtimeAgent := &AgentRuntime{
+		agent: agent, restorer: restorer, ssh: &managedSSHRuntime{},
+		startupRecover: func(recoveryCtx context.Context) error {
+			calls++
+			if _, ok := recoveryCtx.Deadline(); !ok {
+				t.Fatal("startup recovery context has no deadline")
+			}
+			cancel()
+			return nil
+		},
+	}
+	if err := runtimeAgent.Run(ctx, time.Hour); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context cancellation", err)
+	}
+	if calls != 1 {
+		t.Fatalf("startup recovery calls = %d, want one bounded self-heal wave", calls)
+	}
+}
+
+func TestStartupRecoveryUsesTypedDiagnosticsOnlyOnWindows(t *testing.T) {
+	reconnects := 0
+	selfHeals := 0
+	reconnect := func(context.Context) error { reconnects++; return nil }
+	selfHeal := func(context.Context) error { selfHeals++; return nil }
+
+	if err := selectStartupRecovery("windows", reconnect, selfHeal)(context.Background()); err != nil {
+		t.Fatalf("Windows startup recovery error = %v", err)
+	}
+	if reconnects != 0 || selfHeals != 1 {
+		t.Fatalf("Windows startup calls reconnect=%d self-heal=%d, want diagnostics self-heal only", reconnects, selfHeals)
+	}
+	if err := selectStartupRecovery("darwin", reconnect, selfHeal)(context.Background()); err != nil {
+		t.Fatalf("Darwin startup recovery error = %v", err)
+	}
+	if reconnects != 1 || selfHeals != 1 {
+		t.Fatalf("Darwin startup calls reconnect=%d self-heal=%d, want reconnect only", reconnects, selfHeals)
+	}
+}
+
 func TestProductionDiagnosticsReturnsOrderedSafeChecks(t *testing.T) {
-	checks := newProductionDiagnostics(func(context.Context) AgentStatus {
-		return AgentStatus{State: AgentReady, Message: "Bearer not-a-secret-in-output"}
-	}, nil).Doctor(context.Background()).Checks
+	checks := newProductionDiagnosticsWithOptions(productionDiagnosticsOptions{
+		Observe: func(context.Context) AgentStatus {
+			return AgentStatus{State: AgentReady, Message: "Bearer not-a-secret-in-output"}
+		},
+		Remote: staticRemoteDiagnostics{status: remoteDiagnosticStatus{
+			WSLRunning: true, SystemdTarget: true, DiskAvailable: true,
+		}},
+		PortRelays: diagnostics.CheckFunc(func(context.Context) error { return nil }),
+		Platform:   "darwin",
+	}).Doctor(context.Background()).Checks
 	wantNames := []string{
 		"lan_reachability", "ssh_identity", "wsl_running", "systemd_target",
 		"docker_socket", "disk", "syncthing", "port_relays",
@@ -147,12 +202,9 @@ func TestProductionDiagnosticsReturnsOrderedSafeChecks(t *testing.T) {
 			t.Fatalf("check[%d] leaked observer message: %#v", index, checks[index])
 		}
 	}
-	if !checks[0].OK || !checks[1].OK || !checks[4].OK || !checks[6].OK {
-		t.Fatalf("connected checks = %#v, want LAN/SSH/Docker/Syncthing ready", checks)
-	}
-	for _, index := range []int{2, 3, 5, 7} {
-		if checks[index].OK || checks[index].Message != "diagnostic check is unavailable" {
-			t.Fatalf("unavailable check[%d] = %#v", index, checks[index])
+	for index, check := range checks {
+		if !check.OK || check.Message != "" {
+			t.Fatalf("check[%d] = %#v, want production-ready operation", index, check)
 		}
 	}
 }

@@ -66,6 +66,33 @@ func TestSupervisorRejectsDuplicateLocalPortAndTypedPortConflict(t *testing.T) {
 	}
 }
 
+func TestSupervisorHealthIsReadOnlyAndRequiresEveryDesiredForwardActive(t *testing.T) {
+	starter := &fakeForwardStarter{}
+	supervisor := NewSupervisor(starter, time.Hour, time.Hour)
+	if !supervisor.Healthy() {
+		t.Fatal("empty initialized supervisor should be healthy")
+	}
+	mapping := Mapping{Protocol: "tcp", LocalHost: "127.0.0.1", LocalPort: 8080, ContainerID: "one", RemotePort: 80}
+	if err := supervisor.Apply(context.Background(), Snapshot{Mappings: []Mapping{mapping}}); err != nil {
+		t.Fatal(err)
+	}
+	if !supervisor.Healthy() {
+		t.Fatal("active desired forward should be healthy")
+	}
+	starts := starter.callCount()
+	starter.process(0).exit(errors.New("ssh disconnected"))
+	deadline := time.Now().Add(time.Second)
+	for supervisor.Healthy() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if supervisor.Healthy() {
+		t.Fatal("exited desired forward should be unhealthy before retry")
+	}
+	if starter.callCount() != starts {
+		t.Fatalf("Healthy() started a process: starts=%d want=%d", starter.callCount(), starts)
+	}
+}
+
 type fakeForwardStarter struct {
 	mu        sync.Mutex
 	processes []*fakeRelayProcess
