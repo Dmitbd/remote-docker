@@ -85,7 +85,7 @@ jobs:
         shell: pwsh
         run: >-
           ./packaging/windows/build-msi.ps1
-          -Version 0.0.2
+          -Version 0.0.3
           -RootfsPath dist/remote-docker-rootfs.tar.zst
 
       - name: Confirm development binaries are unsigned

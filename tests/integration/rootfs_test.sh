@@ -50,6 +50,7 @@ if [[ "${1:-}" == "--source" ]]; then
   require_contains "${source_root}/build-rootfs.sh" 'mv .*artifact_tmp.*artifact'
   require_contains "${source_root}/Containerfile" 'COPY --from=syncthing-asset'
   require_contains "${source_root}/Containerfile" '/var/lib/remote-docker-private'
+  require_contains "${source_root}/Containerfile" 'systemd-sysv'
   require_not_contains "${source_root}/Containerfile" 'github\.com/syncthing|curl .*syncthing'
   require_not_contains "${source_root}/etc/docker/daemon.json" '2375|2376|tcp://'
   require_contains "${source_root}/etc/ssh/sshd_config.d/remote-docker.conf" '^PasswordAuthentication no$'
@@ -83,6 +84,9 @@ require_contains "${extract_root}/etc/group" '^docker:'
 require_contains "${extract_root}/etc/shadow" '^remote-docker:!'
 require_contains "${extract_root}/etc/wsl.conf" '^systemd=true$'
 require_contains "${extract_root}/etc/wsl.conf" '^default=remote-docker$'
+require_contains "${extract_root}/var/lib/dpkg/status" '^Package: systemd-sysv$'
+[[ -L "${extract_root}/sbin/init" ]] || fail "missing systemd /sbin/init link"
+[[ "$(readlink "${extract_root}/sbin/init")" == '/lib/systemd/systemd' ]] || fail "unexpected /sbin/init target"
 
 for path in \
   usr/bin/docker \

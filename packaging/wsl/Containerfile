@@ -25,6 +25,7 @@ RUN apt-get update \
         openssh-server \
         sudo \
         systemd \
+        systemd-sysv \
         tini \
     && rm -rf /var/lib/apt/lists/*
 
