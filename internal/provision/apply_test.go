@@ -165,6 +165,23 @@ func TestProvisionFirstBootIsLFStableAndResumesPartialImport(t *testing.T) {
 	}
 }
 
+func TestProvisionMissingFirstBootMarkerDoesNotFailThePowerShellProbe(t *testing.T) {
+	script := readWindowsScript(t, "provision.ps1")
+
+	for _, fragment := range []string{
+		"$managedMetadataProbe = 'if [ -f /etc/remote-docker/managed.json ]; then cat /etc/remote-docker/managed.json; fi'",
+		"'--exec', '/bin/sh', '-c', $managedMetadataProbe",
+		"$firstBootRequired = $installedMetadata -ne $managedMetadata",
+	} {
+		if !strings.Contains(script, fragment) {
+			t.Fatalf("provision.ps1 is missing non-failing marker probe fragment %q", fragment)
+		}
+	}
+	if strings.Contains(script, "--exec cat /etc/remote-docker/managed.json") {
+		t.Fatal("provision.ps1 probes an optional marker with a failing native cat command")
+	}
+}
+
 func TestUninstallPreservesDataUnlessSeparatelyConfirmed(t *testing.T) {
 	script := readWindowsScript(t, "uninstall.ps1")
 	preserve := strings.Index(script, "if (-not $DeleteData)")

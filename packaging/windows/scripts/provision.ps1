@@ -114,10 +114,13 @@ $firstBootRequired = -not $distroExists
 $distroRoot = Join-Path $installRoot 'wsl'
 
 if ($distroExists) {
-    $installedMetadataOutput = & wsl.exe --distribution $managedDistroName --user root --exec cat /etc/remote-docker/managed.json 2>$null
-    $metadataExitCode = $LASTEXITCODE
-    $installedMetadata = ($installedMetadataOutput | Out-String).Trim()
-    $firstBootRequired = $metadataExitCode -ne 0 -or $installedMetadata -ne $managedMetadata
+    $managedMetadataProbe = 'if [ -f /etc/remote-docker/managed.json ]; then cat /etc/remote-docker/managed.json; fi'
+    $metadataProbeArguments = @(
+        '--distribution', $managedDistroName, '--user', 'root',
+        '--exec', '/bin/sh', '-c', $managedMetadataProbe
+    )
+    $installedMetadata = (& wsl.exe @metadataProbeArguments | Out-String).Trim()
+    $firstBootRequired = $installedMetadata -ne $managedMetadata
 }
 
 if (-not (Test-Path -LiteralPath $installRoot)) {
