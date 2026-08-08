@@ -17,6 +17,10 @@ func main() {
 	if err != nil {
 		os.Exit(1)
 	}
+	sshConfigPath, err := app.DefaultSSHConfigPath()
+	if err != nil {
+		os.Exit(1)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -24,6 +28,7 @@ func main() {
 	os.Exit(app.RunRuntime(ctx, app.Runtime{
 		ProgramName:    os.Args[0],
 		ExecutablePath: executablePath,
+		SSHConfigPath:  sshConfigPath,
 		Env:            os.Environ(),
 		Dir:            workingDirectory,
 		Stdin:          os.Stdin,

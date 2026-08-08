@@ -69,6 +69,7 @@ type AgentRuntime struct {
 	pairHost       *windowsPairingHost
 	ssh            *managedSSHRuntime
 	localSync      localSyncLifecycle
+	windowsBridge  localSyncLifecycle
 	startupRecover func(context.Context) error
 }
 
@@ -97,6 +98,10 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 	store := config.Store{Path: configPath}
 	secrets := credentials.NewKeyringStore()
 	dockerCLI := realDockerCLIPath(executablePath)
+	dockerEnv, err := sshtransport.ManagedDockerEnvironment(os.Environ(), dockerCLI, sshConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("prepare managed Docker environment: %w", err)
+	}
 	httpClient := &http.Client{Timeout: agentProbeTimeout}
 	sshRuntime := &managedSSHRuntime{
 		store: store, secrets: secrets,
@@ -107,6 +112,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 	var pairingCoordinator runtimePairingCoordinator
 	var pairHost *windowsPairingHost
 	var localSync localSyncLifecycle
+	var windowsBridge localSyncLifecycle
 	if runtime.GOOS == "windows" {
 		installer := provision.WSLPairingInstaller{}
 		host, err := newWindowsPairingHost(installer)
@@ -116,6 +122,11 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 		pairHost = host
 		pairingCoordinator = windowsPairingCoordinator{server: host.server, installer: installer}
 		localSync = provision.WSLRuntimeIdentityPreparer{Secrets: secrets}
+		bridge, bridgeErr := windowsbridge.NewProductionHost()
+		if bridgeErr != nil {
+			return nil, bridgeErr
+		}
+		windowsBridge = bridge
 	} else {
 		syncthingExecutable := options.SyncthingExecutable
 		if syncthingExecutable == "" {
@@ -145,7 +156,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 
 	observer := &productionAgentObserver{
 		store: store, knownHostsPath: knownHostsPath,
-		dockerCLI: dockerCLI, dockerContext: defaultContextName,
+		dockerCLI: dockerCLI, dockerContext: defaultContextName, dockerEnv: dockerEnv,
 		secrets: secrets, httpClient: httpClient,
 	}
 	restorer := newInfrastructureRestorer(func() (portrelay.Reconciler, error) {
@@ -167,9 +178,9 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 			return portrelay.Reconciler{}, unavailable("managed SSH runtime is unavailable")
 		}
 		alias := "remote-docker-device-" + cfg.ActiveDevice
-		source := portrelay.DockerSource{CLI: dockerCLI, Context: defaultContextName, Env: os.Environ()}
+		source := portrelay.DockerSource{CLI: dockerCLI, Context: defaultContextName, Env: dockerEnv}
 		supervisor := portrelay.NewSupervisor(portrelay.SSHForwardStarter{
-			Forwarder:  sshtransport.Forwarder{Env: os.Environ()},
+			Forwarder:  sshtransport.Forwarder{Binary: "/usr/bin/ssh", Env: os.Environ()},
 			ConfigPath: sshConfigPath, ManagedHost: alias,
 		}, 250*time.Millisecond, 5*time.Second)
 		_ = device
@@ -209,6 +220,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 	}
 	return &AgentRuntime{
 		agent: agent, restorer: restorer, pairHost: pairHost, ssh: sshRuntime, localSync: localSync,
+		windowsBridge:  windowsBridge,
 		startupRecover: selectStartupRecovery(runtime.GOOS, agent.Reconnect, startupSelfHeal),
 	}, nil
 }
@@ -235,6 +247,11 @@ func (r *AgentRuntime) Run(ctx context.Context, interval time.Duration) error {
 		localSyncDone = make(chan error, 1)
 		go func() { localSyncDone <- r.localSync.Run(lifecycleCtx, interval) }()
 	}
+	var windowsBridgeDone chan error
+	if r.windowsBridge != nil {
+		windowsBridgeDone = make(chan error, 1)
+		go func() { windowsBridgeDone <- r.windowsBridge.Run(lifecycleCtx, interval) }()
+	}
 	recoveryCtx, cancel := context.WithTimeout(lifecycleCtx, startupRecoveryTimeout)
 	startupRecover := r.startupRecover
 	if startupRecover == nil {
@@ -242,7 +259,7 @@ func (r *AgentRuntime) Run(ctx context.Context, interval time.Duration) error {
 	}
 	_ = startupRecover(recoveryCtx)
 	cancel()
-	if localSyncDone == nil {
+	if localSyncDone == nil && windowsBridgeDone == nil {
 		return r.agent.Run(lifecycleCtx, interval)
 	}
 	agentDone := make(chan error, 1)
@@ -250,12 +267,25 @@ func (r *AgentRuntime) Run(ctx context.Context, interval time.Duration) error {
 	select {
 	case err := <-agentDone:
 		cancelLifecycle()
-		<-localSyncDone
+		waitLifecycle(localSyncDone)
+		waitLifecycle(windowsBridgeDone)
 		return err
 	case err := <-localSyncDone:
 		cancelLifecycle()
 		<-agentDone
+		waitLifecycle(windowsBridgeDone)
 		return err
+	case err := <-windowsBridgeDone:
+		cancelLifecycle()
+		<-agentDone
+		waitLifecycle(localSyncDone)
+		return err
+	}
+}
+
+func waitLifecycle(done <-chan error) {
+	if done != nil {
+		<-done
 	}
 }
 
@@ -534,6 +564,7 @@ type productionAgentObserver struct {
 	knownHostsPath string
 	dockerCLI      string
 	dockerContext  string
+	dockerEnv      []string
 	secrets        credentials.Store
 	httpClient     *http.Client
 }
@@ -566,6 +597,7 @@ func (o *productionAgentObserver) Observe(ctx context.Context) AgentObservation 
 	if err := (dockercli.Runner{}).Run(probeCtx, dockercli.Invocation{
 		Binary: o.dockerCLI,
 		Args:   []string{"--context", o.dockerContext, "version", "--format", "{{.Server.Version}}"},
+		Env:    o.dockerEnv,
 		Stdout: io.Discard, Stderr: io.Discard,
 	}); err != nil {
 		return observation
@@ -788,7 +820,12 @@ func (r *managedSSHRuntime) Ensure(ctx context.Context) error {
 	if err := os.Chmod(filepath.Dir(r.agentSocketPath), 0o700); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(r.controlDir, 0o700); err != nil {
+	if privateRoot := defaultPrivateRuntimeRoot(); privateRoot != "" && filepath.Clean(filepath.Dir(r.controlDir)) == filepath.Clean(privateRoot) {
+		if err := sshtransport.EnsurePrivateDirectory(privateRoot); err != nil {
+			return err
+		}
+	}
+	if err := sshtransport.EnsurePrivateDirectory(r.controlDir); err != nil {
 		return err
 	}
 	if err := os.Remove(r.agentSocketPath); err != nil && !errors.Is(err, os.ErrNotExist) {

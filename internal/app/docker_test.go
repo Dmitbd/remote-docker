@@ -152,6 +152,36 @@ func TestRealDockerCLIPath(t *testing.T) {
 	}
 }
 
+func TestRunRuntimeInjectsManagedSSHAdapterEnvironment(t *testing.T) {
+	executor := &capturingExecutor{}
+	configPath := "/Users/demo/Library/Application Support/Remote Docker/ssh_config"
+	code := RunRuntime(context.Background(), Runtime{
+		ProgramName:   "docker",
+		DockerCLIPath: "/bundle/docker-real",
+		SSHConfigPath: configPath,
+		Executor:      executor,
+		Env:           []string{"PATH=/usr/bin", "SAFE=value"},
+	}, []string{"version"}, io.Discard, io.Discard)
+	if code != 0 {
+		t.Fatalf("RunRuntime() code = %d", code)
+	}
+	if !containsEnv(executor.invocation.Env, "REMOTE_DOCKER_SSH_CONFIG="+configPath) {
+		t.Fatalf("Docker environment = %#v", executor.invocation.Env)
+	}
+	if !containsEnv(executor.invocation.Env, "PATH=/bundle/ssh-bin:/usr/bin") {
+		t.Fatalf("Docker PATH = %#v", executor.invocation.Env)
+	}
+}
+
+func containsEnv(environment []string, value string) bool {
+	for _, item := range environment {
+		if item == value {
+			return true
+		}
+	}
+	return false
+}
+
 func assertDockerInvocation(
 	t *testing.T,
 	invocation dockercli.Invocation,

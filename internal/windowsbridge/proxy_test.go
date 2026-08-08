@@ -101,6 +101,27 @@ func TestProxyRejectsWildcardListener(t *testing.T) {
 	}
 }
 
+func TestProxyRejectsPublicRemotePeerBeforeDialingWSL(t *testing.T) {
+	dialer := &recordingDialer{}
+	listener := &queuedListener{
+		address: &net.TCPAddr{IP: net.ParseIP("192.168.1.68"), Port: 49222},
+		connections: []net.Conn{&addressedConn{
+			local:  &net.TCPAddr{IP: net.ParseIP("192.168.1.68"), Port: 49222},
+			remote: &net.TCPAddr{IP: net.ParseIP("203.0.113.8"), Port: 50000},
+		}},
+	}
+	proxy, err := NewProxy(ServiceSSH, &sequenceResolver{}, staticProfile(true), dialer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := proxy.Serve(context.Background(), listener); err == nil {
+		t.Fatal("Serve() error = nil, want listener exhaustion after rejecting public peer")
+	}
+	if len(dialer.addresses()) != 0 {
+		t.Fatalf("WSL dial addresses = %#v, want none", dialer.addresses())
+	}
+}
+
 func TestProxyStopsAcceptingWhenProfileBecomesPublic(t *testing.T) {
 	profiles := &sequenceProfile{values: []bool{true, false}}
 	proxy, err := NewProxy(ServiceSSH, &sequenceResolver{}, profiles, &net.Dialer{})
@@ -190,6 +211,55 @@ type redirectDialer struct {
 	target   string
 	recorded []string
 }
+
+type recordingDialer struct {
+	mu       sync.Mutex
+	recorded []string
+}
+
+func (d *recordingDialer) DialContext(context.Context, string, string) (net.Conn, error) {
+	d.mu.Lock()
+	d.recorded = append(d.recorded, "called")
+	d.mu.Unlock()
+	return nil, errors.New("unexpected dial")
+}
+
+func (d *recordingDialer) addresses() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.recorded...)
+}
+
+type queuedListener struct {
+	address     net.Addr
+	connections []net.Conn
+}
+
+func (l *queuedListener) Accept() (net.Conn, error) {
+	if len(l.connections) == 0 {
+		return nil, errors.New("listener exhausted")
+	}
+	connection := l.connections[0]
+	l.connections = l.connections[1:]
+	return connection, nil
+}
+
+func (*queuedListener) Close() error     { return nil }
+func (l *queuedListener) Addr() net.Addr { return l.address }
+
+type addressedConn struct {
+	local  net.Addr
+	remote net.Addr
+}
+
+func (*addressedConn) Read([]byte) (int, error)         { return 0, io.EOF }
+func (*addressedConn) Write(value []byte) (int, error)  { return len(value), nil }
+func (*addressedConn) Close() error                     { return nil }
+func (c *addressedConn) LocalAddr() net.Addr            { return c.local }
+func (c *addressedConn) RemoteAddr() net.Addr           { return c.remote }
+func (*addressedConn) SetDeadline(time.Time) error      { return nil }
+func (*addressedConn) SetReadDeadline(time.Time) error  { return nil }
+func (*addressedConn) SetWriteDeadline(time.Time) error { return nil }
 
 type recordingOutputRunner struct {
 	outputs [][]byte

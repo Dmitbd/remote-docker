@@ -89,6 +89,21 @@ func TestAgentReconnectRestoresInfrastructureWithoutDockerCommandReplay(t *testi
 	}
 }
 
+func TestAgentReconnectRefreshesPersistedPairingBeforeInfrastructureFailure(t *testing.T) {
+	agent := NewAgent(
+		&sequenceObserver{observations: []AgentObservation{{Paired: true}}},
+		failingRestorer{},
+		nil,
+	)
+	if err := agent.Reconnect(context.Background()); err == nil {
+		t.Fatal("Reconnect() error = nil")
+	}
+	status := agent.Status()
+	if !status.Paired || status.State != AgentConnecting {
+		t.Fatalf("status = %#v, want paired Connecting after persisted pairing", status)
+	}
+}
+
 func TestAgentHandlerRoutesAllControlOperations(t *testing.T) {
 	controller := &recordingController{}
 	agent := NewAgent(&sequenceObserver{}, nil, controller)
@@ -195,6 +210,14 @@ func (o *sequenceObserver) Observe(context.Context) AgentObservation {
 }
 
 type recordingRestorer struct{ events *[]string }
+
+type failingRestorer struct{}
+
+func (failingRestorer) RestoreEventStream(context.Context) error {
+	return errors.New("transport is not ready")
+}
+
+func (failingRestorer) RestoreRelays(context.Context) error { return nil }
 
 func (r *recordingRestorer) RestoreEventStream(context.Context) error {
 	*r.events = append(*r.events, "event-stream")

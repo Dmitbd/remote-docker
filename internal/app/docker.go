@@ -10,6 +10,7 @@ import (
 
 	"github.com/Dmitbd/remote-docker/internal/dockercli"
 	"github.com/Dmitbd/remote-docker/internal/localapi"
+	"github.com/Dmitbd/remote-docker/internal/sshtransport"
 )
 
 const defaultContextName = "remote-docker"
@@ -19,6 +20,7 @@ type Runtime struct {
 	ProgramName    string
 	ExecutablePath string
 	DockerCLIPath  string
+	SSHConfigPath  string
 	ContextName    string
 	Executor       dockercli.Executor
 	Preflight      DockerPreflight
@@ -99,10 +101,19 @@ func runDocker(ctx context.Context, runtime Runtime, args []string, stdout, stde
 	dockerArgs := make([]string, 0, len(args)+2)
 	dockerArgs = append(dockerArgs, "--context", contextName)
 	dockerArgs = append(dockerArgs, args...)
+	environment := runtime.Env
+	if runtime.SSHConfigPath != "" {
+		var envErr error
+		environment, envErr = sshtransport.ManagedDockerEnvironment(environment, dockerCLIPath, runtime.SSHConfigPath)
+		if envErr != nil {
+			fmt.Fprintf(stderr, "remote-docker: %v\n", envErr)
+			return 1
+		}
+	}
 	invocation := dockercli.Invocation{
 		Binary: dockerCLIPath,
 		Args:   dockerArgs,
-		Env:    runtime.Env,
+		Env:    environment,
 		Dir:    runtime.Dir,
 		Stdin:  runtime.Stdin,
 		Stdout: stdout,

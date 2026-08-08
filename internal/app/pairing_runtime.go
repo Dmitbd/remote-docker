@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -532,6 +533,21 @@ func runSSHCommand(ctx context.Context, command sshtransport.Command) error {
 
 func defaultRuntimePaths(configPath string) (sshConfig, knownHosts, agentSocket, controlDir string) {
 	root := filepath.Dir(configPath)
+	controlRoot := filepath.Join(root, "run")
+	if privateRoot := defaultPrivateRuntimeRoot(); privateRoot != "" {
+		controlRoot = privateRoot
+	}
 	return filepath.Join(root, "ssh_config"), filepath.Join(root, "known_hosts"),
-		filepath.Join(root, "run", "ssh-agent.sock"), filepath.Join(root, "run", "ssh-control")
+		filepath.Join(root, "run", "ssh-agent.sock"), filepath.Join(controlRoot, "ssh-control")
+}
+
+// DefaultSSHConfigPath returns the per-user config owned by the installed SSH
+// adapter used only by Remote Docker child processes.
+func DefaultSSHConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	sshConfig, _, _, _ := defaultRuntimePaths(config.DefaultPath(runtime.GOOS, home))
+	return sshConfig, nil
 }

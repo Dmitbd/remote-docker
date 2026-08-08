@@ -125,6 +125,9 @@ func (a *Agent) Reconnect(ctx context.Context) error {
 	if a == nil || a.restorer == nil {
 		return &localapi.PublicError{Code: localapi.ErrorUnavailable, Message: "recovery infrastructure is unavailable"}
 	}
+	// Persisted pairing is authoritative even while its transport is still
+	// recovering. Publish that state before any fallible infrastructure work.
+	a.Refresh(ctx)
 	if err := a.restorer.RestoreEventStream(ctx); err != nil {
 		return err
 	}

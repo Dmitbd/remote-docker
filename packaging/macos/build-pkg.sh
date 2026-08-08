@@ -90,10 +90,11 @@ create_layout() {
   mkdir -p \
     "${app_contents}/MacOS" \
     "${app_contents}/Resources" \
-    "${app_contents}/libexec/remote-docker" \
+    "${app_contents}/libexec/remote-docker/ssh-bin" \
     "${payload}/Library/LaunchAgents" \
     "${payload}/usr/local/bin" \
     "${libexec}/bin" \
+    "${libexec}/ssh-bin" \
     "${libexec}/cli-plugins" \
     "${payload}/usr/local/libexec/docker/cli-plugins" \
     "${payload}/etc/paths.d" \
@@ -209,9 +210,16 @@ build_payload() {
     GOOS=darwin GOARCH="${target_arch}" CGO_ENABLED=1 \
     "${go_root}/go/bin/go" -C "${repo_root}" build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \
     -o "${app_contents}/MacOS/remote-docker-tray" ./cmd/remote-docker-tray
+  env \
+    GOROOT="${go_root}/go" \
+    PATH="${go_root}/go/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    GOOS=darwin GOARCH="${target_arch}" CGO_ENABLED=0 \
+    "${go_root}/go/bin/go" -C "${repo_root}" build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \
+    -o "${libexec}/ssh-bin/ssh" ./cmd/remote-docker-ssh
 
   cp "${work_root}/docker/docker/docker" "${libexec}/docker-real"
   cp "${work_root}/docker/docker/docker" "${app_contents}/libexec/remote-docker/docker-real"
+  cp "${libexec}/ssh-bin/ssh" "${app_contents}/libexec/remote-docker/ssh-bin/ssh"
   cp "${compose_binary}" "${libexec}/cli-plugins/docker-compose"
   cp "${syncthing_binary}" "${libexec}/syncthing"
   chmod 755 \
@@ -219,7 +227,9 @@ build_payload() {
     "${app_contents}/Resources/remote-docker-agent" \
     "${app_contents}/MacOS/remote-docker-tray" \
     "${app_contents}/libexec/remote-docker/docker-real" \
+    "${app_contents}/libexec/remote-docker/ssh-bin/ssh" \
     "${libexec}/docker-real" \
+    "${libexec}/ssh-bin/ssh" \
     "${libexec}/cli-plugins/docker-compose" \
     "${libexec}/syncthing"
 }
@@ -234,7 +244,9 @@ sign_app_if_requested() {
     "${app_contents}/Resources/remote-docker-agent" \
     "${app_contents}/MacOS/remote-docker-tray" \
     "${app_contents}/libexec/remote-docker/docker-real" \
+    "${app_contents}/libexec/remote-docker/ssh-bin/ssh" \
     "${libexec}/docker-real" \
+    "${libexec}/ssh-bin/ssh" \
     "${libexec}/cli-plugins/docker-compose" \
     "${libexec}/syncthing" \
     "${app_bundle}"; do
@@ -253,7 +265,9 @@ if [[ "${layout_only}" == "true" ]]; then
   write_layout_placeholder "${app_contents}/Resources/remote-docker-agent" "agent layout placeholder"
   write_layout_placeholder "${app_contents}/MacOS/remote-docker-tray" "tray layout placeholder"
   write_layout_placeholder "${app_contents}/libexec/remote-docker/docker-real" "agent Docker CLI layout placeholder"
+  write_layout_placeholder "${app_contents}/libexec/remote-docker/ssh-bin/ssh" "agent SSH adapter layout placeholder"
   write_layout_placeholder "${libexec}/docker-real" "Docker CLI layout placeholder"
+  write_layout_placeholder "${libexec}/ssh-bin/ssh" "Docker SSH adapter layout placeholder"
   write_layout_placeholder "${libexec}/cli-plugins/docker-compose" "Compose layout placeholder"
   write_layout_placeholder "${libexec}/syncthing" "Syncthing layout placeholder"
   mkdir -p "$(dirname "${layout_output}")"

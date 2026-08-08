@@ -153,6 +153,12 @@ func (p *Proxy) Serve(ctx context.Context, listener net.Listener) error {
 			}
 			return fmt.Errorf("accept bridge connection: %w", err)
 		}
+		remoteAddress, ok := connection.RemoteAddr().(*net.TCPAddr)
+		if !ok || remoteAddress.IP == nil ||
+			(!remoteAddress.IP.IsPrivate() && !remoteAddress.IP.IsLoopback()) {
+			_ = connection.Close()
+			continue
+		}
 
 		if err := p.requirePrivate(ctx); err != nil {
 			_ = connection.Close()

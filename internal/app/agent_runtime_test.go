@@ -173,6 +173,46 @@ func TestAgentRuntimeRunInvokesBoundedStartupRecoveryOnce(t *testing.T) {
 	}
 }
 
+func TestAgentRuntimeRunsWindowsBridgeAlongsideRuntimeIdentityLifecycle(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	restorer := newInfrastructureRestorer(func() (portrelay.Reconciler, error) {
+		return portrelay.Reconciler{}, nil
+	})
+	agent := NewAgent(nil, restorer, nil)
+	identity := &recordingLocalSyncLifecycle{started: make(chan struct{}), stopped: make(chan struct{})}
+	bridge := &recordingLocalSyncLifecycle{started: make(chan struct{}), stopped: make(chan struct{})}
+	runtimeAgent := &AgentRuntime{
+		agent: agent, restorer: restorer, localSync: identity, windowsBridge: bridge,
+		startupRecover: func(context.Context) error {
+			select {
+			case <-identity.started:
+			case <-time.After(time.Second):
+				t.Fatal("runtime identity lifecycle did not start")
+			}
+			select {
+			case <-bridge.started:
+			case <-time.After(time.Second):
+				t.Fatal("Windows bridge lifecycle did not start")
+			}
+			cancel()
+			return nil
+		},
+	}
+	if err := runtimeAgent.Run(ctx, time.Hour); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context cancellation", err)
+	}
+	for name, stopped := range map[string]<-chan struct{}{
+		"runtime identity": identity.stopped,
+		"Windows bridge":   bridge.stopped,
+	} {
+		select {
+		case <-stopped:
+		case <-time.After(time.Second):
+			t.Fatalf("%s lifecycle did not stop", name)
+		}
+	}
+}
+
 type recordingLocalSyncLifecycle struct {
 	started chan struct{}
 	stopped chan struct{}
