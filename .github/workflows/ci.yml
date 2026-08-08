@@ -12,6 +12,7 @@ on:
       - 'packaging/wsl/**'
       - 'tests/integration/windows_package.Tests.ps1'
       - 'tests/integration/rootfs_test.sh'
+      - 'tests/integration/release_workflow_test.sh'
       - 'go.mod'
       - 'go.sum'
   workflow_dispatch:
@@ -31,6 +32,9 @@ jobs:
 
       - name: Verify rootfs source contract
         run: bash tests/integration/rootfs_test.sh --source
+
+      - name: Verify free release workflow contract
+        run: bash tests/integration/release_workflow_test.sh
 
       - name: Build rootfs input
         run: bash packaging/wsl/build-rootfs.sh

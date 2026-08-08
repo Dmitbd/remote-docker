@@ -203,26 +203,26 @@ Describe 'Windows package contract' {
         $workflow | Should -Not -Match 'SignTool|WINDOWS_SIGNING|notary|release\s+create'
     }
 
-    It 'publishes only verified signed tag artifacts with checksums and SBOMs' {
+    It 'publishes free unsigned tag artifacts with provenance checksums and SBOMs' {
         $workflow = Read-RepositoryFile $releaseWorkflow
 
         $workflow | Should -Match '(?m)^\s*tags:\s*\n\s*-\s*''v\*'''
         $workflow | Should -Match "github\.repository\s*==\s*'Dmitbd/remote-docker'"
         $workflow | Should -Match 'refs/tags/v'
         $workflow | Should -Match 'git\s+cat-file\s+-t'
-        $workflow | Should -Match 'git/tags/\$tagObject'
-        $workflow | Should -Match 'verification\.verified'
-        $workflow | Should -Match 'WINDOWS_SIGNING_CERTIFICATE_BASE64:\s*\$\{\{\s*secrets\.'
         $workflow | Should -Match 'Get-AuthenticodeSignature'
+        $workflow | Should -Match "Status\s+-ne\s+'NotSigned'"
         $workflow | Should -Match 'Get-FileHash[^\n]+SHA256'
         $workflow | Should -Match 'syft@v1\.50\.0'
-        $workflow | Should -Match 'REMOTE_DOCKER_APP_SIGN_IDENTITY'
-        $workflow | Should -Match 'REMOTE_DOCKER_INSTALLER_SIGN_IDENTITY'
-        $workflow | Should -Match 'notarytool\s+store-credentials'
-        $workflow | Should -Match 'stapler\s+validate'
+        $workflow | Should -Match 'source_commit\s*=\s*\$env:GITHUB_SHA'
+        $workflow | Should -Match 'remote-docker-windows-x64'
+        $workflow | Should -Match 'remote-docker-macos-arm64'
+        $workflow | Should -Match 'Remote-Docker-Windows-x64-manifest\.json'
+        $workflow | Should -Match 'Remote-Docker-macOS-arm64-manifest\.json'
         $workflow | Should -Match 'needs:\s*\[windows-release, macos-release\]'
         $workflow | Should -Match 'gh\s+release\s+create'
         $workflow | Should -Match '(?s)Get-AuthenticodeSignature.*Get-FileHash.*syft@v1\.50\.0.*gh\s+release\s+create'
+        $workflow | Should -Not -Match 'WINDOWS_SIGNING|MACOS_SIGNING|REMOTE_DOCKER_(?:APP|INSTALLER)_SIGN_IDENTITY|APPLE_NOTARY|verification\.verified|notarytool|stapler'
         $workflow | Should -Not -Match '(?m)^\s*(?:echo|Write-Host).*(?:WINDOWS_SIGNING|password|secret|private.?key|token)'
     }
 
