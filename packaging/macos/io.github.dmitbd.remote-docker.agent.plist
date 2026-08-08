@@ -6,7 +6,7 @@
   <string>io.github.dmitbd.remote-docker.agent</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Applications/Remote Docker.app/Contents/Resources/remote-docker-agent</string>
+    <string>/Applications/Remote Docker.app/Contents/Library/LoginItems/Remote Docker Agent.app/Contents/MacOS/remote-docker-agent</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -14,6 +14,7 @@
   <string>Background</string>
   <key>AssociatedBundleIdentifiers</key>
   <array>
+    <string>io.github.dmitbd.remote-docker.agent</string>
     <string>io.github.dmitbd.remote-docker</string>
   </array>
   <key>ThrottleInterval</key>

@@ -84,12 +84,15 @@ payload="${stage_root}/payload"
 package_scripts="${stage_root}/scripts"
 app_bundle="${payload}/Applications/Remote Docker.app"
 app_contents="${app_bundle}/Contents"
+agent_bundle="${app_contents}/Library/LoginItems/Remote Docker Agent.app"
+agent_contents="${agent_bundle}/Contents"
 libexec="${payload}/usr/local/libexec/remote-docker"
 
 create_layout() {
   mkdir -p \
     "${app_contents}/MacOS" \
     "${app_contents}/Resources" \
+    "${agent_contents}/MacOS" \
     "${app_contents}/libexec/remote-docker/ssh-bin" \
     "${payload}/Library/LaunchAgents" \
     "${payload}/usr/local/bin" \
@@ -101,10 +104,12 @@ create_layout() {
     "${package_scripts}"
 
   cp "${script_dir}/Info.plist" "${app_contents}/Info.plist"
+  cp "${script_dir}/Agent-Info.plist" "${agent_contents}/Info.plist"
   sed -i '' \
     -e "s/__REMOTE_DOCKER_VERSION__/${app_version}/g" \
     -e "s/__REMOTE_DOCKER_BUILD_VERSION__/${build_version}/g" \
-    "${app_contents}/Info.plist"
+    "${app_contents}/Info.plist" \
+    "${agent_contents}/Info.plist"
   cp "${script_dir}/io.github.dmitbd.remote-docker.agent.plist" \
     "${payload}/Library/LaunchAgents/io.github.dmitbd.remote-docker.agent.plist"
   cp "${script_dir}/paths.d/remote-docker" "${payload}/etc/paths.d/remote-docker"
@@ -119,6 +124,7 @@ create_layout() {
   chmod 755 "${libexec}/bin/docker" "${libexec}/uninstall" "${package_scripts}/preinstall" "${package_scripts}/postinstall"
   chmod 644 \
     "${app_contents}/Info.plist" \
+    "${agent_contents}/Info.plist" \
     "${payload}/Library/LaunchAgents/io.github.dmitbd.remote-docker.agent.plist" \
     "${payload}/etc/paths.d/remote-docker" \
     "${app_contents}/Resources/THIRD_PARTY_NOTICES.md"
@@ -203,7 +209,7 @@ build_payload() {
     PATH="${go_root}/go/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
     GOOS=darwin GOARCH="${target_arch}" CGO_ENABLED=1 \
     "${go_root}/go/bin/go" -C "${repo_root}" build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \
-    -o "${app_contents}/Resources/remote-docker-agent" ./cmd/remote-docker-agent
+    -o "${agent_contents}/MacOS/remote-docker-agent" ./cmd/remote-docker-agent
   env \
     GOROOT="${go_root}/go" \
     PATH="${go_root}/go/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
@@ -224,7 +230,7 @@ build_payload() {
   cp "${syncthing_binary}" "${libexec}/syncthing"
   chmod 755 \
     "${payload}/usr/local/bin/remote-docker" \
-    "${app_contents}/Resources/remote-docker-agent" \
+    "${agent_contents}/MacOS/remote-docker-agent" \
     "${app_contents}/MacOS/remote-docker-tray" \
     "${app_contents}/libexec/remote-docker/docker-real" \
     "${app_contents}/libexec/remote-docker/ssh-bin/ssh" \
@@ -234,27 +240,38 @@ build_payload() {
     "${libexec}/syncthing"
 }
 
-sign_app_if_requested() {
+sign_app() {
   local identity="${REMOTE_DOCKER_APP_SIGN_IDENTITY:-}"
-  [[ -n "${identity}" ]] || return 0
+  local -a sign_options=(--force --sign "-")
   command -v codesign >/dev/null || { printf 'codesign is required for app signing\n' >&2; return 1; }
+  if [[ -n "${identity}" ]]; then
+    sign_options=(--force --options runtime --timestamp --sign "${identity}")
+  fi
   local target
-  for target in \
-    "${payload}/usr/local/bin/remote-docker" \
-    "${app_contents}/Resources/remote-docker-agent" \
-    "${app_contents}/MacOS/remote-docker-tray" \
-    "${app_contents}/libexec/remote-docker/docker-real" \
-    "${app_contents}/libexec/remote-docker/ssh-bin/ssh" \
-    "${libexec}/docker-real" \
-    "${libexec}/ssh-bin/ssh" \
-    "${libexec}/cli-plugins/docker-compose" \
-    "${libexec}/syncthing" \
-    "${app_bundle}"; do
-    if ! codesign --force --options runtime --timestamp --sign "${identity}" "${target}" >/dev/null 2>&1; then
-      printf 'application signing failed for %s\n' "${target}" >&2
-      return 1
-    fi
-  done
+  if [[ -n "${identity}" ]]; then
+    for target in \
+      "${payload}/usr/local/bin/remote-docker" \
+      "${app_contents}/MacOS/remote-docker-tray" \
+      "${app_contents}/libexec/remote-docker/docker-real" \
+      "${app_contents}/libexec/remote-docker/ssh-bin/ssh" \
+      "${libexec}/docker-real" \
+      "${libexec}/ssh-bin/ssh" \
+      "${libexec}/cli-plugins/docker-compose" \
+      "${libexec}/syncthing"; do
+      if ! codesign "${sign_options[@]}" "${target}" >/dev/null 2>&1; then
+        printf 'application signing failed for %s\n' "${target}" >&2
+        return 1
+      fi
+    done
+  fi
+  if ! codesign "${sign_options[@]}" --identifier io.github.dmitbd.remote-docker.agent "${agent_bundle}" >/dev/null 2>&1; then
+    printf 'application signing failed for %s\n' "${agent_bundle}" >&2
+    return 1
+  fi
+  if ! codesign "${sign_options[@]}" --identifier io.github.dmitbd.remote-docker "${app_bundle}" >/dev/null 2>&1; then
+    printf 'application signing failed for %s\n' "${app_bundle}" >&2
+    return 1
+  fi
 }
 
 create_layout
@@ -262,7 +279,7 @@ if [[ "${layout_only}" == "true" ]]; then
   [[ -n "${layout_output}" ]] || { printf 'layout output is required\n' >&2; exit 2; }
   [[ ! -e "${layout_output}" ]] || { printf 'layout output already exists: %s\n' "${layout_output}" >&2; exit 1; }
   write_layout_placeholder "${payload}/usr/local/bin/remote-docker" "remote-docker layout placeholder"
-  write_layout_placeholder "${app_contents}/Resources/remote-docker-agent" "agent layout placeholder"
+  write_layout_placeholder "${agent_contents}/MacOS/remote-docker-agent" "agent layout placeholder"
   write_layout_placeholder "${app_contents}/MacOS/remote-docker-tray" "tray layout placeholder"
   write_layout_placeholder "${app_contents}/libexec/remote-docker/docker-real" "agent Docker CLI layout placeholder"
   write_layout_placeholder "${app_contents}/libexec/remote-docker/ssh-bin/ssh" "agent SSH adapter layout placeholder"
@@ -282,7 +299,7 @@ done
 
 build_payload
 xattr -crs "${payload}"
-sign_app_if_requested
+sign_app
 mkdir -p "${output_dir}"
 unsigned_pkg="${work_root}/Remote-Docker-${app_version}-${target_arch}-unsigned.pkg"
 pkgbuild \
