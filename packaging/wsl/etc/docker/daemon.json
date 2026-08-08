@@ -8,8 +8,5 @@
   "features": {
     "buildkit": true
   },
-  "hosts": [
-    "unix:///var/run/docker.sock"
-  ],
   "log-driver": "local"
 }

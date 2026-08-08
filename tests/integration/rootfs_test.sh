@@ -34,6 +34,7 @@ if [[ "${1:-}" == "--source" ]]; then
     build-rootfs.sh \
     etc/wsl.conf \
     etc/docker/daemon.json \
+    etc/systemd/system/docker.service.d/remote-docker.conf \
     etc/ssh/sshd_config.d/remote-docker.conf \
     etc/systemd/system/remote-docker.target \
     etc/systemd/system/remote-docker-remote.service \
@@ -53,6 +54,8 @@ if [[ "${1:-}" == "--source" ]]; then
   require_contains "${source_root}/Containerfile" 'systemd-sysv'
   require_not_contains "${source_root}/Containerfile" 'github\.com/syncthing|curl .*syncthing'
   require_not_contains "${source_root}/etc/docker/daemon.json" '2375|2376|tcp://'
+  require_not_contains "${source_root}/etc/docker/daemon.json" '"hosts"[[:space:]]*:'
+  require_contains "${source_root}/etc/systemd/system/docker.service.d/remote-docker.conf" '^ExecStart=/usr/bin/dockerd --host=unix:///var/run/docker\.sock --containerd=/run/containerd/containerd\.sock$'
   require_contains "${source_root}/etc/ssh/sshd_config.d/remote-docker.conf" '^PasswordAuthentication no$'
   require_contains "${source_root}/etc/ssh/sshd_config.d/remote-docker.conf" '^HostKey /run/remote-docker/ssh_host_ed25519_key$'
   require_not_contains "${source_root}/etc/systemd/system/ssh.service.d/remote-docker.conf" 'ssh-keygen|/etc/remote-docker/ssh_host_ed25519_key'
@@ -93,6 +96,7 @@ for path in \
   usr/local/bin/syncthing \
   usr/local/bin/remote-docker-remote \
   usr/local/libexec/remote-docker/authorized-command \
+  etc/systemd/system/docker.service.d/remote-docker.conf \
   etc/systemd/system/remote-docker.target \
   etc/systemd/system/remote-docker-remote.service \
   etc/systemd/system/syncthing@.service \
@@ -110,6 +114,8 @@ for private_path in \
 done
 
 require_not_contains "${extract_root}/etc/docker/daemon.json" '2375|2376|tcp://'
+require_not_contains "${extract_root}/etc/docker/daemon.json" '"hosts"[[:space:]]*:'
+require_contains "${extract_root}/etc/systemd/system/docker.service.d/remote-docker.conf" '^ExecStart=/usr/bin/dockerd --host=unix:///var/run/docker\.sock --containerd=/run/containerd/containerd\.sock$'
 require_contains "${extract_root}/etc/ssh/sshd_config.d/remote-docker.conf" '^PermitTTY no$'
 require_contains "${extract_root}/etc/ssh/sshd_config.d/remote-docker.conf" '^X11Forwarding no$'
 require_contains "${extract_root}/etc/ssh/sshd_config.d/remote-docker.conf" '^AllowAgentForwarding no$'
