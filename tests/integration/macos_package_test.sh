@@ -61,12 +61,16 @@ assert_file "${payload}/etc/paths.d/remote-docker"
 assert_plist_value "${app}/Contents/Info.plist" CFBundleIdentifier io.github.dmitbd.remote-docker
 assert_plist_value "${app}/Contents/Info.plist" CFBundleExecutable remote-docker-tray
 assert_plist_value "${app}/Contents/Info.plist" LSUIElement true
+assert_plist_value "${app}/Contents/Info.plist" NSBonjourServices.0 _remote-docker._tcp
+local_network_usage="$(/usr/bin/plutil -extract NSLocalNetworkUsageDescription raw -o - "${app}/Contents/Info.plist")"
+[[ -n "${local_network_usage}" ]] || fail "macOS app does not explain why it needs local network access"
 
 launch_agent="${payload}/Library/LaunchAgents/io.github.dmitbd.remote-docker.agent.plist"
 /usr/bin/plutil -lint "${launch_agent}" >/dev/null
 assert_plist_value "${launch_agent}" Label io.github.dmitbd.remote-docker.agent
 assert_plist_value "${launch_agent}" ProgramArguments.0 "/Applications/Remote Docker.app/Contents/Resources/remote-docker-agent"
 assert_plist_value "${launch_agent}" RunAtLoad true
+assert_plist_value "${launch_agent}" AssociatedBundleIdentifiers.0 io.github.dmitbd.remote-docker
 if /usr/bin/plutil -extract UserName raw -o - "${launch_agent}" >/dev/null 2>&1; then
   fail "LaunchAgent must inherit the logged-in user instead of naming root or another account"
 fi

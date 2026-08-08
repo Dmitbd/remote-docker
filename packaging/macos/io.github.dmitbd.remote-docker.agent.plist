@@ -12,6 +12,10 @@
   <true/>
   <key>ProcessType</key>
   <string>Background</string>
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>io.github.dmitbd.remote-docker</string>
+  </array>
   <key>ThrottleInterval</key>
   <integer>10</integer>
 </dict>
