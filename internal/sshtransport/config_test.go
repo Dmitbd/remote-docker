@@ -29,8 +29,8 @@ func TestRenderConfigGolden(t *testing.T) {
   HostName 192.168.1.20
   Port 2222
   User remote-docker
-  IdentitiesOnly yes
   IdentityAgent /tmp/rd-agent.sock
+  IdentityFile none
   StrictHostKeyChecking yes
   UserKnownHostsFile /tmp/rd-known-hosts
   HostKeyAlias remote-docker-device-A1B2C3
@@ -48,6 +48,7 @@ func TestRenderConfigGolden(t *testing.T) {
 		"StrictHostKeyChecking no",
 		"UserKnownHostsFile /dev/null",
 		"PasswordAuthentication yes",
+		"IdentitiesOnly yes",
 	} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("config contains unsafe directive %q", forbidden)
