@@ -113,7 +113,7 @@ func TestProvisionScriptKeepsConfirmationAndMutationOrder(t *testing.T) {
 		"New-Item -ItemType Directory",
 		"Get-FileHash",
 		"'--import'",
-		"$firstBoot",
+		"$firstBoot = @(",
 		"Managed WSL health check",
 		"New-NetFirewallRule",
 	}
@@ -137,6 +137,31 @@ func TestProvisionScriptKeepsConfirmationAndMutationOrder(t *testing.T) {
 		if strings.Contains(script, fragment) {
 			t.Fatalf("provision.ps1 contains obsolete elevated startup registration %q", fragment)
 		}
+	}
+}
+
+func TestProvisionFirstBootIsLFStableAndResumesPartialImport(t *testing.T) {
+	script := readWindowsScript(t, "provision.ps1")
+
+	for _, fragment := range []string{
+		"$firstBootRequired = -not $distroExists",
+		"if ($firstBootRequired)",
+		"$firstBoot = @(",
+		") -join \"`n\"",
+		"/etc/remote-docker/managed.json",
+	} {
+		if !strings.Contains(script, fragment) {
+			t.Fatalf("provision.ps1 is missing recoverable LF-only first boot fragment %q", fragment)
+		}
+	}
+	if strings.Contains(script, "$firstBoot = @'") {
+		t.Fatal("provision.ps1 first boot uses a source-newline-dependent here-string")
+	}
+
+	firstBoot := strings.Index(script, "$firstBoot = @(")
+	invoke := strings.Index(script, "-Description 'Managed WSL first boot'")
+	if firstBoot < 0 || invoke <= firstBoot {
+		t.Fatal("provision.ps1 does not invoke the recoverable first boot script")
 	}
 }
 

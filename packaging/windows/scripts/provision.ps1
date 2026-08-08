@@ -10,6 +10,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $managedDistroName = 'remote-docker'
 $managedRelease = 'remote-docker-managed-v1'
+$managedMetadata = '{"schema_version":1,"managed_by":"remote-docker"}'
 $firewallRuleGroup = 'Remote Docker Managed Rules'
 $programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
 $programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
@@ -109,7 +110,15 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $distroExists = Test-ManagedDistro
+$firstBootRequired = -not $distroExists
 $distroRoot = Join-Path $installRoot 'wsl'
+
+if ($distroExists) {
+    $installedMetadataOutput = & wsl.exe --distribution $managedDistroName --user root --exec cat /etc/remote-docker/managed.json 2>$null
+    $metadataExitCode = $LASTEXITCODE
+    $installedMetadata = ($installedMetadataOutput | Out-String).Trim()
+    $firstBootRequired = $metadataExitCode -ne 0 -or $installedMetadata -ne $managedMetadata
+}
 
 if (-not (Test-Path -LiteralPath $installRoot)) {
     New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
@@ -142,14 +151,18 @@ if (-not $distroExists) {
     Invoke-External -FilePath 'wsl.exe' -ArgumentList @(
         '--import', $managedDistroName, $distroRoot, $resolvedRootfs, '--version', '2'
     ) -Description 'Managed WSL import'
+}
 
-    $firstBoot = @'
-set -eu
-install -d -m 0755 /etc/remote-docker
-printf '%s\n' '{"schema_version":1,"managed_by":"remote-docker"}' > /etc/remote-docker/managed.json
-systemctl daemon-reload
-systemctl disable ssh.socket ssh.service syncthing@remote-docker.service remote-docker.target >/dev/null 2>&1 || true
-'@
+if ($firstBootRequired) {
+    $firstBoot = @(
+        'set -eu'
+        'install -d -m 0755 /etc/remote-docker'
+        'systemctl daemon-reload'
+        'systemctl disable ssh.socket ssh.service syncthing@remote-docker.service remote-docker.target >/dev/null 2>&1 || true'
+        "printf '%s\n' '$managedMetadata' > /etc/remote-docker/managed.json.tmp"
+        'chmod 0644 /etc/remote-docker/managed.json.tmp'
+        'mv -f /etc/remote-docker/managed.json.tmp /etc/remote-docker/managed.json'
+    ) -join "`n"
     Invoke-External -FilePath 'wsl.exe' -ArgumentList @(
         '--distribution', $managedDistroName, '--user', 'root', '--exec', '/bin/sh', '-c', $firstBoot
     ) -Description 'Managed WSL first boot'
