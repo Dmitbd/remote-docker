@@ -110,6 +110,14 @@ Describe 'Windows package contract' {
         $script | Should -Match 'Resolve-Path\s+-LiteralPath\s+\$installRoot'
         $script | Should -Match 'FileAttributes\]::ReparsePoint'
         $script | Should -Match 'function\s+Assert-NoReparseTree'
+        $script | Should -Match 'function\s+Invoke-Wsl'
+        $script | Should -Match '\$previousErrorActionPreference\s*=\s*\$ErrorActionPreference'
+        $script | Should -Match '\$ErrorActionPreference\s*=\s*''Continue'''
+        $script | Should -Match '\$exitCode\s*=\s*\$LASTEXITCODE'
+        $script | Should -Match '\$ErrorActionPreference\s*=\s*\$previousErrorActionPreference'
+        $script | Should -Match 'Invoke-Wsl\s+-ArgumentList\s+@\(''--distribution'',\s*\$managedDistroName,\s*''--user'',\s*''root'',\s*''--exec'',\s*''cat'',\s*''/etc/remote-docker-release''\)'
+        $script | Should -Match 'Invoke-Wsl\s+-ArgumentList\s+@\(''--unregister'',\s*\$managedDistroName\)'
+        ([regex]::Matches($script, '&\s*wsl\.exe')).Count | Should -Be 1
         $script | Should -Match 'StringComparison\]::OrdinalIgnoreCase'
         $normalExit | Should -BeGreaterThan -1
         $unregister | Should -BeGreaterThan $normalExit

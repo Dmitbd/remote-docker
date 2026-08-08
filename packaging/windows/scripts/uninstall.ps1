@@ -49,6 +49,26 @@ function Assert-NoReparseTree {
     }
 }
 
+function Invoke-Wsl {
+    param([Parameter(Mandatory = $true)][string[]]$ArgumentList)
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    $output = ''
+    $exitCode = -1
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = (& wsl.exe @ArgumentList 2>$null | Out-String)
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    [PSCustomObject]@{
+        Output = $output
+        ExitCode = $exitCode
+    }
+}
+
 Assert-Administrator
 
 foreach ($ruleName in @('RemoteDocker.Managed.SSH', 'RemoteDocker.Managed.Syncthing')) {
@@ -71,16 +91,18 @@ if ($DataRemovalConfirmation -ne 'DELETE-REMOTE-DOCKER-DATA') {
     throw "Data removal requires -DataRemovalConfirmation 'DELETE-REMOTE-DOCKER-DATA'."
 }
 
-$distroOutput = (& wsl.exe --list --quiet 2>&1 | Out-String) -replace "`0", ''
-if ($LASTEXITCODE -ne 0) {
+$distroList = Invoke-Wsl -ArgumentList @('--list', '--quiet')
+if ($distroList.ExitCode -ne 0) {
     throw 'Failed to list WSL distributions before data removal.'
 }
+$distroOutput = $distroList.Output -replace "`0", ''
 $distroExists = $null -ne (($distroOutput -split "`r?`n") | Where-Object { $_.Trim() -eq $managedDistroName } | Select-Object -First 1)
 if (-not $distroExists) {
     throw "Managed WSL distribution '$managedDistroName' was not found."
 }
-$release = (& wsl.exe --distribution $managedDistroName --exec cat /etc/remote-docker-release 2>$null | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or $release -ne $managedRelease) {
+$releaseProbe = Invoke-Wsl -ArgumentList @('--distribution', $managedDistroName, '--user', 'root', '--exec', 'cat', '/etc/remote-docker-release')
+$release = $releaseProbe.Output.Trim()
+if ($releaseProbe.ExitCode -ne 0 -or $release -ne $managedRelease) {
     throw "WSL distribution '$managedDistroName' does not contain the managed release marker."
 }
 
@@ -98,9 +120,9 @@ if (Test-Path -LiteralPath $installRoot) {
 
 Write-Host "WSL distribution to delete: $managedDistroName"
 if ($PSCmdlet.ShouldProcess("WSL distribution '$managedDistroName' and '$installRoot'", 'Permanently delete managed Docker data')) {
-    & wsl.exe --unregister $managedDistroName
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to unregister WSL distribution '$managedDistroName' with exit code $LASTEXITCODE."
+    $unregister = Invoke-Wsl -ArgumentList @('--unregister', $managedDistroName)
+    if ($unregister.ExitCode -ne 0) {
+        throw "Failed to unregister WSL distribution '$managedDistroName' with exit code $($unregister.ExitCode)."
     }
     if (Test-Path -LiteralPath $installRoot) {
         Remove-Item -LiteralPath $installRoot -Recurse -Force
