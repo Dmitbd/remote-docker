@@ -1,4 +1,4 @@
-name: Windows package CI
+name: Desktop package CI
 
 on:
   pull_request:
@@ -108,5 +108,45 @@ jobs:
         with:
           name: remote-docker-windows-unsigned
           path: dist/windows
+          if-no-files-found: error
+          retention-days: 7
+
+  macos-package:
+    name: Test and build unsigned macOS package
+    runs-on: macos-14
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Verify macOS package contract
+        run: bash tests/integration/macos_package_test.sh
+
+      - name: Build unsigned development package
+        run: >-
+          REMOTE_DOCKER_VERSION="0.0.${GITHUB_RUN_NUMBER}"
+          packaging/macos/build-pkg.sh
+          --arch arm64
+          --output dist/macos
+
+      - name: Verify unsigned package and create checksum
+        run: |
+          set -euo pipefail
+          packages=(dist/macos/*.pkg)
+          [[ ${#packages[@]} -eq 1 && -f "${packages[0]}" ]]
+          packaging/macos/inspect-pkg.sh "${packages[0]}"
+          if pkgutil --check-signature "${packages[0]}" >dist/macos/signature-status.txt 2>&1; then
+            echo 'Development package must remain unsigned.' >&2
+            exit 1
+          fi
+          grep -F 'Status: no signature' dist/macos/signature-status.txt >/dev/null
+          shasum -a 256 "${packages[0]}" >dist/macos/Remote-Docker-macOS-arm64-SHA256SUMS
+
+      - name: Upload unsigned macOS package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact@v7
+        with:
+          name: remote-docker-macos-unsigned
+          path: dist/macos
           if-no-files-found: error
           retention-days: 7

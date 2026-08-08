@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 workflow="${repo_root}/.github/workflows/release.yml"
+ci_workflow="${repo_root}/.github/workflows/ci.yml"
 
 fail() {
   printf 'release workflow contract failed: %s\n' "$*" >&2
@@ -10,6 +11,7 @@ fail() {
 }
 
 [[ -f "${workflow}" ]] || fail "workflow is missing"
+[[ -f "${ci_workflow}" ]] || fail "CI workflow is missing"
 
 for forbidden in \
   'WINDOWS_SIGNING_CERTIFICATE' \
@@ -43,5 +45,14 @@ done
 
 [[ "$(grep -c 'uses: actions/upload-artifact@' "${workflow}")" -ge 3 ]] || fail "expected rootfs and two desktop uploads"
 grep -F 'gh release create "$GITHUB_REF_NAME"' "${workflow}" >/dev/null || fail "release publication is missing"
+
+for required in \
+  'runs-on: macos-14' \
+  'bash tests/integration/macos_package_test.sh' \
+  'packaging/macos/build-pkg.sh' \
+  'packaging/macos/inspect-pkg.sh' \
+  'remote-docker-macos-unsigned'; do
+  grep -F "${required}" "${ci_workflow}" >/dev/null || fail "missing macOS CI evidence: ${required}"
+done
 
 printf 'release workflow contract: PASS\n'
