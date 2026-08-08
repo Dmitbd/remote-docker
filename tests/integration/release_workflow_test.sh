@@ -57,4 +57,6 @@ for required in \
   grep -F "${required}" "${ci_workflow}" >/dev/null || fail "missing macOS CI evidence: ${required}"
 done
 
+grep -F -- '-Version 0.0.8' "${ci_workflow}" >/dev/null || fail "Windows CI preview version must upgrade installed 0.0.7 packages"
+
 printf 'release workflow contract: PASS\n'

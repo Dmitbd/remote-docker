@@ -9,6 +9,7 @@ import (
 	"image/color"
 	"image/draw"
 	"image/png"
+	"runtime"
 	"sync"
 	"time"
 
@@ -39,6 +40,7 @@ type directoryPicker interface {
 type presentation struct {
 	controller *tray.Controller
 	picker     directoryPicker
+	platform   string
 
 	mu         sync.Mutex
 	items      map[tray.Action]*systray.MenuItem
@@ -53,6 +55,7 @@ func newPresentation(picker directoryPicker) *presentation {
 	presentation := &presentation{
 		controller: controller,
 		picker:     picker,
+		platform:   runtime.GOOS,
 		items:      make(map[tray.Action]*systray.MenuItem),
 	}
 	controller.Present = presentation.apply
@@ -75,7 +78,8 @@ func (p *presentation) ready() {
 	p.pairing.Disable()
 	p.pairCode = systray.AddMenuItem("", "")
 	p.pairCode.Disable()
-	p.confirm = systray.AddMenuItem("Confirm pairing", "")
+	confirmationLabel, _ := pairingConfirmation(p.platform)
+	p.confirm = systray.AddMenuItem(confirmationLabel, "")
 	p.confirm.Disable()
 	p.listen(tray.ActionConfirmPair, p.confirm)
 
@@ -96,7 +100,11 @@ func (p *presentation) invoke(action tray.Action) {
 	defer cancel()
 	switch action {
 	case tray.ActionPair:
-		_, _ = p.controller.DiscoverPairingCandidates(ctx)
+		if p.platform == "windows" {
+			_, _ = p.controller.Pair(ctx, "Mac device")
+		} else {
+			_, _ = p.controller.DiscoverPairingCandidates(ctx)
+		}
 	case tray.ActionOpenStatus:
 		_, _ = p.controller.OpenStatus(ctx)
 	case tray.ActionAddWorkspace:
@@ -154,7 +162,20 @@ func (p *presentation) apply(_ context.Context, model tray.Model) {
 	}
 	p.pairing.SetTitle("Pairing: " + model.Pairing.DeviceName)
 	p.pairCode.SetTitle("Code: " + model.Pairing.Code)
-	p.confirm.Enable()
+	confirmationLabel, confirmationEnabled := pairingConfirmation(p.platform)
+	p.confirm.SetTitle(confirmationLabel)
+	if confirmationEnabled {
+		p.confirm.Enable()
+	} else {
+		p.confirm.Disable()
+	}
+}
+
+func pairingConfirmation(platform string) (string, bool) {
+	if platform == "windows" {
+		return "Confirm on Mac", false
+	}
+	return "Confirm pairing", true
 }
 
 func iconFor(icon tray.Icon) []byte {

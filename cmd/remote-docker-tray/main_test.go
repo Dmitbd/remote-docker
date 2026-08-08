@@ -45,6 +45,33 @@ func TestPairActionDiscoversCandidatesWithoutCLIFlags(t *testing.T) {
 	}
 }
 
+func TestWindowsPairActionShowsActiveMacPairingCode(t *testing.T) {
+	t.Parallel()
+
+	client := &trayClient{results: map[localapi.Method]any{
+		localapi.MethodPairStart: localapi.PairStartResult{SessionID: "session-1", Code: "654321"},
+	}}
+	presentation := &presentation{controller: tray.NewController(client), platform: "windows"}
+	presentation.invoke(tray.ActionPair)
+
+	model := presentation.controller.Current()
+	if model.Pairing == nil || model.Pairing.DeviceName != "Mac device" || model.Pairing.Code != "654321" {
+		t.Fatalf("pairing = %#v, want active Mac session and six-digit code", model.Pairing)
+	}
+	if client.called(localapi.MethodPairCandidates) {
+		t.Fatal("Windows Pair action called PairCandidates, want PairStart")
+	}
+}
+
+func TestWindowsPairingConfirmationStaysOnMac(t *testing.T) {
+	t.Parallel()
+
+	label, enabled := pairingConfirmation("windows")
+	if label != "Confirm on Mac" || enabled {
+		t.Fatalf("pairingConfirmation(windows) = %q, %t, want Confirm on Mac, false", label, enabled)
+	}
+}
+
 func TestICOFromPNGHasValidSingleImageDirectory(t *testing.T) {
 	t.Parallel()
 
@@ -99,4 +126,13 @@ func (c *trayClient) lastParams(method localapi.Method) any {
 		}
 	}
 	return nil
+}
+
+func (c *trayClient) called(method localapi.Method) bool {
+	for _, call := range c.calls {
+		if call.method == method {
+			return true
+		}
+	}
+	return false
 }
