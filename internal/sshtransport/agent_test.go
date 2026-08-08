@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestAgentLoadsKeyThroughStdinAndCleansCallerBuffer(t *testing.T) {
@@ -83,6 +84,35 @@ func TestAgentStopsChildAndCleansKeyWhenSSHAddFails(t *testing.T) {
 	if runner.process.kills != 1 || runner.process.waits != 1 {
 		t.Fatalf("failed child kills=%d waits=%d, want one each", runner.process.kills, runner.process.waits)
 	}
+}
+
+func TestExecCommandRunnerStartTransfersProcessLifetimeToManagedOwner(t *testing.T) {
+	if os.Getenv("REMOTE_DOCKER_AGENT_HELPER") == "1" {
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	process, err := (execCommandRunner{}).Start(ctx, Command{
+		Binary: os.Args[0],
+		Args:   []string{"-test.run=TestExecCommandRunnerStartTransfersProcessLifetimeToManagedOwner"},
+		Env:    append(os.Environ(), "REMOTE_DOCKER_AGENT_HELPER=1"),
+	})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- process.Wait() }()
+	cancel()
+	select {
+	case err := <-waitDone:
+		t.Fatalf("caller cancellation ended the managed child before Close: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := process.Kill(); err != nil {
+		t.Fatalf("Kill() error = %v", err)
+	}
+	<-waitDone
 }
 
 type fakeCommandRunner struct {

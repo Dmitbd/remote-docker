@@ -188,7 +188,10 @@ func clearBytes(value []byte) {
 type execCommandRunner struct{}
 
 func (execCommandRunner) Start(ctx context.Context, command Command) (Process, error) {
-	process := exec.CommandContext(ctx, command.Binary, command.Args...)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	process := exec.Command(command.Binary, command.Args...)
 	process.Env = command.Env
 	process.Stdin = command.Stdin
 	process.Stdout = command.Stdout
