@@ -141,7 +141,9 @@ jobs:
             exit 1
           fi
           grep -F 'Status: no signature' dist/macos/signature-status.txt >/dev/null
-          shasum -a 256 "${packages[0]}" >dist/macos/Remote-Docker-macOS-arm64-SHA256SUMS
+          package_name="$(basename "${packages[0]}")"
+          package_hash="$(shasum -a 256 "${packages[0]}" | awk '{print $1}')"
+          printf '%s  %s\n' "$package_hash" "$package_name" >dist/macos/Remote-Docker-macOS-arm64-SHA256SUMS
 
       - name: Upload unsigned macOS package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact@v7
