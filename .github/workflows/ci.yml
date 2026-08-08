@@ -125,7 +125,7 @@ jobs:
 
       - name: Build unsigned development package
         run: >-
-          REMOTE_DOCKER_VERSION="0.0.${GITHUB_RUN_NUMBER}"
+          REMOTE_DOCKER_VERSION="0.1.${GITHUB_RUN_NUMBER}"
           packaging/macos/build-pkg.sh
           --arch arm64
           --output dist/macos
