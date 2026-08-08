@@ -18,7 +18,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	if len(os.Args) == 2 && os.Args[1] == "--prepare-wsl" {
-		if err := (provision.WSLRuntimeIdentityPreparer{Secrets: credentials.NewKeyringStore()}).Prepare(ctx); err != nil {
+		executablePath, err := os.Executable()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "remote-docker-agent: cannot locate executable")
+			os.Exit(1)
+		}
+		managedRuntime, err := provision.NewManagedWSLRuntime(executablePath, credentials.NewKeyringStore())
+		if err != nil || managedRuntime.Prepare(ctx) != nil {
 			fmt.Fprintln(os.Stderr, "remote-docker-agent: cannot prepare managed WSL runtime")
 			os.Exit(1)
 		}

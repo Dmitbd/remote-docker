@@ -72,6 +72,19 @@ try {
                 '-o', (Join-Path $binaryOutput 'RemoteDockerTray.exe'),
                 './cmd/remote-docker-tray'
             ) -Description 'Windows Tray build'
+            $env:GOOS = 'linux'
+            $runtimeOutput = Join-Path $binaryOutput 'remote-docker-remote-linux-amd64'
+            Invoke-Checked -FilePath 'go' -ArgumentList @(
+                '-C', $repoRoot, 'build', '-trimpath', '-buildvcs=false', '-ldflags=-s -w -buildid=',
+                '-o', $runtimeOutput,
+                './cmd/remote-docker-remote'
+            ) -Description 'Managed WSL runtime build'
+            $runtimeSha256 = (Get-FileHash -LiteralPath (Join-Path $binaryOutput 'remote-docker-remote-linux-amd64') -Algorithm SHA256).Hash.ToLowerInvariant()
+            [System.IO.File]::WriteAllText(
+                "$runtimeOutput.sha256",
+                "$runtimeSha256  remote-docker-remote-linux-amd64`n",
+                [System.Text.Encoding]::ASCII
+            )
         }
         finally {
             $env:GOOS = $previousGoos
@@ -86,8 +99,18 @@ try {
 
     $agentSource = Resolve-RequiredFile (Join-Path $resolvedBinaryInput 'RemoteDockerAgent.exe')
     $traySource = Resolve-RequiredFile (Join-Path $resolvedBinaryInput 'RemoteDockerTray.exe')
+    $runtimeSource = Resolve-RequiredFile (Join-Path $resolvedBinaryInput 'remote-docker-remote-linux-amd64')
+    $runtimeChecksumSource = Resolve-RequiredFile (Join-Path $resolvedBinaryInput 'remote-docker-remote-linux-amd64.sha256')
+    $runtimeManifestHash = ((Get-Content -LiteralPath $runtimeChecksumSource -Raw).Trim() -split '\s+')[0]
+    if ($runtimeManifestHash -notmatch '^[A-Fa-f0-9]{64}$') {
+        throw "Managed WSL runtime checksum manifest is invalid: '$runtimeChecksumSource'."
+    }
+    $actualRuntimeHash = (Get-FileHash -LiteralPath $runtimeSource -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualRuntimeHash -ne $runtimeManifestHash.ToLowerInvariant()) {
+        throw 'Managed WSL runtime SHA-256 verification failed before MSI packaging.'
+    }
     if ($BuildBinariesOnly) {
-        Write-Output "Created unsigned Windows binaries in '$resolvedBinaryInput'."
+        Write-Output "Created unsigned Windows binaries and managed WSL runtime in '$resolvedBinaryInput'."
         exit 0
     }
 
@@ -125,6 +148,8 @@ try {
         '-d', "TraySource=$traySource",
         '-d', "RootfsSource=$resolvedRootfs",
         '-d', "RootfsChecksumSource=$rootfsChecksum",
+        '-d', "RuntimeSource=$runtimeSource",
+        '-d', "RuntimeChecksumSource=$runtimeChecksumSource",
         '-d', "ProbeScriptSource=$(Join-Path $PSScriptRoot 'scripts\probe.ps1')",
         '-d', "ProvisionScriptSource=$(Join-Path $PSScriptRoot 'scripts\provision.ps1')",
         '-d', "UninstallScriptSource=$(Join-Path $PSScriptRoot 'scripts\uninstall.ps1')",

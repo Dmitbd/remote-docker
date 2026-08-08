@@ -121,7 +121,11 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 		}
 		pairHost = host
 		pairingCoordinator = windowsPairingCoordinator{server: host.server, installer: installer}
-		localSync = provision.WSLRuntimeIdentityPreparer{Secrets: secrets}
+		managedRuntime, runtimeErr := provision.NewManagedWSLRuntime(executablePath, secrets)
+		if runtimeErr != nil {
+			return nil, runtimeErr
+		}
+		localSync = managedRuntime
 		bridge, bridgeErr := windowsbridge.NewProductionHost()
 		if bridgeErr != nil {
 			return nil, bridgeErr

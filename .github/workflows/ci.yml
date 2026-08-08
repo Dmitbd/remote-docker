@@ -6,6 +6,7 @@ on:
       - '.github/workflows/ci.yml'
       - '.github/workflows/release.yml'
       - 'cmd/remote-docker-agent/**'
+      - 'cmd/remote-docker-remote/**'
       - 'cmd/remote-docker/**'
       - 'cmd/remote-docker-ssh/**'
       - 'cmd/remote-docker-tray/**'
@@ -93,7 +94,7 @@ jobs:
         shell: pwsh
         run: >-
           ./packaging/windows/build-msi.ps1
-          -Version 0.0.9
+          -Version 0.0.10
           -RootfsPath dist/remote-docker-rootfs.tar.zst
 
       - name: Confirm development binaries are unsigned

@@ -36,6 +36,12 @@
           <Component Id="RootfsChecksumComponent" Guid="2930AA1C-2473-4999-8D80-11C7A19457A9" Bitness="always64">
             <File Id="RootfsChecksum" Source="$(var.RootfsChecksumSource)" Name="remote-docker-rootfs.tar.zst.sha256" KeyPath="yes" />
           </Component>
+          <Component Id="RuntimeExecutableComponent" Guid="1B2E1DB7-F083-42CF-A771-4AB3E567D8DF" Bitness="always64">
+            <File Id="RuntimeExecutable" Source="$(var.RuntimeSource)" Name="remote-docker-remote-linux-amd64" KeyPath="yes" />
+          </Component>
+          <Component Id="RuntimeChecksumComponent" Guid="65979640-B9E8-4244-B6B3-9902AF1E95C6" Bitness="always64">
+            <File Id="RuntimeChecksum" Source="$(var.RuntimeChecksumSource)" Name="remote-docker-remote-linux-amd64.sha256" KeyPath="yes" />
+          </Component>
         </Directory>
 
         <Directory Id="ToolsFolder" Name="tools">
@@ -62,6 +68,8 @@
       <ComponentRef Id="TrayStartupComponent" />
       <ComponentRef Id="RootfsComponent" />
       <ComponentRef Id="RootfsChecksumComponent" />
+      <ComponentRef Id="RuntimeExecutableComponent" />
+      <ComponentRef Id="RuntimeChecksumComponent" />
       <ComponentRef Id="ProbeScriptComponent" />
       <ComponentRef Id="ProvisionScriptComponent" />
       <ComponentRef Id="UninstallScriptComponent" />

@@ -58,13 +58,14 @@ for required in \
 done
 
 for required_path in \
+  "      - 'cmd/remote-docker-remote/**'" \
   "      - 'cmd/remote-docker/**'" \
   "      - 'cmd/remote-docker-ssh/**'" \
   "      - 'packaging/macos/**'" \
   "      - 'tests/integration/macos_package_test.sh'"; do
-  grep -F "${required_path}" "${ci_workflow}" >/dev/null || fail "macOS package CI path filter is missing: ${required_path}"
+  grep -F "${required_path}" "${ci_workflow}" >/dev/null || fail "package CI path filter is missing: ${required_path}"
 done
 
-grep -F -- '-Version 0.0.9' "${ci_workflow}" >/dev/null || fail "Windows CI preview version must upgrade installed 0.0.8 packages"
+grep -F -- '-Version 0.0.10' "${ci_workflow}" >/dev/null || fail "Windows CI preview version must upgrade installed 0.0.9 packages"
 
 printf 'release workflow contract: PASS\n'

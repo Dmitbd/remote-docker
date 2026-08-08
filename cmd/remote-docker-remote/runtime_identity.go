@@ -246,11 +246,10 @@ func prepareRuntimeIdentity(ctx context.Context, key []byte, options runtimeIden
 		rootUID, rootGID = 0, 0
 	}
 	defer func() {
-		for _, path := range materialized[:3] {
-			_ = os.Remove(path)
-		}
 		if !ready {
-			_ = os.Remove(materialized[3])
+			for _, path := range materialized {
+				_ = os.Remove(path)
+			}
 		}
 	}()
 	if err := writeRuntimeFile(materialized[0], bundle.SSHPrivateKey, 0o600, rootUID, rootGID); err != nil {
@@ -592,12 +591,25 @@ func runtimeServicesReady(ctx context.Context) bool {
 	if !probes.DockerSocketHealthy(ctx) || !probes.SyncthingServiceHealthy(ctx) {
 		return false
 	}
+	if !runtimeSSHReady(ctx, "/run/remote-docker/ssh_host_ed25519_key", func(ctx context.Context) error {
+		return runIdentityCommand(ctx, "/usr/sbin/sshd", "-t")
+	}) {
+		return false
+	}
 	connection, err := (&net.Dialer{}).DialContext(ctx, "tcp", "127.0.0.1:22")
 	if err != nil {
 		return false
 	}
 	_ = connection.Close()
 	return true
+}
+
+func runtimeSSHReady(ctx context.Context, hostKeyPath string, validate func(context.Context) error) bool {
+	info, err := os.Lstat(hostKeyPath)
+	if err != nil || !info.Mode().IsRegular() || validate == nil {
+		return false
+	}
+	return validate(ctx) == nil
 }
 
 func runRuntimeStatus(ctx context.Context) int {

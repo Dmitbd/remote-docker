@@ -28,7 +28,7 @@ func TestDecodeRuntimeIdentityKeyRejectsTrailingOrOversizedInput(t *testing.T) {
 	}
 }
 
-func TestPrepareRuntimeIdentityPersistsOnlyEncryptedBundleAndPublicMetadata(t *testing.T) {
+func TestPrepareRuntimeIdentityKeepsPrivateMaterialOnlyInVolatileRuntime(t *testing.T) {
 	root := t.TempDir()
 	persistentRoot := filepath.Join(root, "persistent")
 	runtimeRoot := filepath.Join(root, "runtime")
@@ -73,13 +73,22 @@ func TestPrepareRuntimeIdentityPersistsOnlyEncryptedBundleAndPublicMetadata(t *t
 	if starter.calls != 1 {
 		t.Fatalf("starter calls = %d, want 1", starter.calls)
 	}
-	for _, path := range []string{
-		filepath.Join(runtimeRoot, "ssh_host_ed25519_key"),
-		filepath.Join(runtimeRoot, "syncthing", "key.pem"),
-		filepath.Join(runtimeRoot, "syncthing", "cert.pem"),
+	for path, secret := range map[string]string{
+		filepath.Join(runtimeRoot, "ssh_host_ed25519_key"):    "ssh-private-material",
+		filepath.Join(runtimeRoot, "syncthing", "key.pem"):    "syncthing-private-material",
+		filepath.Join(runtimeRoot, "syncthing", "cert.pem"):   "syncthing-certificate",
+		filepath.Join(runtimeRoot, "syncthing", "config.xml"): "syncthing-api-secret",
 	} {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("private runtime file remains at %s: %v", path, err)
+		contents, err := os.ReadFile(path)
+		if err != nil || !bytes.Contains(contents, []byte(secret)) {
+			t.Fatalf("volatile runtime file %s = %q error=%v", path, contents, err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat volatile runtime file %s: %v", path, err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("volatile runtime file %s mode = %v", path, info.Mode().Perm())
 		}
 	}
 	for _, path := range []string{
@@ -230,6 +239,31 @@ func TestPrepareRuntimeIdentityCleansAllRuntimeSecretsWhenReadinessFails(t *test
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("runtime secret remains after readiness failure at %s: %v", path, err)
 		}
+	}
+}
+
+func TestRuntimeSSHReadyRequiresLoadableHostKey(t *testing.T) {
+	root := t.TempDir()
+	hostKey := filepath.Join(root, "ssh_host_ed25519_key")
+	validatorCalls := 0
+	validator := func(context.Context) error {
+		validatorCalls++
+		return nil
+	}
+	if runtimeSSHReady(context.Background(), hostKey, validator) {
+		t.Fatal("runtimeSSHReady() accepted a missing host key")
+	}
+	if validatorCalls != 0 {
+		t.Fatalf("validator calls with missing host key = %d, want 0", validatorCalls)
+	}
+	if err := os.WriteFile(hostKey, []byte("private-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !runtimeSSHReady(context.Background(), hostKey, validator) {
+		t.Fatal("runtimeSSHReady() rejected a regular host key accepted by sshd")
+	}
+	if runtimeSSHReady(context.Background(), hostKey, func(context.Context) error { return os.ErrInvalid }) {
+		t.Fatal("runtimeSSHReady() accepted a host key rejected by sshd")
 	}
 }
 
