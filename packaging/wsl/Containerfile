@@ -18,9 +18,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
+        dbus \
+        dbus-user-session \
         docker-buildx \
         docker.io \
         iproute2 \
+        kmod \
         openssh-client \
         openssh-server \
         sudo \

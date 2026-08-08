@@ -52,6 +52,9 @@ if [[ "${1:-}" == "--source" ]]; then
   require_contains "${source_root}/Containerfile" 'COPY --from=syncthing-asset'
   require_contains "${source_root}/Containerfile" '/var/lib/remote-docker-private'
   require_contains "${source_root}/Containerfile" 'systemd-sysv'
+  require_contains "${source_root}/Containerfile" '^[[:space:]]+dbus[[:space:]]*\\$'
+  require_contains "${source_root}/Containerfile" '^[[:space:]]+dbus-user-session[[:space:]]*\\$'
+  require_contains "${source_root}/Containerfile" '^[[:space:]]+kmod[[:space:]]*\\$'
   require_not_contains "${source_root}/Containerfile" 'github\.com/syncthing|curl .*syncthing'
   require_not_contains "${source_root}/etc/docker/daemon.json" '2375|2376|tcp://'
   require_not_contains "${source_root}/etc/docker/daemon.json" '"hosts"[[:space:]]*:'
@@ -61,6 +64,7 @@ if [[ "${1:-}" == "--source" ]]; then
   require_not_contains "${source_root}/etc/systemd/system/ssh.service.d/remote-docker.conf" 'ssh-keygen|/etc/remote-docker/ssh_host_ed25519_key'
   require_contains "${source_root}/etc/systemd/system/syncthing@.service" '--config=/run/remote-docker/syncthing'
   require_contains "${source_root}/etc/systemd/system/syncthing@.service" '--data=/var/lib/remote-docker/syncthing/data'
+  require_not_contains "${source_root}/etc/systemd/system/syncthing@.service" '--no-default-folder'
   require_contains "${source_root}/etc/ssh/sshd_config.d/remote-docker.conf" '^PermitOpen 127\.0\.0\.1:\*$'
   require_contains "${source_root}/usr/local/libexec/remote-docker/authorized-command" 'docker system dial-stdio'
   require_contains "${source_root}/usr/local/libexec/remote-docker/authorized-command" 'remote-docker-remote rpc'
@@ -88,11 +92,16 @@ require_contains "${extract_root}/etc/shadow" '^remote-docker:!'
 require_contains "${extract_root}/etc/wsl.conf" '^systemd=true$'
 require_contains "${extract_root}/etc/wsl.conf" '^default=remote-docker$'
 require_contains "${extract_root}/var/lib/dpkg/status" '^Package: systemd-sysv$'
+require_contains "${extract_root}/var/lib/dpkg/status" '^Package: dbus$'
+require_contains "${extract_root}/var/lib/dpkg/status" '^Package: dbus-user-session$'
+require_contains "${extract_root}/var/lib/dpkg/status" '^Package: kmod$'
 [[ -L "${extract_root}/sbin/init" ]] || fail "missing systemd /sbin/init link"
 [[ "$(readlink "${extract_root}/sbin/init")" == '../lib/systemd/systemd' ]] || fail "unexpected /sbin/init target"
 
 for path in \
   usr/bin/docker \
+  usr/bin/dbus-daemon \
+  usr/bin/kmod \
   usr/local/bin/syncthing \
   usr/local/bin/remote-docker-remote \
   usr/local/libexec/remote-docker/authorized-command \
@@ -116,6 +125,7 @@ done
 require_not_contains "${extract_root}/etc/docker/daemon.json" '2375|2376|tcp://'
 require_not_contains "${extract_root}/etc/docker/daemon.json" '"hosts"[[:space:]]*:'
 require_contains "${extract_root}/etc/systemd/system/docker.service.d/remote-docker.conf" '^ExecStart=/usr/bin/dockerd --host=unix:///var/run/docker\.sock --containerd=/run/containerd/containerd\.sock$'
+require_not_contains "${extract_root}/etc/systemd/system/syncthing@.service" '--no-default-folder'
 require_contains "${extract_root}/etc/ssh/sshd_config.d/remote-docker.conf" '^PermitTTY no$'
 require_contains "${extract_root}/etc/ssh/sshd_config.d/remote-docker.conf" '^X11Forwarding no$'
 require_contains "${extract_root}/etc/ssh/sshd_config.d/remote-docker.conf" '^AllowAgentForwarding no$'
@@ -129,6 +139,10 @@ require_not_contains "${extract_root}/usr/local/libexec/remote-docker/authorized
 
 if [[ "$(uname -s)" == "Linux" ]]; then
   chroot "${extract_root}" /usr/local/bin/syncthing --version | grep -F 'v2.1.1' >/dev/null
+  syncthing_help="$(chroot "${extract_root}" /usr/local/bin/syncthing serve --help 2>&1)"
+  for flag in --no-browser --no-restart --no-upgrade --config --data --gui-address; do
+    grep -F -- "${flag}" <<<"${syncthing_help}" >/dev/null || fail "Syncthing 2.1.1 does not support ${flag}"
+  done
   chroot "${extract_root}" /usr/local/bin/remote-docker-remote health | grep -F '"status":"ok"' >/dev/null
 fi
 

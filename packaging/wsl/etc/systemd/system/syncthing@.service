@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 User=%i
 Group=%i
-ExecStart=/usr/local/bin/syncthing serve --no-browser --no-restart --no-upgrade --no-default-folder --config=/run/remote-docker/syncthing --data=/var/lib/remote-docker/syncthing/data --gui-address=127.0.0.1:8384
+ExecStart=/usr/local/bin/syncthing serve --no-browser --no-restart --no-upgrade --config=/run/remote-docker/syncthing --data=/var/lib/remote-docker/syncthing/data --gui-address=127.0.0.1:8384
 Restart=on-failure
 SuccessExitStatus=3 4
 
