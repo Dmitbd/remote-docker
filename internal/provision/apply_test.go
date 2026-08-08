@@ -187,7 +187,7 @@ func TestUninstallPreservesDataUnlessSeparatelyConfirmed(t *testing.T) {
 	preserve := strings.Index(script, "if (-not $DeleteData)")
 	printName := strings.Index(script, "WSL distribution to delete: $managedDistroName")
 	confirm := strings.Index(script, "$PSCmdlet.ShouldProcess")
-	deleteDistro := strings.Index(script, "--unregister $managedDistroName")
+	deleteDistro := strings.Index(script, "Invoke-Wsl -ArgumentList @('--unregister', $managedDistroName)")
 	if preserve < 0 || printName <= preserve || confirm <= printName || deleteDistro <= confirm {
 		t.Fatalf("uninstall.ps1 does not preserve and separately confirm data deletion")
 	}
