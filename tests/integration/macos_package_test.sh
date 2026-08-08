@@ -108,6 +108,7 @@ for guard in "${scripts}/preinstall" "${scripts}/postinstall" "${libexec}/uninst
 done
 grep -F 'printf ' "${scripts}/postinstall" | grep -F '"${docker_link_owner_value}"' >/dev/null || fail "postinstall does not record ownership of its managed docker link"
 grep -F 'rm -f "${docker_link}"' "${libexec}/uninstall" >/dev/null || fail "uninstall cannot remove its own exact managed docker link"
+grep -F 'asuser "${console_uid}" "${launchctl_bin}" bootstrap "${domain}" "${plist}"' "${scripts}/postinstall" >/dev/null || fail "postinstall does not bootstrap the LaunchAgent in the logged-in user's context"
 
 /usr/bin/ruby -rjson -e 'JSON.parse(File.read(ARGV.fetch(0)))' "${repo_root}/packaging/versions.json"
 for key in go docker_cli compose syncthing; do

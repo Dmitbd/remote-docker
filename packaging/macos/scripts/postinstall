@@ -36,8 +36,9 @@ esac
 domain="gui/${console_uid}"
 label="io.github.dmitbd.remote-docker.agent"
 plist="/Library/LaunchAgents/${label}.plist"
-launchctl bootout "${domain}/${label}" >/dev/null 2>&1 || true
-if ! launchctl bootstrap "${domain}" "${plist}" >/dev/null 2>&1; then
+launchctl_bin="/bin/launchctl"
+"${launchctl_bin}" asuser "${console_uid}" "${launchctl_bin}" bootout "${domain}/${label}" >/dev/null 2>&1 || true
+if ! "${launchctl_bin}" asuser "${console_uid}" "${launchctl_bin}" bootstrap "${domain}" "${plist}" >/dev/null 2>&1; then
   printf '%s\n' "Remote Docker was installed; its background agent will start at the next login." >&2
 fi
 exit 0
