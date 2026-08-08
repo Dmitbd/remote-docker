@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -126,6 +127,31 @@ func TestPairingInfoRejectsDiscoveryIdentityThatDoesNotMatchTLS(t *testing.T) {
 	if _, err := Inspect(context.Background(), httpServer.URL, "different-opaque-instance", nil); err == nil ||
 		!strings.Contains(err.Error(), "discovery identity") {
 		t.Fatalf("Inspect() error = %v, want discovery identity rejection", err)
+	}
+}
+
+func TestPairingHTTPClientsUseInjectedDialer(t *testing.T) {
+	wantErr := errors.New("injected dialer")
+	calls := 0
+	dial := func(context.Context, string, string) (net.Conn, error) {
+		calls++
+		return nil, wantErr
+	}
+	clients := []*http.Client{
+		NewDiscoveryHTTPClient(time.Second, dial),
+		NewPinnedHTTPClient(make(ed25519.PublicKey, ed25519.PublicKeySize), dial),
+	}
+	for _, client := range clients {
+		transport, ok := client.Transport.(*http.Transport)
+		if !ok || transport.DialContext == nil {
+			t.Fatalf("transport = %#v, want injected DialContext", client.Transport)
+		}
+		if _, err := transport.DialContext(context.Background(), "tcp", "192.168.1.68:54397"); !errors.Is(err, wantErr) {
+			t.Fatalf("DialContext() error = %v", err)
+		}
+	}
+	if calls != len(clients) {
+		t.Fatalf("dial calls = %d, want %d", calls, len(clients))
 	}
 }
 

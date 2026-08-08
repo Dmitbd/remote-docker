@@ -33,6 +33,7 @@ import (
 	"github.com/Dmitbd/remote-docker/internal/provision"
 	"github.com/Dmitbd/remote-docker/internal/sshtransport"
 	"github.com/Dmitbd/remote-docker/internal/syncer"
+	"github.com/Dmitbd/remote-docker/internal/systemtransport"
 	"github.com/Dmitbd/remote-docker/internal/windowsbridge"
 	"github.com/Dmitbd/remote-docker/internal/workspace"
 	"golang.org/x/crypto/ssh"
@@ -130,8 +131,11 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 		})
 		pairingCoordinator = newMacPairingCoordinator(macPairingOptions{
 			Store: store, Secrets: secrets,
-			Transport: discoveryPairingTransport{SSHConfigPath: sshConfigPath},
-			Docker:    dockercli.Runner{}, DockerCLI: dockerCLI, DockerContext: defaultContextName,
+			Transport: discoveryPairingTransport{
+				SSHConfigPath: sshConfigPath,
+				DialContext:   systemtransport.PairingDialContext(),
+			},
+			Docker: dockercli.Runner{}, DockerCLI: dockerCLI, DockerContext: defaultContextName,
 			SSHConfigPath: sshConfigPath, KnownHostsPath: knownHostsPath,
 			AgentSocketPath: agentSocketPath, ControlDir: controlDir,
 			ClientDeviceID: macSync.DeviceID,

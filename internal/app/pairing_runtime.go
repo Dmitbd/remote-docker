@@ -28,6 +28,7 @@ import (
 	"github.com/Dmitbd/remote-docker/internal/localapi"
 	"github.com/Dmitbd/remote-docker/internal/pairing"
 	"github.com/Dmitbd/remote-docker/internal/sshtransport"
+	"github.com/Dmitbd/remote-docker/internal/systemtransport"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -281,6 +282,7 @@ func (c *macPairingCoordinator) Unpair(ctx context.Context, deviceID string) err
 type discoveryPairingTransport struct {
 	SSHConfigPath string
 	SSHBinary     string
+	DialContext   systemtransport.DialContextFunc
 	discover      func(context.Context) ([]discovery.Peer, error)
 	inspect       func(context.Context, string, string) (pairing.Info, error)
 	bootstrap     func(context.Context, string, ed25519.PublicKey) (pairing.SessionDescriptor, error)
@@ -323,7 +325,7 @@ func (t discoveryPairingTransport) Bootstrap(ctx context.Context, selector strin
 	bootstrap := t.bootstrap
 	if bootstrap == nil {
 		bootstrap = func(ctx context.Context, endpoint string, key ed25519.PublicKey) (pairing.SessionDescriptor, error) {
-			return pairing.Bootstrap(ctx, endpoint, key, nil)
+			return pairing.Bootstrap(ctx, endpoint, key, pairing.NewDiscoveryHTTPClient(15*time.Second, t.DialContext))
 		}
 	}
 	endpoint := pairingEndpoint(target)
@@ -341,7 +343,7 @@ func (t discoveryPairingTransport) inspectPeer(ctx context.Context, peer discove
 	inspect := t.inspect
 	if inspect == nil {
 		inspect = func(ctx context.Context, endpoint, instanceID string) (pairing.Info, error) {
-			return pairing.Inspect(ctx, endpoint, instanceID, nil)
+			return pairing.Inspect(ctx, endpoint, instanceID, pairing.NewDiscoveryHTTPClient(5*time.Second, t.DialContext))
 		}
 	}
 	var lastErr error
@@ -369,7 +371,7 @@ func (t discoveryPairingTransport) discoverPeers(ctx context.Context) ([]discove
 	if t.discover != nil {
 		return t.discover(ctx)
 	}
-	browser, err := discovery.NewZeroconfBrowser()
+	browser, err := discovery.NewBrowser()
 	if err != nil {
 		return nil, err
 	}
@@ -382,6 +384,7 @@ func (t discoveryPairingTransport) Confirm(ctx context.Context, target pairingTa
 	endpoint := "https://" + net.JoinHostPort(target.Address, fmt.Sprintf("%d", target.PairingPort))
 	client := pairing.Client{
 		BaseURL: endpoint, Session: descriptor, DeviceID: clientDeviceID, AuthorizedKey: authorizedKey,
+		HTTPClient: pairing.NewPinnedHTTPClient(descriptor.ServerPublicKey, t.DialContext),
 	}
 	record, _, err := client.Confirm(ctx, code)
 	return record, err

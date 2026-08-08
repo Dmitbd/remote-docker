@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -151,7 +152,16 @@ func Bootstrap(ctx context.Context, baseURL string, clientPublicKey ed25519.Publ
 }
 
 func unverifiedTLS13Client(timeout time.Duration) *http.Client {
+	return NewDiscoveryHTTPClient(timeout, nil)
+}
+
+// NewDiscoveryHTTPClient creates the TLS 1.3 client used before the server
+// identity has been authenticated by the visible pairing code.
+func NewDiscoveryHTTPClient(timeout time.Duration, dialContext func(context.Context, string, string) (net.Conn, error)) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if dialContext != nil {
+		transport.DialContext = dialContext
+	}
 	transport.TLSClientConfig = &tls.Config{
 		MinVersion: tls.VersionTLS13,
 		// Trust is completed by binding the certificate key to mDNS and then
@@ -231,7 +241,16 @@ func errorsNewSecureURL() error {
 }
 
 func pinnedHTTPClient(serverPublicKey ed25519.PublicKey) *http.Client {
+	return NewPinnedHTTPClient(serverPublicKey, nil)
+}
+
+// NewPinnedHTTPClient creates the TLS 1.3 client used after discovery has
+// bound the self-signed certificate to its Ed25519 public key.
+func NewPinnedHTTPClient(serverPublicKey ed25519.PublicKey, dialContext func(context.Context, string, string) (net.Conn, error)) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if dialContext != nil {
+		transport.DialContext = dialContext
+	}
 	transport.TLSClientConfig = &tls.Config{
 		MinVersion: tls.VersionTLS13,
 		// The certificate is intentionally self-signed and addressed by a
