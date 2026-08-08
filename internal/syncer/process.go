@@ -219,7 +219,6 @@ func StartManagedProcess(ctx context.Context, options ProcessOptions) (*ManagedP
 		"--no-browser",
 		"--no-restart",
 		"--no-upgrade",
-		"--no-default-folder",
 		"--gui-address=" + options.GUIAddress,
 		"--config=" + runtimeDir,
 		"--data=" + options.DataDir,

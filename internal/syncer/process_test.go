@@ -57,13 +57,16 @@ func TestManagedProcessMaterializesAndCleansEncryptedIdentity(t *testing.T) {
 		}
 	}
 	for _, wanted := range []string{
-		"--no-browser", "--no-restart", "--no-upgrade", "--no-default-folder",
+		"--no-browser", "--no-restart", "--no-upgrade",
 		"--gui-address=127.0.0.1:8384", "--data=" + dataDir,
 		"--config=" + process.RuntimeDir(),
 	} {
 		if !contains(launcher.args, wanted) {
 			t.Fatalf("Syncthing args %#v do not contain %q", launcher.args, wanted)
 		}
+	}
+	if contains(launcher.args, "--no-default-folder") {
+		t.Fatalf("Syncthing args contain removed v2 flag: %#v", launcher.args)
 	}
 
 	if err := process.MarkReady(); err != nil {
