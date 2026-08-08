@@ -49,12 +49,15 @@ if [[ "${1:-}" == "--source" ]]; then
   require_contains "${source_root}/build-rootfs.sh" '--build-context .*syncthing-asset='
   require_contains "${source_root}/build-rootfs.sh" 'artifact_tmp='
   require_contains "${source_root}/build-rootfs.sh" 'mv .*artifact_tmp.*artifact'
+  require_contains "${source_root}/build-rootfs.sh" '--output .*type=tar,dest='
+  require_not_contains "${source_root}/build-rootfs.sh" 'type=local'
   require_contains "${source_root}/Containerfile" 'COPY --from=syncthing-asset'
   require_contains "${source_root}/Containerfile" '/var/lib/remote-docker-private'
   require_contains "${source_root}/Containerfile" 'systemd-sysv'
   require_contains "${source_root}/Containerfile" '^[[:space:]]+dbus[[:space:]]*\\$'
   require_contains "${source_root}/Containerfile" '^[[:space:]]+dbus-user-session[[:space:]]*\\$'
   require_contains "${source_root}/Containerfile" '^[[:space:]]+kmod[[:space:]]*\\$'
+  require_contains "${source_root}/Containerfile" '^[[:space:]]+tzdata[[:space:]]*\\$'
   require_not_contains "${source_root}/Containerfile" 'github\.com/syncthing|curl .*syncthing'
   require_not_contains "${source_root}/etc/docker/daemon.json" '2375|2376|tcp://'
   require_not_contains "${source_root}/etc/docker/daemon.json" '"hosts"[[:space:]]*:'
@@ -95,6 +98,9 @@ require_contains "${extract_root}/var/lib/dpkg/status" '^Package: systemd-sysv$'
 require_contains "${extract_root}/var/lib/dpkg/status" '^Package: dbus$'
 require_contains "${extract_root}/var/lib/dpkg/status" '^Package: dbus-user-session$'
 require_contains "${extract_root}/var/lib/dpkg/status" '^Package: kmod$'
+require_contains "${extract_root}/var/lib/dpkg/status" '^Package: tzdata$'
+require_file "${extract_root}/usr/share/zoneinfo/zone.tab"
+require_not_contains "${extract_root}/etc/pam.d/login" 'pam_lastlog\.so'
 [[ -L "${extract_root}/sbin/init" ]] || fail "missing systemd /sbin/init link"
 [[ "$(readlink "${extract_root}/sbin/init")" == '../lib/systemd/systemd' ]] || fail "unexpected /sbin/init target"
 
@@ -114,6 +120,32 @@ for path in \
   etc/docker/daemon.json; do
   require_file "${extract_root}/${path}"
 done
+
+if [[ "$(id -u)" -eq 0 ]]; then
+  for root_owned_path in \
+    . \
+    dev \
+    etc \
+    run \
+    usr \
+    var \
+    var/lib \
+    var/log \
+    var/lib/remote-docker-private; do
+    [[ "$(stat -c '%u:%g' "${extract_root}/${root_owned_path}")" == '0:0' ]] ||
+      fail "${root_owned_path} is not owned by root:root"
+  done
+  remote_uid="$(awk -F: '$1 == "remote-docker" { print $3 }' "${extract_root}/etc/passwd")"
+  remote_gid="$(awk -F: '$1 == "remote-docker" { print $4 }' "${extract_root}/etc/passwd")"
+  [[ -n "${remote_uid}" && -n "${remote_gid}" ]] || fail "remote-docker numeric ownership is unavailable"
+  for service_owned_path in \
+    Users \
+    home/remote-docker \
+    var/lib/remote-docker; do
+    [[ "$(stat -c '%u:%g' "${extract_root}/${service_owned_path}")" == "${remote_uid}:${remote_gid}" ]] ||
+      fail "${service_owned_path} is not owned by remote-docker"
+  done
+fi
 
 for private_path in \
   etc/remote-docker/ssh_host_ed25519_key \

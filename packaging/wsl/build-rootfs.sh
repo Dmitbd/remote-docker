@@ -6,6 +6,7 @@ dist_dir="${repo_root}/dist"
 artifact="${dist_dir}/remote-docker-rootfs.tar.zst"
 build_dir="$(mktemp -d)"
 artifact_tmp="${build_dir}/remote-docker-rootfs.tar.zst"
+rootfs_tar="${build_dir}/remote-docker-rootfs.tar"
 syncthing_version="2.1.1"
 syncthing_sha256="0b960a67a0391156c2ca45943ed1ceaad9ae1fc3772d967e6aafc5a7c662565d"
 syncthing_archive="syncthing-linux-amd64-v${syncthing_version}.tar.gz"
@@ -65,10 +66,10 @@ DOCKER_CONFIG="${runtime_docker_config}" DOCKER_HOST="${docker_host}" docker bui
   --file "${repo_root}/packaging/wsl/Containerfile" \
   --platform linux/amd64 \
   --build-context "syncthing-asset=${asset_dir}" \
-  --output "type=local,dest=${build_dir}/rootfs" \
+  --output "type=tar,dest=${rootfs_tar}" \
   "${repo_root}"
 
-tar -C "${build_dir}/rootfs" -cf - . | zstd -q -T0 -19 -o "${artifact_tmp}"
+zstd -q -T0 -19 "${rootfs_tar}" -o "${artifact_tmp}"
 mv "${artifact_tmp}" "${artifact}"
 
 if command -v sha256sum >/dev/null 2>&1; then

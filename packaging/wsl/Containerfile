@@ -30,6 +30,8 @@ RUN apt-get update \
         systemd \
         systemd-sysv \
         tini \
+        tzdata \
+    && sed -i '/pam_lastlog\.so/d' /etc/pam.d/login \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=syncthing-asset /syncthing-linux-amd64-v2.1.1.tar.gz /tmp/

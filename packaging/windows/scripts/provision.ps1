@@ -206,6 +206,32 @@ foreach ($rule in $firewallRules) {
         -RemoteAddress LocalSubnet | Out-Null
 }
 
+$agentRunning = @(
+    Get-Process -Name 'RemoteDockerAgent' -ErrorAction SilentlyContinue |
+        Where-Object {
+            try {
+                $null -ne $_.Path -and [string]::Equals(
+                    [System.IO.Path]::GetFullPath($_.Path),
+                    $agentExecutable,
+                    [System.StringComparison]::OrdinalIgnoreCase
+                )
+            } catch {
+                $false
+            }
+        }
+).Count -gt 0
+if (-not $agentRunning) {
+    $startedAgent = Start-Process `
+        -FilePath $agentExecutable `
+        -WorkingDirectory (Split-Path -Parent $agentExecutable) `
+        -WindowStyle Hidden `
+        -PassThru
+    Start-Sleep -Milliseconds 500
+    if ($startedAgent.HasExited) {
+        throw 'Windows Agent did not remain running after provisioning.'
+    }
+}
+
 [ordered]@{
     state = $(if ($distroExists) { 'already-ready' } else { 'ready' })
     distro = $managedDistroName
