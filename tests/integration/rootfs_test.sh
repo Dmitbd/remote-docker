@@ -86,7 +86,7 @@ require_contains "${extract_root}/etc/wsl.conf" '^systemd=true$'
 require_contains "${extract_root}/etc/wsl.conf" '^default=remote-docker$'
 require_contains "${extract_root}/var/lib/dpkg/status" '^Package: systemd-sysv$'
 [[ -L "${extract_root}/sbin/init" ]] || fail "missing systemd /sbin/init link"
-[[ "$(readlink "${extract_root}/sbin/init")" == '/lib/systemd/systemd' ]] || fail "unexpected /sbin/init target"
+[[ "$(readlink "${extract_root}/sbin/init")" == '../lib/systemd/systemd' ]] || fail "unexpected /sbin/init target"
 
 for path in \
   usr/bin/docker \
