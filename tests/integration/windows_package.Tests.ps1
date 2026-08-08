@@ -73,7 +73,7 @@ Describe 'Windows package contract' {
         $script | Should -Match '''/usr/local/bin/remote-docker-remote'',\s*''runtime-status'''
         $script | Should -Match 'Get-Process\s+-Name\s+''RemoteDockerAgent'''
         $script | Should -Match '\[System\.IO\.Path\]::GetFullPath\(\$_\.Path\)'
-        $script | Should -Match 'Start-Process\s+-FilePath\s+\$agentExecutable'
+        $script | Should -Match 'Start-Process\s+`\s+-FilePath\s+\$agentExecutable'
         $script | Should -Match '-WindowStyle\s+Hidden'
         $script | Should -Match '\$startedAgent\.HasExited'
         $script | Should -Not -Match 'syncthing generate --home=/var/lib/remote-docker|ssh-keygen'
