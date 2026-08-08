@@ -2,7 +2,7 @@
 
 Run Docker on a Windows PC while keeping your development workflow on a Mac.
 
-> Status: pre-release development. Signed packages and real Mac-to-Windows acceptance are required before the first public release.
+> Status: pre-release development. Verifiable unsigned packages and real Mac-to-Windows acceptance are required before the first public release.
 
 ## Why
 
@@ -94,6 +94,8 @@ Kubernetes, internet access, multi-host clustering, UDP forwarding, and a full D
 
 ## Release gate
 
-The repository contains the client, agents, managed WSL environment, package definitions, and focused automated tests. A release is considered ready only after Windows CI, signing and notarization, clean-machine installation, Docker and Compose compatibility, two-way source synchronization, reconnect behavior, LAN security checks, and performance measurements all pass on a real Mac and Windows pair.
+The repository contains the client, agents, managed WSL environment, package definitions, and focused automated tests. A release is considered ready only after Windows and macOS CI, checksum and source-provenance generation, clean-machine installation, Docker and Compose compatibility, two-way source synchronization, reconnect behavior, LAN security checks, and performance measurements all pass on a real Mac and Windows pair.
+
+Desktop packages are intentionally unsigned so the project can remain free to build and distribute without paid platform certificates. Each release must include SHA-256 checksums, a source-commit manifest, and an SBOM. Installation guidance never requires disabling operating-system security protections.
 
 Until that gate is complete, build artifacts are development previews rather than a supported release.

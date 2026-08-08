@@ -12,6 +12,16 @@ remote-docker doctor
 
 Use `remote-docker recover` only after reading the reported checks. Recovery reconnects managed infrastructure; it does not repeat a Docker command and does not delete images, containers, or volumes.
 
+## The installer is reported as unknown or unsigned
+
+Release packages are intentionally unsigned so Remote Docker can remain free to build and distribute without paid Apple Developer ID or Authenticode certificates.
+
+Before approving an installer, download its platform-specific SHA-256 file and manifest from the same GitHub Release. Verify the artifact checksum and confirm that the manifest `source_commit` matches the release tag.
+
+On macOS, use **System Settings → Privacy & Security → Open Anyway** for the verified package. Never disable Gatekeeper globally.
+
+On Windows, review the normal SmartScreen warning only after verification. Smart App Control may block unknown unsigned software without a per-file approval. Do not disable Smart App Control, SmartScreen, antivirus, or execution policy globally to install Remote Docker.
+
 ## The Mac still uses local Docker
 
 Check the managed context:
