@@ -4,7 +4,7 @@ BeforeAll {
     $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
     $windowsPackaging = Join-Path $repoRoot 'packaging\windows'
     $installerSource = Join-Path $windowsPackaging 'installer\RemoteDocker.nsi'
-    $pagesSource = Join-Path $windowsPackaging 'installer\pages.nsh'
+    $pagesSource = Join-Path $windowsPackaging 'installer\remote-docker-pages.nsh'
     $stringsSource = Join-Path $windowsPackaging 'installer\strings.nsh'
     $buildScript = Join-Path $windowsPackaging 'build-installer.ps1'
     $updateScript = Join-Path $windowsPackaging 'install-agent.ps1'
@@ -36,6 +36,7 @@ Describe 'Windows Setup EXE contract' {
         (Join-Path $windowsPackaging 'RemoteDocker.wxs') | Should -Not -Exist
         (Join-Path $windowsPackaging 'build-msi.ps1') | Should -Not -Exist
         (Join-Path $windowsPackaging 'nuget.config') | Should -Not -Exist
+        (Join-Path $windowsPackaging 'installer\pages.nsh') | Should -Not -Exist
     }
 
     It 'shows an explicit manual installation flow' {

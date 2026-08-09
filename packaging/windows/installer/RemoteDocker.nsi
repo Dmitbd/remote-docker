@@ -39,7 +39,7 @@ Var ProgressPath
 Var LogPath
 
 !include "strings.nsh"
-!include "pages.nsh"
+!include "remote-docker-pages.nsh"
 
 !define MUI_ABORTWARNING
 !define MUI_ICON "${ICON_SOURCE}"
