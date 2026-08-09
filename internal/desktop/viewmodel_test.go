@@ -129,6 +129,20 @@ func TestBuildDeviceRowsShowsActionsByDeviceKind(t *testing.T) {
 	}
 }
 
+func TestBuildDeviceRowsShowsConnectedPeerWithoutCandidates(t *testing.T) {
+	rows := BuildDeviceRows(lifecycle.Snapshot{
+		State: lifecycle.StateConnected,
+		Peer:  &lifecycle.Peer{ID: "saved", Name: "Saved Windows"},
+	}, nil)
+	if len(rows) != 1 {
+		t.Fatalf("row count = %d, want 1: %#v", len(rows), rows)
+	}
+	if got := rows[0]; got.ID != "saved" || got.Name != "Saved Windows" || got.Status != "Соединено" || got.Kind != "connected" ||
+		!reflect.DeepEqual(got.Actions, []Action{enabledAction(ActionDisconnect, "Отключиться")}) {
+		t.Fatalf("connected row = %#v", got)
+	}
+}
+
 func deviceRowByID(t *testing.T, rows []DeviceRow, id string) DeviceRow {
 	t.Helper()
 	for _, row := range rows {

@@ -193,7 +193,7 @@ func newConfirmationApplication(handler *confirmationRecordingHandler, snapshot 
 	application := &Application{
 		controller: NewController(handler, snapshot),
 		snapshot:   snapshot,
-		showConfirm: func(_, _, _ string, response func(bool)) {
+		confirm: func(_, _, _ string, response func(bool)) {
 			confirm <- response
 		},
 	}

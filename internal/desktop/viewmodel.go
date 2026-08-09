@@ -203,9 +203,17 @@ func enabledAction(id ActionID, label string) Action {
 func BuildDeviceRows(snapshot lifecycle.Snapshot, candidates []localapi.PairingCandidate) []DeviceRow {
 	trusted := make([]DeviceRow, 0, 1)
 	newDevices := make([]DeviceRow, 0, len(candidates))
+	peerSeen := false
 	for _, candidate := range candidates {
 		if strings.TrimSpace(candidate.ID) == "" {
 			continue
+		}
+		if snapshot.Peer != nil && candidate.ID == snapshot.Peer.ID {
+			peerSeen = true
+			candidate.Trusted = true
+			if strings.TrimSpace(snapshot.Peer.Name) != "" {
+				candidate.Name = snapshot.Peer.Name
+			}
 		}
 		row := buildDeviceRow(snapshot, candidate)
 		if candidate.Trusted {
@@ -213,6 +221,11 @@ func BuildDeviceRows(snapshot lifecycle.Snapshot, candidates []localapi.PairingC
 		} else {
 			newDevices = append(newDevices, row)
 		}
+	}
+	if snapshot.Peer != nil && strings.TrimSpace(snapshot.Peer.ID) != "" && !peerSeen {
+		trusted = append(trusted, buildDeviceRow(snapshot, localapi.PairingCandidate{
+			ID: snapshot.Peer.ID, Name: snapshot.Peer.Name, Trusted: true,
+		}))
 	}
 	sort.Slice(trusted, func(i, j int) bool {
 		if trusted[i].Name == trusted[j].Name {
