@@ -218,7 +218,16 @@ try {
     Write-RemoteDockerProvisionStatus -ProgressPath $ProgressPath -Phase 'wsl' -State 'completed' -Message 'Managed WSL environment is ready.'
 
     Write-RemoteDockerProvisionStatus -ProgressPath $ProgressPath -Phase 'docker' -State 'started' -Message 'Installing the managed Docker helper.'
-    Invoke-External -FilePath $desktopExecutable -ArgumentList @('--prepare-wsl') -Description 'Managed WSL identity preparation' | Out-Null
+    Write-InstallLog -Message 'Managed WSL identity preparation started.'
+    $identityPreparation = Start-Process `
+        -FilePath $desktopExecutable `
+        -ArgumentList @('--prepare-wsl') `
+        -Wait `
+        -PassThru
+    if ($identityPreparation.ExitCode -ne 0) {
+        throw "Managed WSL identity preparation failed with exit code $($identityPreparation.ExitCode)."
+    }
+    Write-InstallLog -Message "Managed WSL identity preparation completed with exit code $($identityPreparation.ExitCode)."
     Invoke-External -FilePath 'wsl.exe' -ArgumentList @(
         '--distribution', $managedDistroName, '--user', 'root', '--exec',
         '/usr/local/bin/remote-docker-remote', 'runtime-status'

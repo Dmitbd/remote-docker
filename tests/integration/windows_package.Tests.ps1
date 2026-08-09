@@ -147,6 +147,8 @@ Describe 'Windows Setup EXE contract' {
         $script | Should -Match 'Join-Path \$DataRoot ''wsl'''
         $script | Should -Match 'Write-RemoteDockerProvisionStatus'
         $script | Should -Match '--prepare-wsl'
+        $script | Should -Match '(?s)Start-Process\s+`?\s*-FilePath\s+\$desktopExecutable\s+`?\s*-ArgumentList\s+@\(''--prepare-wsl''\)\s+`?\s*-Wait\s+`?\s*-PassThru'
+        $script | Should -Match '\$identityPreparation\.ExitCode'
         $script | Should -Match '''/usr/local/bin/remote-docker-remote'',\s*''runtime-status'''
         $script | Should -Match '-Profile\s+Private'
         $script | Should -Match '-Program\s+\$desktopExecutable'
