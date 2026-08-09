@@ -156,15 +156,6 @@ func (m *Machine) Allowed(command Command) bool {
 	return allowed(m.snapshot, command)
 }
 
-func (m *Machine) TrustForgetInProgress() bool {
-	if m == nil {
-		return false
-	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.forgetting
-}
-
 func allowed(snapshot Snapshot, command Command) bool {
 	if snapshot.Terminal || snapshot.State == StateStopping {
 		return false

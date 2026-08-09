@@ -54,21 +54,23 @@ type pairingTransport interface {
 }
 
 type macPairingOptions struct {
-	Store           config.Store
-	Secrets         credentials.Store
-	Transport       pairingTransport
-	Docker          dockercli.Executor
-	DockerCLI       string
-	DockerContext   string
-	SSHConfigPath   string
-	ManagedSSHRoot  sshtransport.ManagedRoot
-	KnownHostsPath  string
-	AgentSocketPath string
-	ControlDir      string
-	ClientDeviceID  func(context.Context) (string, error)
-	RemovePinnedHost func(string, string) error
-	RemoveSSHConfig  func(sshtransport.ManagedRoot, string) error
-	SaveConfig       func(config.Config) error
+	Store              config.Store
+	ConfigTransactions *configTransactions
+	Secrets            credentials.Store
+	Transport          pairingTransport
+	Docker             dockercli.Executor
+	DockerCLI          string
+	DockerContext      string
+	SSHConfigPath      string
+	ManagedSSHRoot     sshtransport.ManagedRoot
+	KnownHostsPath     string
+	AgentSocketPath    string
+	ControlDir         string
+	ClientDeviceID     func(context.Context) (string, error)
+	RemovePinnedHost   func(string, string) error
+	RemoveSSHConfig    func(sshtransport.ManagedRoot, string) error
+	SaveConfig         func(config.Config) error
+	BeforeConfigTransaction func()
 }
 
 type pendingPairing struct {
@@ -88,6 +90,9 @@ type macPairingCoordinator struct {
 }
 
 func newMacPairingCoordinator(options macPairingOptions) *macPairingCoordinator {
+	if options.ConfigTransactions == nil {
+		options.ConfigTransactions = &configTransactions{}
+	}
 	if options.RemovePinnedHost == nil {
 		options.RemovePinnedHost = sshtransport.RemovePinnedHost
 	}
@@ -335,26 +340,31 @@ func (c *macPairingCoordinator) complete(ctx context.Context, sessionID string, 
 	}
 	clearSecret(pending.privateKeyPEM)
 
-	cfg, err := loadAgentConfig(c.options.Store)
-	if err != nil {
-		_ = c.options.Secrets.Delete(remoteDeviceID, sshtransport.SSHPrivateKeyCredential)
-		return localapi.Device{}, unavailable("cannot read paired device configuration")
-	}
-	if cfg.Devices == nil {
-		cfg.Devices = make(map[string]config.Device)
-	}
 	device := config.Device{
 		Name: pending.target.Name, Address: pending.target.Address,
 		SSHPort: record.SSHPort, SyncPort: record.SyncthingPort,
 		SSHHostPublicKey: record.SSHHostPublicKey, SyncthingDeviceID: record.SyncthingDeviceID,
 		ClientDeviceID: pending.clientDeviceID,
 	}
-	cfg.SchemaVersion = config.CurrentSchemaVersion
-	cfg.ActiveDevice = remoteDeviceID
-	cfg.Devices[remoteDeviceID] = device
-	if err := c.options.Store.Save(cfg); err != nil {
+	err = c.options.ConfigTransactions.Run(func() error {
+		cfg, err := loadAgentConfig(c.options.Store)
+		if err != nil {
+			return unavailable("cannot read paired device configuration")
+		}
+		if cfg.Devices == nil {
+			cfg.Devices = make(map[string]config.Device)
+		}
+		cfg.SchemaVersion = config.CurrentSchemaVersion
+		cfg.ActiveDevice = remoteDeviceID
+		cfg.Devices[remoteDeviceID] = device
+		if err := c.options.Store.Save(cfg); err != nil {
+			return unavailable("cannot save paired device configuration")
+		}
+		return nil
+	})
+	if err != nil {
 		_ = c.options.Secrets.Delete(remoteDeviceID, sshtransport.SSHPrivateKeyCredential)
-		return localapi.Device{}, unavailable("cannot save paired device configuration")
+		return localapi.Device{}, err
 	}
 	c.mu.Lock()
 	if c.pending != nil {
@@ -459,21 +469,26 @@ func (c *macPairingCoordinator) forgetLocal(deviceID string) error {
 	if err := c.options.Secrets.Delete(deviceID, sshtransport.SSHPrivateKeyCredential); err != nil && !errors.Is(err, credentials.ErrNotFound) {
 		return unavailable("cannot delete paired SSH identity")
 	}
-	cfg, err = loadAgentConfig(c.options.Store)
-	if err != nil {
-		return unavailable("cannot refresh paired device configuration")
+	if c.options.BeforeConfigTransaction != nil {
+		c.options.BeforeConfigTransaction()
 	}
-	if _, exists := cfg.Devices[deviceID]; !exists {
+	return c.options.ConfigTransactions.Run(func() error {
+		cfg, err = loadAgentConfig(c.options.Store)
+		if err != nil {
+			return unavailable("cannot refresh paired device configuration")
+		}
+		if _, exists := cfg.Devices[deviceID]; !exists {
+			return nil
+		}
+		delete(cfg.Devices, deviceID)
+		if cfg.ActiveDevice == deviceID {
+			cfg.ActiveDevice = ""
+		}
+		if err := c.options.SaveConfig(cfg); err != nil {
+			return unavailable("cannot save pairing removal")
+		}
 		return nil
-	}
-	delete(cfg.Devices, deviceID)
-	if cfg.ActiveDevice == deviceID {
-		cfg.ActiveDevice = ""
-	}
-	if err := c.options.SaveConfig(cfg); err != nil {
-		return unavailable("cannot save pairing removal")
-	}
-	return nil
+	})
 }
 
 type discoveryPairingTransport struct {

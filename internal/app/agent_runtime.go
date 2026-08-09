@@ -119,6 +119,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 	_, knownHostsPath, agentSocketPath, controlDir := defaultRuntimePaths(configPath)
 	sshConfigPath := managedSSHRoot.SSHConfigPath()
 	store := config.Store{Path: configPath}
+	configTransactions := &configTransactions{}
 	secrets := credentials.NewKeyringStore()
 	dockerCLI := realDockerCLIPath(executablePath)
 	dockerEnv, err := sshtransport.ManagedDockerEnvironment(os.Environ(), dockerCLI, sshConfigPath)
@@ -139,7 +140,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 	var windowsBridge localSyncLifecycle
 	if runtime.GOOS == "windows" {
 		installer := provision.WSLPairingInstaller{}
-		registry := windowsPairingRegistry{store: store}
+		registry := windowsPairingRegistry{store: store, configTransactions: configTransactions}
 		host, err := newWindowsPairingHostWithRegistry(installer, registry)
 		if err != nil {
 			return nil, err
@@ -164,6 +165,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 		applicationRoot := filepath.Dir(configPath)
 		macSync := newLocalSyncthingRuntime(localSyncthingOptions{
 			Store: store, Secrets: secrets, Executable: syncthingExecutable,
+			ConfigTransactions: configTransactions,
 			PersistentConfigDir: filepath.Join(applicationRoot, "syncthing", "config"),
 			DataDir:             filepath.Join(applicationRoot, "syncthing", "data"),
 			RuntimeRoot:         filepath.Join(applicationRoot, "run", "syncthing"),
@@ -171,6 +173,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 		})
 		pairingCoordinator = newMacPairingCoordinator(macPairingOptions{
 			Store: store, Secrets: secrets,
+			ConfigTransactions: configTransactions,
 			Transport: discoveryPairingTransport{
 				SSHConfigPath: sshConfigPath,
 				DialContext:   systemtransport.PairingDialContext(),
@@ -229,7 +232,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 		remoteMetrics = sshRemoteMetrics{store: store, sshConfigPath: sshConfigPath}
 	}
 	controller := &productionAgentController{
-		store: store, pairing: pairingCoordinator,
+		store: store, pairing: pairingCoordinator, configTransactions: configTransactions,
 		sync:           syncInspector,
 		dockerPreparer: &productionDockerPreparer{store: store, sync: syncReadiness},
 		metrics:        metrics.NewCollector(metrics.Options{Remote: remoteMetrics}),
@@ -514,15 +517,34 @@ type runtimePairingCoordinator interface {
 	Unpair(context.Context, string, bool) error
 }
 
+type configTransactions struct {
+	mu sync.Mutex
+}
+
+func (t *configTransactions) Run(operation func() error) error {
+	if operation == nil {
+		return nil
+	}
+	if t == nil {
+		return operation()
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return operation()
+}
+
 type productionAgentController struct {
-	store          config.Store
-	pairing        runtimePairingCoordinator
-	sync           productionSyncInspector
-	dockerPreparer dockerPreparer
-	diagnostics    productionDiagnostics
-	metrics        *metrics.Collector
-	afterPair      func(context.Context)
-	mu             sync.Mutex
+	store              config.Store
+	configTransactions *configTransactions
+	pairing            runtimePairingCoordinator
+	sync               productionSyncInspector
+	dockerPreparer     dockerPreparer
+	diagnostics        productionDiagnostics
+	metrics            *metrics.Collector
+	afterPair          func(context.Context)
+	mu                 sync.Mutex
+	beforeConfigTransaction func()
+	beforeConfigSave        func()
 }
 
 type dockerPreparer interface {
@@ -706,25 +728,32 @@ func (c *productionAgentController) addWorkspace(path string) (localapi.Workspac
 	}
 	digest := sha256.Sum256([]byte(canonical))
 	id := hex.EncodeToString(digest[:8])
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	cfg, err := loadAgentConfig(c.store)
-	if err != nil {
-		return localapi.Workspace{}, unavailable("cannot read workspace configuration")
-	}
-	if cfg.Workspaces == nil {
-		cfg.Workspaces = make(map[string]config.Workspace)
-	}
-	for existingID, existing := range cfg.Workspaces {
-		if existing.Path == canonical {
-			return localapi.Workspace{ID: existingID, Path: canonical}, nil
+	var result localapi.Workspace
+	err = c.runConfigTransaction(func() error {
+		cfg, err := loadAgentConfig(c.store)
+		if err != nil {
+			return unavailable("cannot read workspace configuration")
 		}
-	}
-	cfg.Workspaces[id] = config.Workspace{Path: canonical}
-	if err := c.store.Save(cfg); err != nil {
-		return localapi.Workspace{}, unavailable("cannot save workspace configuration")
-	}
-	return localapi.Workspace{ID: id, Path: canonical}, nil
+		if cfg.Workspaces == nil {
+			cfg.Workspaces = make(map[string]config.Workspace)
+		}
+		for existingID, existing := range cfg.Workspaces {
+			if existing.Path == canonical {
+				result = localapi.Workspace{ID: existingID, Path: canonical}
+				return nil
+			}
+		}
+		cfg.Workspaces[id] = config.Workspace{Path: canonical}
+		if c.beforeConfigSave != nil {
+			c.beforeConfigSave()
+		}
+		if err := c.store.Save(cfg); err != nil {
+			return unavailable("cannot save workspace configuration")
+		}
+		result = localapi.Workspace{ID: id, Path: canonical}
+		return nil
+	})
+	return result, err
 }
 
 func (c *productionAgentController) listWorkspaces() (localapi.WorkspaceListResult, error) {
@@ -744,20 +773,39 @@ func (c *productionAgentController) removeWorkspace(id string) (map[string]bool,
 	if strings.TrimSpace(id) == "" {
 		return nil, &localapi.PublicError{Code: localapi.ErrorInvalidRequest, Message: "workspace ID is required"}
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	cfg, err := loadAgentConfig(c.store)
+	err := c.runConfigTransaction(func() error {
+		cfg, err := loadAgentConfig(c.store)
+		if err != nil {
+			return unavailable("cannot read workspace configuration")
+		}
+		if _, ok := cfg.Workspaces[id]; !ok {
+			return needsAction("workspace was not found")
+		}
+		delete(cfg.Workspaces, id)
+		if c.beforeConfigSave != nil {
+			c.beforeConfigSave()
+		}
+		if err := c.store.Save(cfg); err != nil {
+			return unavailable("cannot save workspace configuration")
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, unavailable("cannot read workspace configuration")
-	}
-	if _, ok := cfg.Workspaces[id]; !ok {
-		return nil, needsAction("workspace was not found")
-	}
-	delete(cfg.Workspaces, id)
-	if err := c.store.Save(cfg); err != nil {
-		return nil, unavailable("cannot save workspace configuration")
+		return nil, err
 	}
 	return map[string]bool{"removed": true}, nil
+}
+
+func (c *productionAgentController) runConfigTransaction(operation func() error) error {
+	if c.beforeConfigTransaction != nil {
+		c.beforeConfigTransaction()
+	}
+	if c.configTransactions != nil {
+		return c.configTransactions.Run(operation)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return operation()
 }
 
 func decodeControlParams(raw json.RawMessage, destination any) error {

@@ -171,7 +171,7 @@ func TestAgentCLIControlCommandsAndJSONOutput(t *testing.T) {
 		{name: "pair approve", args: []string{"pair", "approve", "session"}, method: localapi.MethodPairApprove},
 		{name: "pair reject", args: []string{"pair", "reject", "session"}, method: localapi.MethodPairReject},
 		{name: "pair cancel", args: []string{"pair", "cancel", "session"}, method: localapi.MethodPairCancel},
-		{name: "unpair", args: []string{"unpair", "device"}, method: localapi.MethodUnpair},
+		{name: "unpair", args: []string{"unpair", "device"}, method: localapi.MethodForgetDevice},
 		{name: "workspace add", args: []string{"workspace", "add", "/workspace"}, method: localapi.MethodWorkspaceAdd},
 		{name: "workspace list", args: []string{"workspace", "list"}, method: localapi.MethodWorkspaceList},
 		{name: "workspace remove", args: []string{"workspace", "remove", "workspace-id"}, method: localapi.MethodWorkspaceRemove},
@@ -202,6 +202,20 @@ func TestAgentCLIControlCommandsAndJSONOutput(t *testing.T) {
 				t.Fatalf("stderr = %q", stderr.String())
 			}
 		})
+	}
+}
+
+func TestAgentCLIUnpairUsesReservedForgetMutation(t *testing.T) {
+	client := &recordingControlClient{result: map[string]any{"ok": true}}
+	code := RunRuntime(context.Background(), Runtime{
+		ProgramName: "remote-docker", ControlClient: client,
+	}, []string{"unpair", "trusted-device", "--json"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if code != ExitOK {
+		t.Fatalf("unpair exit code = %d", code)
+	}
+	params, ok := client.params.(localapi.ForgetDeviceParams)
+	if client.method != localapi.MethodForgetDevice || !ok || params.DeviceID != "trusted-device" || params.LocalOnly {
+		t.Fatalf("unpair routed method=%q params=%#v", client.method, client.params)
 	}
 }
 
@@ -269,12 +283,14 @@ func (c *recordingController) Handle(_ context.Context, method localapi.Method, 
 
 type recordingControlClient struct {
 	method localapi.Method
+	params any
 	result any
 	err    error
 }
 
-func (c *recordingControlClient) Call(_ context.Context, method localapi.Method, _ any, result any) error {
+func (c *recordingControlClient) Call(_ context.Context, method localapi.Method, params any, result any) error {
 	c.method = method
+	c.params = params
 	if c.err != nil {
 		return c.err
 	}

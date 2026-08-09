@@ -29,6 +29,7 @@ type localSyncthingProcess interface {
 
 type localSyncthingOptions struct {
 	Store               config.Store
+	ConfigTransactions  *configTransactions
 	Secrets             credentials.Store
 	Executable          string
 	PersistentConfigDir string
@@ -51,6 +52,9 @@ func newLocalSyncthingRuntime(options localSyncthingOptions) *localSyncthingRunt
 	if options.HTTPClient == nil {
 		options.HTTPClient = &http.Client{Timeout: agentProbeTimeout}
 	}
+	if options.ConfigTransactions == nil {
+		options.ConfigTransactions = &configTransactions{}
+	}
 	return &localSyncthingRuntime{options: options}
 }
 
@@ -63,41 +67,47 @@ func (r *localSyncthingRuntime) DeviceID(ctx context.Context) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	cfg, err := loadAgentConfig(r.options.Store)
-	if err != nil {
-		return "", fmt.Errorf("read local Syncthing configuration: %w", err)
-	}
-	if cfg.LocalSyncthingDeviceID != "" || len(cfg.LocalSyncthingIdentity) != 0 {
-		if strings.TrimSpace(cfg.LocalSyncthingDeviceID) == "" || len(cfg.LocalSyncthingIdentity) == 0 {
-			return "", errors.New("local Syncthing identity state is incomplete")
+	var deviceID string
+	err := r.options.ConfigTransactions.Run(func() error {
+		cfg, err := loadAgentConfig(r.options.Store)
+		if err != nil {
+			return fmt.Errorf("read local Syncthing configuration: %w", err)
 		}
-		return cfg.LocalSyncthingDeviceID, nil
-	}
+		if cfg.LocalSyncthingDeviceID != "" || len(cfg.LocalSyncthingIdentity) != 0 {
+			if strings.TrimSpace(cfg.LocalSyncthingDeviceID) == "" || len(cfg.LocalSyncthingIdentity) == 0 {
+				return errors.New("local Syncthing identity state is incomplete")
+			}
+			deviceID = cfg.LocalSyncthingDeviceID
+			return nil
+		}
 
-	bootstrap := r.options.Bootstrap
-	if bootstrap == nil {
-		bootstrap = syncer.BootstrapIdentity
-	}
-	result, err := bootstrap(ctx, syncer.BootstrapOptions{
-		Executable: r.options.Executable, PersistentConfigDir: r.options.PersistentConfigDir,
-		RuntimeRoot: r.options.RuntimeRoot, CredentialOwner: localSyncthingCredentialOwner,
-		Secrets: r.options.Secrets, Generator: r.options.Generator,
+		bootstrap := r.options.Bootstrap
+		if bootstrap == nil {
+			bootstrap = syncer.BootstrapIdentity
+		}
+		result, err := bootstrap(ctx, syncer.BootstrapOptions{
+			Executable: r.options.Executable, PersistentConfigDir: r.options.PersistentConfigDir,
+			RuntimeRoot: r.options.RuntimeRoot, CredentialOwner: localSyncthingCredentialOwner,
+			Secrets: r.options.Secrets, Generator: r.options.Generator,
+		})
+		if err != nil {
+			return fmt.Errorf("bootstrap local Syncthing identity: %w", err)
+		}
+		if strings.TrimSpace(result.DeviceID) == "" || len(result.EncryptedIdentity) == 0 {
+			return errors.New("bootstrap local Syncthing identity returned incomplete state")
+		}
+		cfg.SchemaVersion = config.CurrentSchemaVersion
+		cfg.LocalSyncthingDeviceID = result.DeviceID
+		cfg.LocalSyncthingIdentity = append([]byte(nil), result.EncryptedIdentity...)
+		if err := r.options.Store.Save(cfg); err != nil {
+			_ = r.options.Secrets.Delete(localSyncthingCredentialOwner, syncer.SyncthingIdentityKeyCredential)
+			_ = r.options.Secrets.Delete(localSyncthingCredentialOwner, syncer.SyncthingAPIKeyCredential)
+			return fmt.Errorf("persist local Syncthing identity: %w", err)
+		}
+		deviceID = result.DeviceID
+		return nil
 	})
-	if err != nil {
-		return "", fmt.Errorf("bootstrap local Syncthing identity: %w", err)
-	}
-	if strings.TrimSpace(result.DeviceID) == "" || len(result.EncryptedIdentity) == 0 {
-		return "", errors.New("bootstrap local Syncthing identity returned incomplete state")
-	}
-	cfg.SchemaVersion = config.CurrentSchemaVersion
-	cfg.LocalSyncthingDeviceID = result.DeviceID
-	cfg.LocalSyncthingIdentity = append([]byte(nil), result.EncryptedIdentity...)
-	if err := r.options.Store.Save(cfg); err != nil {
-		_ = r.options.Secrets.Delete(localSyncthingCredentialOwner, syncer.SyncthingIdentityKeyCredential)
-		_ = r.options.Secrets.Delete(localSyncthingCredentialOwner, syncer.SyncthingAPIKeyCredential)
-		return "", fmt.Errorf("persist local Syncthing identity: %w", err)
-	}
-	return result.DeviceID, nil
+	return deviceID, err
 }
 
 // Run owns the bundled Syncthing child for the background-agent lifetime.

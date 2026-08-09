@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
@@ -17,6 +18,7 @@ import (
 type DesktopController struct {
 	supervisor *Supervisor
 	fallback   localapi.Handler
+	operations sync.Mutex
 }
 
 func NewDesktopController(supervisor *Supervisor, fallback localapi.Handler) (*DesktopController, error) {
@@ -34,8 +36,13 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 	case localapi.MethodStatus:
 		return statusFromLifecycle(c.supervisor.Snapshot()), nil
 	case localapi.MethodEnable:
+		c.operations.Lock()
+		defer c.operations.Unlock()
 		if err := c.supervisor.Start(ctx); err != nil {
 			return nil, unavailable("Remote Docker could not be enabled")
+		}
+		if err := c.markTrustedConnectionStarting(); err != nil {
+			return nil, unavailable("trusted device connection could not be started")
 		}
 		return c.actionResult(), nil
 	case localapi.MethodPause:
@@ -70,11 +77,25 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 		}
 		return started, nil
 	case localapi.MethodConnect:
+		c.operations.Lock()
+		defer c.operations.Unlock()
 		snapshot := c.supervisor.Snapshot()
-		if snapshot.TrustedPeers < 1 || snapshot.Peer == nil || c.supervisor.machine.TrustForgetInProgress() {
+		if snapshot.TrustedPeers < 1 || snapshot.Peer == nil {
 			return nil, needsAction("trusted device was not found")
 		}
-		return c.delegate(ctx, method, raw)
+		if snapshot.State == lifecycle.StatePaused {
+			if err := c.supervisor.Start(ctx); err != nil {
+				return nil, unavailable("Remote Docker could not be enabled")
+			}
+		}
+		result, err := c.delegate(ctx, method, raw)
+		if err != nil {
+			return nil, err
+		}
+		if err := c.markTrustedConnectionStarting(); err != nil {
+			return nil, needsAction("trusted device connection could not be started")
+		}
+		return result, nil
 	case localapi.MethodPairStatus, localapi.MethodPairApprove, localapi.MethodPairReject, localapi.MethodPairCancel:
 		result, err := c.delegate(ctx, method, raw)
 		if err != nil {
@@ -99,6 +120,8 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 		}
 		return c.actionResult(), nil
 	case localapi.MethodForgetDevice:
+		c.operations.Lock()
+		defer c.operations.Unlock()
 		var params localapi.ForgetDeviceParams
 		if err := decodeOptionalControlParams(raw, &params); err != nil {
 			return nil, err
@@ -131,6 +154,8 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 			return rollback(unavailable("trusted-device cleanup could not be committed"))
 		}
 		return c.actionResult(), nil
+	case localapi.MethodUnpair:
+		return nil, &localapi.PublicError{Code: localapi.ErrorInvalidRequest, Message: "Unpair is an internal cleanup operation"}
 	case localapi.MethodShutdown:
 		if err := c.supervisor.Shutdown(ctx); err != nil {
 			return nil, unavailable("Remote Docker could not stop every owned process")
@@ -158,6 +183,22 @@ func connectionLimitOccupied(snapshot lifecycle.Snapshot) bool {
 		limit = 1
 	}
 	return snapshot.TrustedPeers >= limit
+}
+
+func (c *DesktopController) markTrustedConnectionStarting() error {
+	snapshot := c.supervisor.Snapshot()
+	if snapshot.TrustedPeers == 0 || snapshot.Peer == nil {
+		return nil
+	}
+	switch snapshot.State {
+	case lifecycle.StateClientReady, lifecycle.StateSearching, lifecycle.StateHostWaiting:
+		_, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventConnectionStarted})
+		return err
+	case lifecycle.StateConnecting, lifecycle.StateConnected, lifecycle.StateReconnecting:
+		return nil
+	default:
+		return errors.New("trusted device is not ready to connect")
+	}
 }
 
 func (c *DesktopController) startPairing(started localapi.PairStartResult) error {

@@ -669,6 +669,102 @@ func TestMacPairingNormalRetryDoesNotSilentlyBecomeLocalOnly(t *testing.T) {
 	fixture.assertForgotten(t)
 }
 
+func TestSharedConfigTransactionPreservesWorkspaceAddDuringForget(t *testing.T) {
+	fixture := newLocalForgetFixture(t)
+	transactions := &configTransactions{}
+	fixture.options.ConfigTransactions = transactions
+	forgetSaving := make(chan struct{})
+	releaseForgetSave := make(chan struct{})
+	fixture.options.SaveConfig = func(cfg config.Config) error {
+		close(forgetSaving)
+		<-releaseForgetSave
+		return fixture.store.Save(cfg)
+	}
+	coordinator := newMacPairingCoordinator(fixture.options)
+	workspacePath := t.TempDir()
+	workspaceAttempted := make(chan struct{})
+	controller := &productionAgentController{
+		store:                   fixture.store,
+		configTransactions:      transactions,
+		beforeConfigTransaction: func() { close(workspaceAttempted) },
+	}
+	forgetDone := make(chan error, 1)
+	go func() { forgetDone <- coordinator.Unpair(context.Background(), fixture.deviceID, true) }()
+	waitForTestSignal(t, forgetSaving, "forget config save")
+	workspaceDone := make(chan error, 1)
+	go func() {
+		_, err := controller.addWorkspace(workspacePath)
+		workspaceDone <- err
+	}()
+	waitForTestSignal(t, workspaceAttempted, "workspace transaction attempt")
+	select {
+	case err := <-workspaceDone:
+		t.Fatalf("workspace add bypassed forget transaction: %v", err)
+	default:
+	}
+	close(releaseForgetSave)
+	if err := waitForTestError(t, forgetDone, "forget completion"); err != nil {
+		t.Fatalf("forget error = %v", err)
+	}
+	if err := waitForTestError(t, workspaceDone, "workspace add completion"); err != nil {
+		t.Fatalf("workspace add error = %v", err)
+	}
+	cfg, err := fixture.store.Load()
+	if err != nil {
+		t.Fatalf("load final config: %v", err)
+	}
+	if cfg.ActiveDevice != "" || len(cfg.Devices) != 0 || len(cfg.Workspaces) != 2 {
+		t.Fatalf("final config lost forget or workspace add = %#v", cfg)
+	}
+}
+
+func TestSharedConfigTransactionPreservesWorkspaceRemoveBeforeForget(t *testing.T) {
+	fixture := newLocalForgetFixture(t)
+	transactions := &configTransactions{}
+	fixture.options.ConfigTransactions = transactions
+	forgetAttempted := make(chan struct{})
+	fixture.options.BeforeConfigTransaction = func() { close(forgetAttempted) }
+	coordinator := newMacPairingCoordinator(fixture.options)
+	workspaceSaving := make(chan struct{})
+	releaseWorkspaceSave := make(chan struct{})
+	controller := &productionAgentController{
+		store:              fixture.store,
+		configTransactions: transactions,
+		beforeConfigSave: func() {
+			close(workspaceSaving)
+			<-releaseWorkspaceSave
+		},
+	}
+	workspaceDone := make(chan error, 1)
+	go func() {
+		_, err := controller.removeWorkspace("workspace")
+		workspaceDone <- err
+	}()
+	waitForTestSignal(t, workspaceSaving, "workspace config save")
+	forgetDone := make(chan error, 1)
+	go func() { forgetDone <- coordinator.Unpair(context.Background(), fixture.deviceID, true) }()
+	waitForTestSignal(t, forgetAttempted, "forget transaction attempt")
+	select {
+	case err := <-forgetDone:
+		t.Fatalf("forget bypassed workspace transaction: %v", err)
+	default:
+	}
+	close(releaseWorkspaceSave)
+	if err := waitForTestError(t, workspaceDone, "workspace remove completion"); err != nil {
+		t.Fatalf("workspace remove error = %v", err)
+	}
+	if err := waitForTestError(t, forgetDone, "forget completion"); err != nil {
+		t.Fatalf("forget error = %v", err)
+	}
+	cfg, err := fixture.store.Load()
+	if err != nil {
+		t.Fatalf("load final config: %v", err)
+	}
+	if cfg.ActiveDevice != "" || len(cfg.Devices) != 0 || len(cfg.Workspaces) != 0 {
+		t.Fatalf("final config resurrected trust or workspace = %#v", cfg)
+	}
+}
+
 type localForgetFixture struct {
 	root      string
 	deviceID  string

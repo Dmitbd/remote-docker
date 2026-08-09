@@ -78,7 +78,6 @@ func TestAgentLocalAPIDispatchesEveryControlMethod(t *testing.T) {
 		MethodPairCancel,
 		MethodDisconnect,
 		MethodForgetDevice,
-		MethodUnpair,
 		MethodWorkspaceAdd,
 		MethodWorkspaceList,
 		MethodWorkspaceRemove,
@@ -118,6 +117,39 @@ func TestAgentLocalAPIDispatchesEveryControlMethod(t *testing.T) {
 				t.Fatalf("ServeConn() error = %v", err)
 			}
 		})
+	}
+}
+
+func TestAgentLocalAPIRejectsInternalUnpairBeforeDispatch(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	server := Server{
+		Handler: HandlerFunc(func(context.Context, Method, json.RawMessage) (any, error) {
+			t.Fatal("internal Unpair reached the public handler")
+			return nil, nil
+		}),
+		AuthorizePeer: func(net.Conn) error { return nil },
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- server.ServeConn(context.Background(), serverConn) }()
+
+	if err := json.NewEncoder(clientConn).Encode(wireRequest{
+		SchemaVersion: CurrentSchemaVersion,
+		ID:            1,
+		Method:        MethodUnpair,
+		Params:        json.RawMessage(`{"device_id":"trusted","local_only":true}`),
+	}); err != nil {
+		t.Fatalf("encode internal Unpair: %v", err)
+	}
+	var response wireResponse
+	if err := json.NewDecoder(clientConn).Decode(&response); err != nil {
+		t.Fatalf("decode internal Unpair rejection: %v", err)
+	}
+	if response.Error == nil || response.Error.Code != ErrorInvalidRequest {
+		t.Fatalf("internal Unpair response = %#v, want invalid_request", response)
+	}
+	if err := <-serveDone; err != nil {
+		t.Fatalf("ServeConn() error = %v", err)
 	}
 }
 

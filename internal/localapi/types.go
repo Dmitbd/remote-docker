@@ -47,7 +47,7 @@ func (m Method) valid() bool {
 		MethodListDevices, MethodPairCandidates, MethodPairStart, MethodConnect, MethodPairStatus,
 		MethodPairApprove, MethodPairReject, MethodPairCancel,
 		MethodDisconnect, MethodForgetDevice,
-		MethodUnpair, MethodWorkspaceAdd, MethodWorkspaceList,
+		MethodWorkspaceAdd, MethodWorkspaceList,
 		MethodWorkspaceRemove, MethodSyncStatus, MethodPrepareDocker, MethodDoctor, MethodRecover,
 		MethodShutdown, MethodResourceStatus:
 		return true

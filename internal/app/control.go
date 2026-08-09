@@ -122,11 +122,11 @@ func parseControlCommand(args []string) (localapi.Method, any, bool) {
 		}
 	case "unpair":
 		if len(args) <= 2 {
-			params := localapi.UnpairParams{}
+			params := localapi.ForgetDeviceParams{}
 			if len(args) == 2 {
 				params.DeviceID = args[1]
 			}
-			return localapi.MethodUnpair, params, true
+			return localapi.MethodForgetDevice, params, true
 		}
 	case "workspace":
 		if len(args) == 2 && args[1] == "list" {
