@@ -69,8 +69,8 @@ for required_path in \
   grep -F "${required_path}" "${ci_workflow}" >/dev/null || fail "package CI path filter is missing: ${required_path}"
 done
 
-grep -F -- '-Version 0.2.4' "${ci_workflow}" >/dev/null || fail "Windows CI preview version must use the desktop application generation"
-grep -F 'Remote-Docker-0.2.4-x64-Setup.exe' "${ci_workflow}" >/dev/null || fail "Windows CI must verify exactly one Setup EXE"
+grep -F -- '-Version 0.2.5' "${ci_workflow}" >/dev/null || fail "Windows CI preview version must use the desktop application generation"
+grep -F 'Remote-Docker-0.2.5-x64-Setup.exe' "${ci_workflow}" >/dev/null || fail "Windows CI must verify exactly one Setup EXE"
 if grep -F 'build-msi.ps1' "${workflow}" "${ci_workflow}" >/dev/null; then
   fail "legacy MSI build remains in a release workflow"
 fi
