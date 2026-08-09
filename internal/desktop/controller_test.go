@@ -63,6 +63,22 @@ func TestControllerReconnectsTrustedDeviceWithoutPairStart(t *testing.T) {
 	}
 }
 
+func TestControllerForgetsSelectedDeviceWithExplicitScope(t *testing.T) {
+	handler := &recordingHandler{}
+	controller := NewController(handler, func() lifecycle.Snapshot { return lifecycle.Snapshot{} })
+
+	if err := controller.ForgetDevice(context.Background(), "saved-windows", true); err != nil {
+		t.Fatalf("ForgetDevice() error = %v", err)
+	}
+	var params localapi.ForgetDeviceParams
+	if err := json.Unmarshal(handler.params, &params); err != nil {
+		t.Fatalf("ForgetDevice params error = %v", err)
+	}
+	if handler.method != localapi.MethodForgetDevice || params.DeviceID != "saved-windows" || !params.LocalOnly {
+		t.Fatalf("ForgetDevice method=%s params=%#v", handler.method, params)
+	}
+}
+
 func TestControllerAddsOnlySelectedWorkspacePath(t *testing.T) {
 	handler := &recordingHandler{}
 	controller := NewController(handler, func() lifecycle.Snapshot { return lifecycle.Snapshot{} })

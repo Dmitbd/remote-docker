@@ -57,6 +57,21 @@ func (c *Controller) Candidates(ctx context.Context) ([]localapi.PairingCandidat
 	return append([]localapi.PairingCandidate(nil), candidates.Candidates...), nil
 }
 
+func (c *Controller) ForgetDevice(ctx context.Context, deviceID string, localOnly bool) error {
+	if c == nil || c.handler == nil {
+		return errors.New("desktop controller is unavailable")
+	}
+	raw, err := json.Marshal(localapi.ForgetDeviceParams{
+		DeviceID:  strings.TrimSpace(deviceID),
+		LocalOnly: localOnly,
+	})
+	if err != nil {
+		return errors.New("desktop action could not be encoded")
+	}
+	_, err = c.handler.Handle(ctx, localapi.MethodForgetDevice, raw)
+	return err
+}
+
 func (c *Controller) PollPairing(ctx context.Context) (localapi.PairingStatusResult, error) {
 	if c == nil || c.handler == nil || c.snapshot == nil {
 		return localapi.PairingStatusResult{}, errors.New("desktop controller is unavailable")

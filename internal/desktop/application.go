@@ -55,6 +55,7 @@ type Application struct {
 	lastDiagnosticsPoll  time.Time
 	actionError          string
 	actionSequence       uint64
+	confirm              func(title, message, confirmText string, response func(bool))
 }
 
 func NewApplication(options ApplicationOptions) (*Application, error) {
@@ -108,7 +109,7 @@ func (a *Application) poll(ctx context.Context) {
 func (a *Application) pollOnce(ctx context.Context) {
 	snapshot := a.snapshot()
 	switch snapshot.State {
-	case lifecycle.StateSearching:
+	case lifecycle.StateClientReady, lifecycle.StateSearching:
 		pollCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
 		candidates, err := a.controller.Candidates(pollCtx)
 		cancel()
@@ -122,10 +123,6 @@ func (a *Application) pollOnce(ctx context.Context) {
 		pollCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
 		_, _ = a.controller.PollPairing(pollCtx)
 		cancel()
-	default:
-		a.mu.Lock()
-		a.candidates = nil
-		a.mu.Unlock()
 	}
 	a.mu.Lock()
 	selected := a.selected
@@ -287,31 +284,29 @@ func (a *Application) connectionBody(model ViewModel, snapshot lifecycle.Snapsho
 		code.TextStyle = fyne.TextStyle{Bold: true, Monospace: true}
 		body.Add(code)
 	}
-	if snapshot.State == lifecycle.StateSearching {
-		rows := BuildDeviceRows(snapshot, a.candidates)
-		if len(rows) == 0 {
+	rows := BuildDeviceRows(snapshot, a.candidates)
+	if len(rows) == 0 && snapshot.State == lifecycle.StateSearching {
 			body.Add(widget.NewLabel("Пока ничего не найдено"))
 		}
-		for _, row := range rows {
-			row := row
-			name := widget.NewLabel(row.Name + " · " + row.Status)
-			name.TextStyle = fyne.TextStyle{Bold: true}
-			actions := container.NewHBox()
-			for _, action := range row.Actions {
-				action := action
-				button := widget.NewButton(action.Label, func() { a.perform(action.ID, row.ID) })
-				if !action.Enabled {
-					button.Disable()
-				}
-				if action.Destructive {
-					button.Importance = widget.DangerImportance
-				} else {
-					button.Importance = widget.HighImportance
-				}
-				actions.Add(button)
+	for _, row := range rows {
+		row := row
+		name := widget.NewLabel(row.Name + " · " + row.Status)
+		name.TextStyle = fyne.TextStyle{Bold: true}
+		actions := container.NewHBox()
+		for _, action := range row.Actions {
+			action := action
+			button := widget.NewButton(action.Label, func() { a.performRowAction(snapshot, row, action) })
+			if !action.Enabled {
+				button.Disable()
 			}
-			body.Add(container.NewBorder(nil, nil, name, actions))
+			if action.Destructive {
+				button.Importance = widget.DangerImportance
+			} else {
+				button.Importance = widget.HighImportance
+			}
+			actions.Add(button)
 		}
+		body.Add(container.NewBorder(nil, nil, name, actions))
 	}
 	if model.Countdown != "" {
 		body.Add(widget.NewLabel("До безопасной остановки: " + model.Countdown))
@@ -416,6 +411,117 @@ func (a *Application) perform(action ActionID, value string) {
 	}()
 }
 
+func (a *Application) performRowAction(snapshot lifecycle.Snapshot, row DeviceRow, action Action) {
+	switch action.ID {
+	case ActionForgetDevice:
+		a.showForgetConfirmation(row)
+	case ActionConnect:
+		if connectionLimitOccupied(snapshot) {
+			a.showReplaceConfirmation(row)
+			return
+		}
+		a.perform(action.ID, row.ID)
+	default:
+		a.perform(action.ID, row.ID)
+	}
+}
+
+func (a *Application) showForgetConfirmation(row DeviceRow) {
+	a.showConfirmation(
+		"Забыть устройство?",
+		"Связь с устройством «"+nonEmpty(row.Name, "Windows-компьютер")+"» будет удалена. Проекты, Docker-данные, WSL и исходники останутся без изменений.",
+		"Забыть устройство",
+		func(confirmed bool) {
+			if confirmed {
+				a.forgetDevice(row, false, nil)
+			}
+		},
+	)
+}
+
+func (a *Application) showReplaceConfirmation(row DeviceRow) {
+	snapshot := a.snapshot()
+	if snapshot.Peer == nil {
+		a.perform(ActionConnect, row.ID)
+		return
+	}
+	a.showConfirmation(
+		"Подключить новое устройство?",
+		"Старая доверенная связь будет удалена перед подключением к «"+nonEmpty(row.Name, "новому Windows-компьютеру")+"». Проекты, Docker-данные, WSL и исходники останутся без изменений.",
+		"Забыть старую связь и подключиться к новому устройству",
+		func(confirmed bool) {
+			if confirmed {
+				a.forgetDevice(DeviceRow{ID: snapshot.Peer.ID, Name: snapshot.Peer.Name}, false, func() {
+					a.perform(ActionConnect, row.ID)
+				})
+			}
+		},
+	)
+}
+
+func (a *Application) showLocalForgetConfirmation(row DeviceRow, after func()) {
+	a.showConfirmation(
+		"Забыть только на этом компьютере?",
+		"Удалённый отзыв сейчас недоступен. Связь будет удалена только на этом компьютере. Проекты, Docker-данные, WSL и исходники останутся без изменений; на другом компьютере доверие может потребовать отдельного удаления.",
+		"Забыть только здесь",
+		func(confirmed bool) {
+			if confirmed {
+				a.forgetDevice(row, true, after)
+			}
+		},
+	)
+}
+
+func (a *Application) forgetDevice(row DeviceRow, localOnly bool, after func()) {
+	sequence := a.beginAction()
+	a.refreshCurrent()
+	go func() {
+		err := a.controller.ForgetDevice(context.Background(), row.ID, localOnly)
+		if !a.completeAction(sequence, err) {
+			return
+		}
+		a.refreshCurrent()
+		if err != nil {
+			if !localOnly && remoteUnavailable(err) {
+				a.offerLocalForgetConfirmation(row, after)
+			}
+			return
+		}
+		if after != nil {
+			after()
+		}
+	}()
+}
+
+func (a *Application) offerLocalForgetConfirmation(row DeviceRow, after func()) {
+	if a.confirm != nil {
+		a.showLocalForgetConfirmation(row, after)
+		return
+	}
+	fyne.Do(func() { a.showLocalForgetConfirmation(row, after) })
+}
+
+func (a *Application) showConfirmation(title, message, confirmText string, response func(bool)) {
+	if a.confirm != nil {
+		a.confirm(title, message, confirmText, response)
+		return
+	}
+	if a.window == nil {
+		return
+	}
+	confirmation := dialog.NewConfirm(title, message, response, a.window)
+	confirmation.SetConfirmText(confirmText)
+	confirmation.SetDismissText("Отмена")
+	confirmation.Show()
+}
+
+func (a *Application) refreshCurrent() {
+	if a.app == nil || a.content == nil {
+		return
+	}
+	fyne.Do(func() { a.render(a.snapshot()) })
+}
+
 func (a *Application) beginAction() uint64 {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -451,6 +557,15 @@ func safeActionMessage(err error) string {
 		return safeLocalAPIErrorMessage(remote.Code)
 	}
 	return "Не удалось выполнить действие. Попробуйте снова."
+}
+
+func remoteUnavailable(err error) bool {
+	var public *localapi.PublicError
+	if errors.As(err, &public) && public.Code == localapi.ErrorUnavailable {
+		return true
+	}
+	var remote *localapi.RemoteError
+	return errors.As(err, &remote) && remote.Code == localapi.ErrorUnavailable
 }
 
 func safeLocalAPIErrorMessage(code localapi.ErrorCode) string {
