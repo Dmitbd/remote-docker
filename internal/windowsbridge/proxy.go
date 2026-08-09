@@ -30,7 +30,10 @@ var (
 	ErrUnsafeListenAddress = errors.New("bridge must bind an explicit private interface address")
 )
 
-const profilePollInterval = 100 * time.Millisecond
+const (
+	profilePollInterval      = 100 * time.Millisecond
+	upstreamDialAttemptLimit = 1500 * time.Millisecond
+)
 
 // AddressResolver returns the current WSL2 address. It is called per connection.
 type AddressResolver interface {
@@ -184,12 +187,7 @@ func (p *Proxy) requirePrivate(ctx context.Context) error {
 func (p *Proxy) forward(ctx context.Context, inbound net.Conn) {
 	defer inbound.Close()
 
-	address, err := p.resolver.WSLAddress(ctx)
-	if err != nil || address == nil {
-		return
-	}
-	target := net.JoinHostPort(address.String(), strconv.Itoa(p.targetPort))
-	outbound, err := p.dialer.DialContext(ctx, "tcp", target)
+	outbound, err := p.dialUpstream(ctx)
 	if err != nil {
 		return
 	}
@@ -215,4 +213,43 @@ func (p *Proxy) forward(ctx context.Context, inbound net.Conn) {
 	case <-done:
 		<-done
 	}
+}
+
+// dialUpstream prefers Windows' WSL loopback relay because traffic to the
+// distro's private subnet can be intercepted by VPN software. The private WSL
+// address remains a compatibility fallback for systems without loopback
+// forwarding. Every attempt is bounded independently.
+func (p *Proxy) dialUpstream(ctx context.Context) (net.Conn, error) {
+	port := strconv.Itoa(p.targetPort)
+	loopbackTargets := []string{
+		net.JoinHostPort("::1", port),
+		net.JoinHostPort("127.0.0.1", port),
+	}
+	var lastErr error
+	for _, target := range loopbackTargets {
+		connection, err := p.dialBounded(ctx, target)
+		if err == nil {
+			return connection, nil
+		}
+		lastErr = err
+	}
+
+	address, err := p.resolver.WSLAddress(ctx)
+	if err != nil || address == nil {
+		if err != nil {
+			return nil, err
+		}
+		return nil, lastErr
+	}
+	connection, err := p.dialBounded(ctx, net.JoinHostPort(address.String(), port))
+	if err != nil {
+		return nil, err
+	}
+	return connection, nil
+}
+
+func (p *Proxy) dialBounded(ctx context.Context, target string) (net.Conn, error) {
+	attemptCtx, cancel := context.WithTimeout(ctx, upstreamDialAttemptLimit)
+	defer cancel()
+	return p.dialer.DialContext(attemptCtx, "tcp", target)
 }

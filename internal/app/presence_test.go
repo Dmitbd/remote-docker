@@ -91,6 +91,21 @@ func TestHostPresenceRejectsReplayAndSecondLease(t *testing.T) {
 	}
 }
 
+func TestHostPresenceAcceptsAuthenticatedSessionAfterPairingEnteredConnecting(t *testing.T) {
+	now := time.Now()
+	machine := trustedLifecycleMachine(t, lifecycle.RoleWindowsHost, &now)
+	if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventConnectionStarted}); err != nil {
+		t.Fatal(err)
+	}
+	presence, _ := NewHostPresence(machine, func() time.Time { return now }, func(context.Context) error { return nil })
+	if err := presence.Hello("session", lifecycle.Peer{ID: "mac", Name: "Mac"}); err != nil {
+		t.Fatalf("Hello() error = %v", err)
+	}
+	if got := machine.Snapshot(); got.State != lifecycle.StateConnected {
+		t.Fatalf("connected snapshot = %#v", got)
+	}
+}
+
 func TestClientPresenceReportsLocalAndWindowsDisconnectInitiators(t *testing.T) {
 	t.Run("Mac disconnects", func(t *testing.T) {
 		now := time.Now()
@@ -132,17 +147,113 @@ func TestClientPresenceReportsLocalAndWindowsDisconnectInitiators(t *testing.T) 
 	})
 }
 
+func TestClientPresenceWaitsForBothRemoteServicesBeforeConnecting(t *testing.T) {
+	now := time.Now()
+	machine := trustedLifecycleMachine(t, lifecycle.RoleMacClient, &now)
+	transport := &recordingPresenceTransport{
+		sessionID: "session",
+		hello:     PresenceHelloResult{SessionID: "session", DockerReady: true, SyncReady: false},
+		heartbeats: []PresenceHeartbeatResult{
+			{DockerReady: true, SyncReady: false},
+			{DockerReady: true, SyncReady: true},
+		},
+	}
+	presence, _ := NewClientPresence(machine, transport, func() time.Time { return now }, func(context.Context) error { return nil })
+	if err := presence.Start(context.Background(), "mac", "MacBook", "0.2.5"); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if got := machine.Snapshot(); got.State != lifecycle.StateConnecting || got.Docker.State != lifecycle.ServiceStarting || got.Sync.State != lifecycle.ServiceStarting {
+		t.Fatalf("starting snapshot = %#v", got)
+	}
+	if err := presence.Heartbeat(context.Background()); err != nil {
+		t.Fatalf("Heartbeat(unready) error = %v", err)
+	}
+	if got := machine.Snapshot(); got.State != lifecycle.StateConnecting {
+		t.Fatalf("unready heartbeat snapshot = %#v", got)
+	}
+	if err := presence.Heartbeat(context.Background()); err != nil {
+		t.Fatalf("Heartbeat(ready) error = %v", err)
+	}
+	if got := machine.Snapshot(); got.State != lifecycle.StateConnected || got.Docker.State != lifecycle.ServiceReady || got.Sync.State != lifecycle.ServiceReady {
+		t.Fatalf("ready heartbeat snapshot = %#v", got)
+	}
+}
+
+func TestClientPresenceStartsFromPairingConnectingStateAndRecoversReadiness(t *testing.T) {
+	now := time.Now()
+	machine := trustedLifecycleMachine(t, lifecycle.RoleMacClient, &now)
+	if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventConnectionStarted}); err != nil {
+		t.Fatal(err)
+	}
+	transport := &recordingPresenceTransport{
+		sessionID: "session",
+		hello:     PresenceHelloResult{SessionID: "session", DockerReady: true, SyncReady: true},
+		heartbeats: []PresenceHeartbeatResult{
+			{DockerReady: false, SyncReady: true},
+			{DockerReady: true, SyncReady: true},
+		},
+	}
+	presence, _ := NewClientPresence(machine, transport, func() time.Time { return now }, func(context.Context) error { return nil })
+	if err := presence.Start(context.Background(), "mac", "MacBook", "0.2.5"); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if got := machine.Snapshot(); got.State != lifecycle.StateConnected {
+		t.Fatalf("ready hello snapshot = %#v", got)
+	}
+	if err := presence.Heartbeat(context.Background()); err != nil {
+		t.Fatalf("Heartbeat(degraded) error = %v", err)
+	}
+	if got := machine.Snapshot(); got.State != lifecycle.StateReconnecting {
+		t.Fatalf("degraded snapshot = %#v", got)
+	}
+	if err := presence.Heartbeat(context.Background()); err != nil {
+		t.Fatalf("Heartbeat(recovered) error = %v", err)
+	}
+	if got := machine.Snapshot(); got.State != lifecycle.StateConnected {
+		t.Fatalf("recovered snapshot = %#v", got)
+	}
+}
+
+func TestClientPresenceNotifyStopClosesRemoteLeaseWithoutSecondLifecycleTransition(t *testing.T) {
+	now := time.Now()
+	machine := trustedLifecycleMachine(t, lifecycle.RoleMacClient, &now)
+	transport := &recordingPresenceTransport{sessionID: "session"}
+	presence, _ := NewClientPresence(machine, transport, func() time.Time { return now }, func(context.Context) error { return nil })
+	if err := presence.Start(context.Background(), "mac", "MacBook", "0.2.5"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPauseRequested}); err != nil {
+		t.Fatal(err)
+	}
+	if err := presence.NotifyStop(context.Background(), lifecycle.ReasonUserPause); err != nil {
+		t.Fatalf("NotifyStop() error = %v", err)
+	}
+	if transport.disconnectReason != string(lifecycle.ReasonUserPause) || machine.Snapshot().State != lifecycle.StateStopping {
+		t.Fatalf("reason=%q snapshot=%#v", transport.disconnectReason, machine.Snapshot())
+	}
+}
+
 type recordingPresenceTransport struct {
 	sessionID        string
+	hello            PresenceHelloResult
 	heartbeat        PresenceHeartbeatResult
+	heartbeats       []PresenceHeartbeatResult
 	disconnectReason string
 }
 
 func (t *recordingPresenceTransport) Hello(context.Context, PresenceHello) (PresenceHelloResult, error) {
+	if t.hello.SessionID != "" {
+		return t.hello, nil
+	}
 	return PresenceHelloResult{SessionID: t.sessionID, DockerReady: true, SyncReady: true}, nil
 }
 
 func (t *recordingPresenceTransport) Heartbeat(context.Context, string, uint64) (PresenceHeartbeatResult, error) {
+	if len(t.heartbeats) > 0 {
+		result := t.heartbeats[0]
+		t.heartbeats = t.heartbeats[1:]
+		return result, nil
+	}
 	return t.heartbeat, nil
 }
 

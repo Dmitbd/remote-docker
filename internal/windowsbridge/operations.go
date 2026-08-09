@@ -20,6 +20,7 @@ type ManagedWSLStatus struct {
 	DockerSocket     bool `json:"docker_socket"`
 	DiskAvailable    bool `json:"disk_available"`
 	SyncthingService bool `json:"syncthing_service"`
+	PresenceActive   bool `json:"presence_active"`
 }
 
 type managedWSLOperation string

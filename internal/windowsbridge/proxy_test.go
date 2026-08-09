@@ -11,12 +11,9 @@ import (
 	"time"
 )
 
-func TestProxyResolvesWSLAddressForEveryConnection(t *testing.T) {
+func TestProxyPrefersIPv6LoopbackWithoutResolvingWSLAddress(t *testing.T) {
 	target := startEchoServer(t)
-	resolver := &sequenceResolver{addresses: []net.IP{
-		net.ParseIP("172.30.1.10"),
-		net.ParseIP("172.30.1.11"),
-	}}
+	resolver := &sequenceResolver{}
 	dialer := &redirectDialer{target: target.Addr().String()}
 	proxy, err := NewProxy(ServiceSSH, resolver, staticProfile(true), dialer)
 	if err != nil {
@@ -60,9 +57,62 @@ func TestProxyResolvesWSLAddressForEveryConnection(t *testing.T) {
 		t.Fatal("Serve() did not stop")
 	}
 
-	wantAddresses := []string{"172.30.1.10:22", "172.30.1.11:22"}
+	wantAddresses := []string{"[::1]:22", "[::1]:22"}
 	if got := dialer.addresses(); !reflect.DeepEqual(got, wantAddresses) {
 		t.Fatalf("dial addresses = %#v, want %#v", got, wantAddresses)
+	}
+	if resolver.calls() != 0 {
+		t.Fatalf("WSL resolver calls = %d, want 0 while loopback works", resolver.calls())
+	}
+}
+
+func TestProxyFallsBackFromLoopbackToFreshPrivateWSLAddress(t *testing.T) {
+	resolver := &sequenceResolver{addresses: []net.IP{net.ParseIP("172.30.1.10")}}
+	dialer := &scriptedDialer{
+		failures: 2,
+		connection: &addressedConn{
+			local:  &net.TCPAddr{IP: net.ParseIP("172.30.1.1"), Port: 40000},
+			remote: &net.TCPAddr{IP: net.ParseIP("172.30.1.10"), Port: 22},
+		},
+	}
+	proxy, err := NewProxy(ServiceSSH, resolver, staticProfile(true), dialer)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client, server := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		proxy.forward(context.Background(), server)
+		close(done)
+	}()
+	_ = client.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("forward() did not stop")
+	}
+
+	want := []string{"[::1]:22", "127.0.0.1:22", "172.30.1.10:22"}
+	if got := dialer.addresses(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("dial addresses = %#v, want %#v", got, want)
+	}
+	if resolver.calls() != 1 {
+		t.Fatalf("WSL resolver calls = %d, want 1 fallback lookup", resolver.calls())
+	}
+}
+
+func TestProxyBoundsEveryUpstreamDialAttempt(t *testing.T) {
+	dialer := &deadlineDialer{}
+	proxy, err := NewProxy(ServiceSyncthing, &sequenceResolver{addresses: []net.IP{net.ParseIP("172.30.1.10")}}, staticProfile(true), dialer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, server := net.Pipe()
+	proxy.forward(context.Background(), server)
+	_ = client.Close()
+	if dialer.calls != 3 || !dialer.allBounded {
+		t.Fatalf("dial attempts = %d, all bounded = %v; want 3 bounded attempts", dialer.calls, dialer.allBounded)
 	}
 }
 
@@ -185,6 +235,7 @@ type sequenceResolver struct {
 	mu        sync.Mutex
 	addresses []net.IP
 	next      int
+	called    int
 }
 
 type stubListener struct {
@@ -198,12 +249,19 @@ func (l *stubListener) Addr() net.Addr            { return l.address }
 func (r *sequenceResolver) WSLAddress(context.Context) (net.IP, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.called++
 	if r.next >= len(r.addresses) {
 		return nil, errors.New("no WSL address")
 	}
 	address := r.addresses[r.next]
 	r.next++
 	return address, nil
+}
+
+func (r *sequenceResolver) calls() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.called
 }
 
 type redirectDialer struct {
@@ -215,6 +273,46 @@ type redirectDialer struct {
 type recordingDialer struct {
 	mu       sync.Mutex
 	recorded []string
+}
+
+type scriptedDialer struct {
+	mu         sync.Mutex
+	failures   int
+	connection net.Conn
+	recorded   []string
+}
+
+func (d *scriptedDialer) DialContext(_ context.Context, _, address string) (net.Conn, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.recorded = append(d.recorded, address)
+	if d.failures > 0 {
+		d.failures--
+		return nil, errors.New("dial failed")
+	}
+	return d.connection, nil
+}
+
+func (d *scriptedDialer) addresses() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.recorded...)
+}
+
+type deadlineDialer struct {
+	calls      int
+	allBounded bool
+}
+
+func (d *deadlineDialer) DialContext(ctx context.Context, _, _ string) (net.Conn, error) {
+	d.calls++
+	_, bounded := ctx.Deadline()
+	if d.calls == 1 {
+		d.allBounded = bounded
+	} else {
+		d.allBounded = d.allBounded && bounded
+	}
+	return nil, errors.New("dial failed")
 }
 
 func (d *recordingDialer) DialContext(context.Context, string, string) (net.Conn, error) {

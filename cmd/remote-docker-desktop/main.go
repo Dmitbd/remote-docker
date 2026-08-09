@@ -96,6 +96,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if err := runtimeOwner.BindLifecycle(machine, "dev"); err != nil {
+		return err
+	}
 	watchdogFactory, err := app.ProductionWatchdogFactory(executable)
 	if err != nil {
 		return err

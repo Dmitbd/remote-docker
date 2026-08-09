@@ -68,12 +68,15 @@ type localSyncLifecycle interface {
 // SSH child, Docker event reconciler, and relay state for one background agent.
 type AgentRuntime struct {
 	agent          *Agent
+	store          config.Store
+	sshConfigPath  string
 	restorer       *infrastructureRestorer
 	pairHost       *windowsPairingHost
 	ssh            *managedSSHRuntime
 	localSync      localSyncLifecycle
 	windowsBridge  localSyncLifecycle
 	windowsStopper managedWindowsRuntimeStopper
+	connection     connectionSessionRuntime
 	startupRecover func(context.Context) error
 
 	sessionMu      sync.Mutex
@@ -245,7 +248,8 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 		return err
 	}
 	return &AgentRuntime{
-		agent: agent, restorer: restorer, pairHost: pairHost, ssh: sshRuntime, localSync: localSync,
+		agent: agent, store: store, sshConfigPath: sshConfigPath,
+		restorer: restorer, pairHost: pairHost, ssh: sshRuntime, localSync: localSync,
 		windowsBridge: windowsBridge,
 		windowsStopper: func() managedWindowsRuntimeStopper {
 			if runtime.GOOS == "windows" {
@@ -259,6 +263,50 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 
 // Agent returns the concrete local API handler.
 func (r *AgentRuntime) Agent() *Agent { return r.agent }
+
+// BindLifecycle connects the production transport state to the product-facing
+// desktop machine. It must be called once before the session is started.
+func (r *AgentRuntime) BindLifecycle(machine *lifecycle.Machine, appVersion string) error {
+	if r == nil || machine == nil {
+		return errors.New("production lifecycle binding is incomplete")
+	}
+	r.sessionMu.Lock()
+	defer r.sessionMu.Unlock()
+	if r.sessionRunning {
+		return errors.New("production lifecycle cannot be rebound while running")
+	}
+	snapshot := machine.Snapshot()
+	if strings.TrimSpace(appVersion) == "" {
+		appVersion = "dev"
+	}
+	if snapshot.Role == lifecycle.RoleWindowsHost {
+		host, err := newHostConnectionRuntime(machine, windowsbridge.ManagedWSLOperations{}, time.Now)
+		if err != nil {
+			return err
+		}
+		r.connection = host
+		return nil
+	}
+	if snapshot.Role != lifecycle.RoleMacClient {
+		return errors.New("production lifecycle role is invalid")
+	}
+	r.connection = &clientConnectionRuntime{
+		machine: machine,
+		ready:   func() bool { return r.agent != nil && r.agent.Status().State == AgentReady },
+		clientDeviceID: func() string {
+			cfg, err := loadAgentConfig(r.store)
+			if err != nil {
+				return ""
+			}
+			return cfg.LocalSyncthingDeviceID
+		},
+		localName: snapshot.LocalName, appVersion: appVersion,
+		transport: func(ctx context.Context) (PresenceTransport, error) {
+			return newProductionSSHPresenceTransport(r.store, r.sshConfigPath), nil
+		},
+	}
+	return nil
+}
 
 // Start activates one owned runtime session. Construction alone never starts
 // infrastructure, which keeps a manually launched desktop application paused.
@@ -303,7 +351,7 @@ func (r *AgentRuntime) Start(parent context.Context, role lifecycle.Role) error 
 // Stop cancels the active session and waits for all Run-owned children. The
 // reason is intentionally typed even though current cleanup is identical;
 // Windows-specific graceful shutdown is added through the same boundary.
-func (r *AgentRuntime) Stop(ctx context.Context, _ lifecycle.StopReason) error {
+func (r *AgentRuntime) Stop(ctx context.Context, reason lifecycle.StopReason) error {
 	if r == nil {
 		return nil
 	}
@@ -313,12 +361,17 @@ func (r *AgentRuntime) Stop(ctx context.Context, _ lifecycle.StopReason) error {
 	r.sessionMu.Lock()
 	cancel := r.sessionCancel
 	wait := r.sessionWait
+	connection := r.connection
 	if cancel == nil || wait == nil {
 		r.sessionMu.Unlock()
 		return nil
 	}
-	cancel()
 	r.sessionMu.Unlock()
+	var presenceErr error
+	if connection != nil {
+		presenceErr = connection.Stop(ctx, reason)
+	}
+	cancel()
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -335,7 +388,7 @@ func (r *AgentRuntime) Stop(ctx context.Context, _ lifecycle.StopReason) error {
 		if r.windowsStopper != nil {
 			_, managedErr = r.windowsStopper.StopManagedRuntime(ctx)
 		}
-		return errors.Join(runtimeErr, managedErr)
+		return errors.Join(presenceErr, runtimeErr, managedErr)
 	}
 }
 
@@ -374,6 +427,11 @@ func (r *AgentRuntime) Run(ctx context.Context, interval time.Duration) error {
 		localSyncDone = make(chan error, 1)
 		go func() { localSyncDone <- r.localSync.Run(lifecycleCtx, interval) }()
 	}
+	var connectionDone chan error
+	if r.connection != nil {
+		connectionDone = make(chan error, 1)
+		go func() { connectionDone <- r.connection.Run(lifecycleCtx, interval) }()
+	}
 	var windowsBridgeDone chan error
 	if r.windowsBridge != nil {
 		windowsBridgeDone = make(chan error, 1)
@@ -386,7 +444,7 @@ func (r *AgentRuntime) Run(ctx context.Context, interval time.Duration) error {
 	}
 	_ = startupRecover(recoveryCtx)
 	cancel()
-	if localSyncDone == nil && windowsBridgeDone == nil {
+	if localSyncDone == nil && windowsBridgeDone == nil && connectionDone == nil {
 		return r.agent.Run(lifecycleCtx, interval)
 	}
 	agentDone := make(chan error, 1)
@@ -396,16 +454,25 @@ func (r *AgentRuntime) Run(ctx context.Context, interval time.Duration) error {
 		cancelLifecycle()
 		waitLifecycle(localSyncDone)
 		waitLifecycle(windowsBridgeDone)
+		waitLifecycle(connectionDone)
 		return err
 	case err := <-localSyncDone:
 		cancelLifecycle()
 		<-agentDone
 		waitLifecycle(windowsBridgeDone)
+		waitLifecycle(connectionDone)
 		return err
 	case err := <-windowsBridgeDone:
 		cancelLifecycle()
 		<-agentDone
 		waitLifecycle(localSyncDone)
+		waitLifecycle(connectionDone)
+		return err
+	case err := <-connectionDone:
+		cancelLifecycle()
+		<-agentDone
+		waitLifecycle(localSyncDone)
+		waitLifecycle(windowsBridgeDone)
 		return err
 	}
 }

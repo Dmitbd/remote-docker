@@ -6,6 +6,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -13,19 +15,62 @@ import (
 func TestRemoteSystemObservationIncludesNarrowDockerAndSyncthingHealth(t *testing.T) {
 	probes := &recordingRemoteHealthProbes{docker: true, syncthing: false}
 	observation, err := (remoteSystemOperations{
-		runner:    staticSystemdRunner{},
-		freeBytes: func(string) (uint64, error) { return minimumDiagnosticFreeBytes, nil },
-		probes:    probes,
+		runner:         staticSystemdRunner{},
+		freeBytes:      func(string) (uint64, error) { return minimumDiagnosticFreeBytes, nil },
+		probes:         probes,
+		presenceActive: func() bool { return true },
 	}).Observe(context.Background())
 	if err != nil {
 		t.Fatalf("Observe() error = %v", err)
 	}
 	if !observation.WSLRunning || !observation.SystemdTarget || !observation.DockerSocket ||
-		!observation.DiskAvailable || observation.SyncthingService {
+		!observation.DiskAvailable || observation.SyncthingService || !observation.PresenceActive {
 		t.Fatalf("observation = %#v", observation)
 	}
 	if probes.dockerCalls != 1 || probes.syncthingCalls != 1 {
 		t.Fatalf("probe calls docker=%d syncthing=%d, want one each", probes.dockerCalls, probes.syncthingCalls)
+	}
+}
+
+func TestPresenceProcessProbeMatchesOnlyDedicatedCommand(t *testing.T) {
+	for _, test := range []struct {
+		command []byte
+		want    bool
+	}{
+		{command: []byte("/usr/local/bin/remote-docker-remote\x00rpc\x00"), want: true},
+		{command: []byte("/usr/local/bin/remote-docker-remote\x00health\x00"), want: false},
+		{command: []byte("/tmp/remote-docker-remote-presence\x00"), want: false},
+		{command: []byte("/usr/local/bin/remote-docker-remote\x00rpc\x00extra\x00"), want: false},
+	} {
+		if got := isDedicatedPresenceCommand(test.command); got != test.want {
+			t.Fatalf("isDedicatedPresenceCommand(%q) = %v, want %v", test.command, got, test.want)
+		}
+	}
+}
+
+func TestPresenceMarkerRequiresLiveExactRPCProcessAndCleansUp(t *testing.T) {
+	root := t.TempDir()
+	marker := newProcessPresenceMarker(root, 4242)
+	if err := marker.Activate(); err != nil {
+		t.Fatalf("Activate() error = %v", err)
+	}
+	if !presenceMarkerActive(root, func(pid int) bool { return pid == 4242 }) {
+		t.Fatal("active presence marker was not observed")
+	}
+	second := newProcessPresenceMarker(root, 4343)
+	second.processActive = func(pid int) bool { return pid == 4242 }
+	if err := second.Activate(); err == nil {
+		t.Fatal("second live presence process claimed the one-client lease")
+	}
+	if presenceMarkerActive(root, func(int) bool { return false }) {
+		t.Fatal("stale presence marker was accepted")
+	}
+	if err := os.WriteFile(filepath.Join(root, "not-a-pid"), []byte("active\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	marker.Deactivate()
+	if presenceMarkerActive(root, func(int) bool { return true }) {
+		t.Fatal("deactivated or invalid presence marker was accepted")
 	}
 }
 

@@ -75,11 +75,22 @@ func (p *ClientPresence) Start(ctx context.Context, clientDeviceID, clientName, 
 	if err != nil || strings.TrimSpace(result.SessionID) == "" {
 		return ErrPresenceLease
 	}
-	if _, err := p.machine.Apply(lifecycle.Event{Type: lifecycle.EventConnectionStarted}); err != nil {
-		return err
+	snapshot := p.machine.Snapshot()
+	if snapshot.State != lifecycle.StateConnecting && snapshot.State != lifecycle.StateReconnecting {
+		if _, err := p.machine.Apply(lifecycle.Event{Type: lifecycle.EventConnectionStarted}); err != nil {
+			_ = p.transport.Disconnect(ctx, result.SessionID, string(lifecycle.ReasonRuntimeFailure))
+			return err
+		}
 	}
-	if _, err := p.machine.Apply(lifecycle.Event{Type: lifecycle.EventConnected}); err != nil {
-		return err
+	if result.DockerReady && result.SyncReady {
+		event := lifecycle.Event{Type: lifecycle.EventConnected}
+		if snapshot.State == lifecycle.StateReconnecting {
+			event.Type = lifecycle.EventNetworkRestored
+		}
+		if _, err := p.machine.Apply(event); err != nil {
+			_ = p.transport.Disconnect(ctx, result.SessionID, string(lifecycle.ReasonRuntimeFailure))
+			return err
+		}
 	}
 	p.sessionID = result.SessionID
 	p.sequence = 0
@@ -105,10 +116,17 @@ func (p *ClientPresence) Heartbeat(ctx context.Context) error {
 	if result.Terminal {
 		return p.finishLocked(ctx, lifecycle.InitiatorPeer, lifecycle.ReasonUserDisconnect)
 	}
-	if p.machine.Snapshot().State == lifecycle.StateReconnecting {
+	snapshot := p.machine.Snapshot()
+	ready := result.DockerReady && result.SyncReady
+	switch {
+	case ready && snapshot.State == lifecycle.StateConnecting:
+		_, err = p.machine.Apply(lifecycle.Event{Type: lifecycle.EventConnected, Latency: latency})
+	case ready && snapshot.State == lifecycle.StateReconnecting:
 		_, err = p.machine.Apply(lifecycle.Event{Type: lifecycle.EventNetworkRestored, Latency: latency})
-	} else {
+	case ready && snapshot.State == lifecycle.StateConnected:
 		_, err = p.machine.Apply(lifecycle.Event{Type: lifecycle.EventHeartbeat, Latency: latency})
+	case !ready && snapshot.State == lifecycle.StateConnected:
+		_, err = p.machine.Apply(lifecycle.Event{Type: lifecycle.EventNetworkLost})
 	}
 	return err
 }
@@ -123,6 +141,21 @@ func (p *ClientPresence) Disconnect(ctx context.Context) error {
 		return err
 	}
 	return p.finishLocked(ctx, lifecycle.InitiatorLocal, lifecycle.ReasonUserDisconnect)
+}
+
+// NotifyStop closes the authenticated remote lease while Supervisor owns the
+// local lifecycle transition. It deliberately does not apply a second stop
+// event to the state machine.
+func (p *ClientPresence) NotifyStop(ctx context.Context, reason lifecycle.ConnectionReason) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.sessionID == "" {
+		return nil
+	}
+	err := p.transport.Disconnect(ctx, p.sessionID, string(reason))
+	p.sessionID = ""
+	p.sequence = 0
+	return err
 }
 
 func (p *ClientPresence) finishLocked(ctx context.Context, initiator lifecycle.Initiator, reason lifecycle.ConnectionReason) error {
@@ -180,11 +213,14 @@ func (p *HostPresence) Hello(sessionID string, peer lifecycle.Peer) error {
 		return ErrPresenceLease
 	}
 	snapshot := p.machine.Snapshot()
-	if snapshot.Peer == nil || snapshot.TrustedPeers != 1 || snapshot.Peer.ID != peer.ID || snapshot.State != lifecycle.StateHostWaiting {
+	if snapshot.Peer == nil || snapshot.TrustedPeers != 1 || snapshot.Peer.ID != peer.ID ||
+		(snapshot.State != lifecycle.StateHostWaiting && snapshot.State != lifecycle.StateConnecting) {
 		return ErrPresenceLease
 	}
-	if _, err := p.machine.Apply(lifecycle.Event{Type: lifecycle.EventConnectionStarted}); err != nil {
-		return ErrPresenceLease
+	if snapshot.State == lifecycle.StateHostWaiting {
+		if _, err := p.machine.Apply(lifecycle.Event{Type: lifecycle.EventConnectionStarted}); err != nil {
+			return ErrPresenceLease
+		}
 	}
 	if _, err := p.machine.Apply(lifecycle.Event{Type: lifecycle.EventConnected}); err != nil {
 		return ErrPresenceLease

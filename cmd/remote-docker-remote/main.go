@@ -71,7 +71,8 @@ func main() {
 }
 
 func runRPC(input io.Reader, output, errorOutput io.Writer) int {
-	return runRPCWithAllOperations(input, output, errorOutput, defaultPairingRuntime(), remoteSystemOperations{}, defaultRemoteSyncRuntime())
+	marker := newProcessPresenceMarker(managedPresenceMarkerRoot, os.Getpid())
+	return runRPCWithPresenceMarker(input, output, errorOutput, defaultPairingRuntime(), remoteSystemOperations{}, defaultRemoteSyncRuntime(), marker)
 }
 
 func runRPCWithRuntime(input io.Reader, output, errorOutput io.Writer, pairingRuntime pairingRuntime) int {
@@ -94,6 +95,20 @@ func runRPCWithAllOperations(
 	diagnosticsRuntime remoteDiagnosticsRuntime,
 	syncRuntime remoteSyncRuntime,
 ) int {
+	return runRPCWithPresenceMarker(input, output, errorOutput, pairingRuntime, diagnosticsRuntime, syncRuntime, nil)
+}
+
+func runRPCWithPresenceMarker(
+	input io.Reader,
+	output, errorOutput io.Writer,
+	pairingRuntime pairingRuntime,
+	diagnosticsRuntime remoteDiagnosticsRuntime,
+	syncRuntime remoteSyncRuntime,
+	marker rpcPresenceMarker,
+) int {
+	if marker != nil {
+		defer marker.Deactivate()
+	}
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), 1<<20)
 	encoder := json.NewEncoder(output)
@@ -147,6 +162,7 @@ func runRPCWithAllOperations(
 						"docker_socket":     observation.DockerSocket,
 						"disk_available":    observation.DiskAvailable,
 						"syncthing_service": observation.SyncthingService,
+						"presence_active":   observation.PresenceActive,
 					}
 				}
 			}
@@ -173,10 +189,19 @@ func runRPCWithAllOperations(
 			var params presenceHelloParams
 			if decodeRPCParams(incoming.Params, &params) != nil {
 				outgoing.Error = &rpcError{Code: -32602, Message: "invalid params"}
-			} else if result, err := presence.Hello(context.Background(), params); err != nil {
-				outgoing.Error = &rpcError{Code: -32007, Message: "presence session unavailable"}
 			} else {
-				outgoing.Result = presenceRPCResult(result)
+				result, helloErr := presence.Hello(context.Background(), params)
+				if helloErr == nil && marker != nil {
+					helloErr = marker.Activate()
+					if helloErr != nil {
+						_ = presence.Disconnect(context.Background(), presenceDisconnectParams{SessionID: result.SessionID, Reason: "runtime_failure"})
+					}
+				}
+				if helloErr != nil {
+					outgoing.Error = &rpcError{Code: -32007, Message: "presence session unavailable"}
+				} else {
+					outgoing.Result = presenceRPCResult(result)
+				}
 			}
 		} else if incoming.Method == "presence.heartbeat" {
 			var params presenceHeartbeatParams
@@ -194,6 +219,9 @@ func runRPCWithAllOperations(
 			} else if err := presence.Disconnect(context.Background(), params); err != nil {
 				outgoing.Error = &rpcError{Code: -32009, Message: "presence disconnect rejected"}
 			} else {
+				if marker != nil {
+					marker.Deactivate()
+				}
 				outgoing.Result = map[string]any{"disconnected": true}
 			}
 		} else if incoming.Method == "metrics.sample" && len(incoming.Params) == 0 {

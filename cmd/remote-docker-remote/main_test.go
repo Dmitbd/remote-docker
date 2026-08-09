@@ -162,7 +162,7 @@ func TestRPCDiagnosticsExposeTypedObservationAndExactRecoveryOnly(t *testing.T) 
 	operations := &recordingRemoteDiagnostics{
 		observation: remoteDiagnosticObservation{
 			WSLRunning: true, SystemdTarget: true, DockerSocket: true,
-			DiskAvailable: true, SyncthingService: true,
+			DiskAvailable: true, SyncthingService: true, PresenceActive: true,
 		},
 	}
 	input := strings.NewReader(
@@ -180,7 +180,7 @@ func TestRPCDiagnosticsExposeTypedObservationAndExactRecoveryOnly(t *testing.T) 
 		t.Fatalf("decode observation: %v", err)
 	}
 	if observed.Error != nil || observed.Result["wsl_running"] != true || observed.Result["systemd_target"] != true ||
-		observed.Result["docker_socket"] != true || observed.Result["disk_available"] != true || observed.Result["syncthing_service"] != true {
+		observed.Result["docker_socket"] != true || observed.Result["disk_available"] != true || observed.Result["syncthing_service"] != true || observed.Result["presence_active"] != true {
 		t.Fatalf("observation response = %#v", observed)
 	}
 	var restarted response
@@ -198,6 +198,39 @@ func TestRPCDiagnosticsExposeTypedObservationAndExactRecoveryOnly(t *testing.T) 
 		t.Fatalf("arbitrary recovery response = %#v", rejected)
 	}
 }
+
+func TestDedicatedPresenceRPCAcceptsTypedHello(t *testing.T) {
+	input := strings.NewReader(
+		`{"jsonrpc":"2.0","id":41,"method":"presence.hello","params":{"client_device_id":"mac","client_name":"MacBook","app_version":"0.2.5"}}` + "\n",
+	)
+	var output bytes.Buffer
+	marker := &recordingPresenceMarker{}
+	if code := runRPCWithPresenceMarker(input, &output, &bytes.Buffer{}, pairingRuntime{}, remoteSystemOperations{
+		runner: staticSystemdRunner{}, freeBytes: func(string) (uint64, error) { return minimumDiagnosticFreeBytes, nil },
+		probes: &recordingRemoteHealthProbes{docker: true, syncthing: true},
+	}, nil, marker); code != 0 {
+		t.Fatalf("presence command code = %d", code)
+	}
+	var hello response
+	if err := json.NewDecoder(&output).Decode(&hello); err != nil {
+		t.Fatal(err)
+	}
+	if hello.Error != nil || hello.Result["session_id"] == "" || hello.Result["docker_ready"] != true || hello.Result["sync_ready"] != true {
+		t.Fatalf("hello response = %#v", hello)
+	}
+	if marker.activations != 1 || marker.deactivations != 1 {
+		t.Fatalf("marker activations=%d deactivations=%d, want 1/1", marker.activations, marker.deactivations)
+	}
+}
+
+type recordingPresenceMarker struct {
+	activations   int
+	deactivations int
+	err           error
+}
+
+func (m *recordingPresenceMarker) Activate() error { m.activations++; return m.err }
+func (m *recordingPresenceMarker) Deactivate()     { m.deactivations++ }
 
 func TestRPCRuntimeStopContainersUsesOnlyTypedLifecycleOperation(t *testing.T) {
 	operations := &recordingRemoteDiagnostics{}

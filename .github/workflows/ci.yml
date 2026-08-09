@@ -116,7 +116,7 @@ jobs:
         shell: pwsh
         run: >-
           ./packaging/windows/build-installer.ps1
-          -Version 0.2.4
+          -Version 0.2.5
           -RootfsPath dist/remote-docker-rootfs.tar.zst
 
       - name: Confirm the development installer is unsigned

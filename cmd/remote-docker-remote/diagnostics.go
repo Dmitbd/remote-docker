@@ -14,6 +14,7 @@ type remoteDiagnosticObservation struct {
 	DockerSocket     bool `json:"docker_socket"`
 	DiskAvailable    bool `json:"disk_available"`
 	SyncthingService bool `json:"syncthing_service"`
+	PresenceActive   bool `json:"presence_active"`
 }
 
 type remoteDiagnosticsRuntime interface {
@@ -33,9 +34,10 @@ type systemdRunner interface {
 }
 
 type remoteSystemOperations struct {
-	runner    systemdRunner
-	freeBytes func(string) (uint64, error)
-	probes    remoteHealthProbes
+	runner         systemdRunner
+	freeBytes      func(string) (uint64, error)
+	probes         remoteHealthProbes
+	presenceActive func() bool
 }
 
 func (o remoteSystemOperations) Observe(ctx context.Context) (remoteDiagnosticObservation, error) {
@@ -56,12 +58,17 @@ func (o remoteSystemOperations) Observe(ctx context.Context) (remoteDiagnosticOb
 	if probes == nil {
 		probes = remoteServiceProbes{}
 	}
+	presenceActive := o.presenceActive
+	if presenceActive == nil {
+		presenceActive = dedicatedPresenceProcessActive
+	}
 	return remoteDiagnosticObservation{
 		WSLRunning:       true,
 		SystemdTarget:    active,
 		DockerSocket:     probes.DockerSocketHealthy(ctx),
 		DiskAvailable:    available >= minimumDiagnosticFreeBytes,
 		SyncthingService: probes.SyncthingServiceHealthy(ctx),
+		PresenceActive:   presenceActive(),
 	}, nil
 }
 
