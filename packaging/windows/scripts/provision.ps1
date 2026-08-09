@@ -5,6 +5,7 @@ param(
     [Parameter(Mandatory = $true)][string]$DataRoot,
     [Parameter(Mandatory = $true)][string]$ProgressPath,
     [Parameter(Mandatory = $true)][string]$LogPath,
+    [ValidateRange(1024, 65535)][int]$PairingPort = 49221,
     [ValidateRange(1024, 65535)][int]$SshBridgePort = 49222,
     [ValidateRange(1024, 65535)][int]$SyncthingBridgePort = 49220
 )
@@ -236,6 +237,7 @@ try {
 
     Write-RemoteDockerProvisionStatus -ProgressPath $ProgressPath -Phase 'firewall' -State 'started' -Message 'Restricting access to the private local network.'
     $firewallRules = @(
+        @{ Name = 'RemoteDocker.Managed.Pairing'; DisplayName = 'Remote Docker Managed Pairing'; Port = $PairingPort },
         @{ Name = 'RemoteDocker.Managed.SSH'; DisplayName = 'Remote Docker Managed SSH'; Port = $SshBridgePort },
         @{ Name = 'RemoteDocker.Managed.Syncthing'; DisplayName = 'Remote Docker Managed Syncthing'; Port = $SyncthingBridgePort }
     )

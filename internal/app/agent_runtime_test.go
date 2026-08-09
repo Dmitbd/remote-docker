@@ -625,7 +625,7 @@ func (s *runtimeRelaySink) Calls() int {
 	return int(s.calls.Load())
 }
 
-func TestWindowsPairingHostRetriesAndPublishesOnReachableLANInterface(t *testing.T) {
+func TestWindowsPairingHostRetriesAndPublishesOnFirewallApprovedLANPort(t *testing.T) {
 	host, err := newWindowsPairingHost(runtimePairingInstaller{})
 	if err != nil {
 		t.Fatalf("newWindowsPairingHost() error = %v", err)
@@ -671,8 +671,8 @@ func TestWindowsPairingHostRetriesAndPublishesOnReachableLANInterface(t *testing
 		t.Fatal("pairing host did not stop after cancellation")
 	}
 
-	if listenAddress != ":0" {
-		t.Fatalf("pairing listen address = %q, want wildcard ephemeral port", listenAddress)
+	if listenAddress != ":49221" {
+		t.Fatalf("pairing listen address = %q, want firewall-approved port", listenAddress)
 	}
 	if publisher.calls.Load() != 2 {
 		t.Fatalf("publish calls = %d, want one failure and one retry", publisher.calls.Load())

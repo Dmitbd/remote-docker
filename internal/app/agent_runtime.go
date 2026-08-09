@@ -49,6 +49,7 @@ const (
 	pairingHostMinRetryBackoff   = 250 * time.Millisecond
 	pairingHostMaxRetryBackoff   = 5 * time.Second
 	pairingHostRepublishInterval = 30 * time.Second
+	windowsPairingListenAddress  = ":49221"
 )
 
 // ProductionAgentOptions identifies the installed executable and persisted
@@ -1131,7 +1132,7 @@ func (h *windowsPairingHost) serve(
 	if listen == nil {
 		listen = net.Listen
 	}
-	listener, err := listen("tcp", ":0")
+	listener, err := listen("tcp", windowsPairingListenAddress)
 	if err != nil {
 		return false
 	}

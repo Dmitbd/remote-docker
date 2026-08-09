@@ -75,7 +75,7 @@ if (Test-Path -LiteralPath $desktopExecutable -PathType Leaf) {
     & $desktopExecutable --shutdown
 }
 
-foreach ($ruleName in @('RemoteDocker.Managed.SSH', 'RemoteDocker.Managed.Syncthing')) {
+foreach ($ruleName in @('RemoteDocker.Managed.Pairing', 'RemoteDocker.Managed.SSH', 'RemoteDocker.Managed.Syncthing')) {
     $existingRule = Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue
     if ($null -eq $existingRule) {
         continue

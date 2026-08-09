@@ -141,6 +141,7 @@ Describe 'Windows Setup EXE contract' {
         $script | Should -Match '\[string\]\$DataRoot'
         $script | Should -Match '\[string\]\$ProgressPath'
         $script | Should -Match '\[string\]\$LogPath'
+        $script | Should -Match '\[int\]\$PairingPort\s*=\s*49221'
         $script | Should -Match 'Join-Path \$PSScriptRoot ''path-validation\.ps1'''
         $script | Should -Match 'FileAttributes\]::ReparsePoint'
         $script | Should -Match 'Join-Path \$ApplicationRoot ''RemoteDocker\.exe'''
@@ -153,6 +154,7 @@ Describe 'Windows Setup EXE contract' {
         $script | Should -Match '-Profile\s+Private'
         $script | Should -Match '-Program\s+\$desktopExecutable'
         $script | Should -Match '-RemoteAddress\s+LocalSubnet'
+        $script | Should -Match 'Name = ''RemoteDocker\.Managed\.Pairing''; DisplayName = ''Remote Docker Managed Pairing''; Port = \$PairingPort'
         $script | Should -Match "(?s)Invoke-External.*'wsl\.exe'.*'--terminate'"
         $rootCheck | Should -BeGreaterThan -1
         $import | Should -BeGreaterThan $rootCheck
@@ -227,6 +229,7 @@ Describe 'Windows Setup EXE contract' {
         $script | Should -Match 'RemoteDocker\.exe'
         $script | Should -Match '--shutdown'
         $script | Should -Match '--delete-wsl-credential'
+        $script | Should -Match '''RemoteDocker\.Managed\.Pairing'''
         $script | Should -Match 'ValidateSet\(''DELETE-REMOTE-DOCKER-DATA''\)'
         $script | Should -Match 'remote-docker-managed-v1'
         $script | Should -Match 'FileAttributes\]::ReparsePoint'
