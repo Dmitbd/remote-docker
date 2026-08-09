@@ -67,6 +67,25 @@ func TestControllerReadsCandidatesAndPollsPairingWithoutManualCode(t *testing.T)
 	}
 }
 
+func TestControllerReadsWorkspacesAndDiagnostics(t *testing.T) {
+	handler := &recordingHandler{results: map[localapi.Method]any{
+		localapi.MethodWorkspaceList: localapi.WorkspaceListResult{Workspaces: []localapi.Workspace{{ID: "one", Path: "/project"}}},
+		localapi.MethodDoctor: localapi.DoctorResult{Checks: []localapi.DoctorCheck{{Name: "docker", OK: true}}},
+	}}
+	controller := NewController(handler, func() lifecycle.Snapshot { return lifecycle.Snapshot{} })
+	workspaces, err := controller.Workspaces(context.Background())
+	if err != nil || len(workspaces) != 1 || workspaces[0].ID != "one" {
+		t.Fatalf("Workspaces() = %#v, %v", workspaces, err)
+	}
+	checks, err := controller.Diagnostics(context.Background())
+	if err != nil || len(checks) != 1 || !checks[0].OK {
+		t.Fatalf("Diagnostics() = %#v, %v", checks, err)
+	}
+	if err := controller.RemoveWorkspace(context.Background(), "one"); err != nil || handler.method != localapi.MethodWorkspaceRemove {
+		t.Fatalf("RemoveWorkspace() method=%s error=%v", handler.method, err)
+	}
+}
+
 type recordingHandler struct {
 	method localapi.Method
 	params json.RawMessage

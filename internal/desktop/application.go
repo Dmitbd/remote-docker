@@ -9,6 +9,7 @@ import (
 	"fyne.io/fyne/v2"
 	fyneapp "fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	desktopdriver "fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
@@ -44,6 +45,9 @@ type Application struct {
 	role     *widget.Label
 	lastPairNotification string
 	candidates []localapi.PairingCandidate
+	workspaces []localapi.Workspace
+	checks []localapi.DoctorCheck
+	lastDiagnosticsPoll time.Time
 }
 
 func NewApplication(options ApplicationOptions) (*Application, error) {
@@ -116,6 +120,34 @@ func (a *Application) pollOnce(ctx context.Context) {
 		a.candidates = nil
 		a.mu.Unlock()
 	}
+	a.mu.Lock()
+	selected := a.selected
+	lastDiagnosticsPoll := a.lastDiagnosticsPoll
+	if selected == SectionDiagnostics && time.Since(lastDiagnosticsPoll) >= 10*time.Second {
+		a.lastDiagnosticsPoll = time.Now()
+	}
+	a.mu.Unlock()
+	if selected == SectionWorkspaces {
+		pollCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+		workspaces, err := a.controller.Workspaces(pollCtx)
+		cancel()
+		if err == nil {
+			a.mu.Lock()
+			a.workspaces = append([]localapi.Workspace(nil), workspaces...)
+			a.mu.Unlock()
+			fyne.Do(func() { a.render(a.snapshot()) })
+		}
+	} else if selected == SectionDiagnostics && time.Since(lastDiagnosticsPoll) >= 10*time.Second {
+		pollCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		checks, err := a.controller.Diagnostics(pollCtx)
+		cancel()
+		if err == nil {
+			a.mu.Lock()
+			a.checks = append([]localapi.DoctorCheck(nil), checks...)
+			a.mu.Unlock()
+			fyne.Do(func() { a.render(a.snapshot()) })
+		}
+	}
 }
 
 func (a *Application) Show() {
@@ -182,6 +214,38 @@ func (a *Application) render(snapshot lifecycle.Snapshot) {
 		navigation.Add(button)
 	}
 
+	var body *fyne.Container
+	switch model.Selected {
+	case SectionWorkspaces:
+		body = a.workspaceBody()
+	case SectionDiagnostics:
+		body = a.diagnosticsBody()
+	case SectionResources:
+		body = container.NewVBox(widget.NewLabel("Нагрузка"), widget.NewLabel("Показатели появятся после подключения."))
+	default:
+		body = a.connectionBody(model, snapshot)
+	}
+
+	var quit Action
+	for _, action := range model.Actions {
+		if action.ID == ActionQuit {
+			quit = action
+		}
+	}
+
+	quitButton := widget.NewButtonWithIcon(quit.Label, theme.LogoutIcon(), func() { a.perform(ActionQuit, "") })
+	quitButton.Importance = widget.DangerImportance
+	if !quit.Enabled {
+		quitButton.Disable()
+	}
+	footer := container.NewBorder(nil, nil, nil, quitButton, layout.NewSpacer())
+	a.content.Objects = []fyne.CanvasObject{container.NewBorder(header, footer, nil, nil, container.NewVBox(navigation, widget.NewSeparator(), body))}
+	a.content.Refresh()
+	a.window.SetContent(a.content)
+	a.configureTray()
+}
+
+func (a *Application) connectionBody(model ViewModel, snapshot lifecycle.Snapshot) *fyne.Container {
 	headline := widget.NewLabel(model.Headline)
 	headline.TextStyle = fyne.TextStyle{Bold: true}
 	detail := widget.NewLabel(model.Detail)
@@ -216,9 +280,8 @@ func (a *Application) render(snapshot lifecycle.Snapshot) {
 	if model.Countdown != "" {
 		body.Add(widget.NewLabel("До безопасной остановки: " + model.Countdown))
 	}
-	metrics := []string{model.ConnectionCount, model.Latency, model.Docker, model.Sync}
 	metricRow := container.NewHBox()
-	for _, metric := range metrics {
+	for _, metric := range []string{model.ConnectionCount, model.Latency, model.Docker, model.Sync} {
 		if metric != "" {
 			metricRow.Add(widget.NewLabel(metric))
 		}
@@ -226,19 +289,15 @@ func (a *Application) render(snapshot lifecycle.Snapshot) {
 	if len(metricRow.Objects) > 0 {
 		body.Add(metricRow)
 	}
-
 	actions := container.NewHBox()
-	var quit Action
 	for _, action := range model.Actions {
 		if action.ID == ActionQuit {
-			quit = action
 			continue
 		}
 		action := action
 		button := widget.NewButton(action.Label, func() { a.perform(action.ID, "") })
-		button.Disable()
-		if action.Enabled {
-			button.Enable()
+		if !action.Enabled {
+			button.Disable()
 		}
 		if action.Destructive {
 			button.Importance = widget.DangerImportance
@@ -248,17 +307,56 @@ func (a *Application) render(snapshot lifecycle.Snapshot) {
 		actions.Add(button)
 	}
 	body.Add(actions)
+	return body
+}
 
-	quitButton := widget.NewButtonWithIcon(quit.Label, theme.LogoutIcon(), func() { a.perform(ActionQuit, "") })
-	quitButton.Importance = widget.DangerImportance
-	if !quit.Enabled {
-		quitButton.Disable()
+func (a *Application) workspaceBody() *fyne.Container {
+	title := widget.NewLabel("Проекты")
+	title.TextStyle = fyne.TextStyle{Bold: true}
+	add := widget.NewButton("Добавить папку проекта", func() {
+		picker := dialog.NewFolderOpen(func(folder fyne.ListableURI, err error) {
+			if err != nil || folder == nil {
+				return
+			}
+			a.perform(ActionAddWorkspace, folder.Path())
+		}, a.window)
+		picker.Show()
+	})
+	add.Importance = widget.HighImportance
+	body := container.NewVBox(title, widget.NewLabel("Папки остаются на Mac, а Docker получает их синхронизированную копию на Windows."), add)
+	if len(a.workspaces) == 0 {
+		body.Add(widget.NewLabel("Проекты ещё не добавлены"))
 	}
-	footer := container.NewBorder(nil, nil, nil, quitButton, layout.NewSpacer())
-	a.content.Objects = []fyne.CanvasObject{container.NewBorder(header, footer, nil, nil, container.NewVBox(navigation, widget.NewSeparator(), body))}
-	a.content.Refresh()
-	a.window.SetContent(a.content)
-	a.configureTray()
+	for _, workspace := range a.workspaces {
+		workspace := workspace
+		remove := widget.NewButton("Удалить", func() {
+			go func() { _ = a.controller.RemoveWorkspace(context.Background(), workspace.ID) }()
+		})
+		remove.Importance = widget.DangerImportance
+		body.Add(container.NewBorder(nil, nil, widget.NewLabel(workspace.Path), remove))
+	}
+	return body
+}
+
+func (a *Application) diagnosticsBody() *fyne.Container {
+	title := widget.NewLabel("Диагностика")
+	title.TextStyle = fyne.TextStyle{Bold: true}
+	body := container.NewVBox(title, widget.NewLabel("Здесь показаны только безопасные проверки Remote Docker."))
+	if len(a.checks) == 0 {
+		body.Add(widget.NewLabel("Проверки ещё не запускались"))
+	}
+	for _, check := range a.checks {
+		state := "Нужна помощь"
+		if check.OK {
+			state = "Готово"
+		}
+		text := check.Name + " — " + state
+		if check.Message != "" {
+			text += ": " + check.Message
+		}
+		body.Add(widget.NewLabel(text))
+	}
+	return body
 }
 
 func (a *Application) perform(action ActionID, value string) {

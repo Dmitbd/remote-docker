@@ -72,6 +72,36 @@ func (c *Controller) PollPairing(ctx context.Context) (localapi.PairingStatusRes
 	return status, nil
 }
 
+func (c *Controller) Workspaces(ctx context.Context) ([]localapi.Workspace, error) {
+	result, err := c.handler.Handle(ctx, localapi.MethodWorkspaceList, nil)
+	if err != nil {
+		return nil, err
+	}
+	workspaces, ok := result.(localapi.WorkspaceListResult)
+	if !ok {
+		return nil, errors.New("workspace list returned an invalid response")
+	}
+	return append([]localapi.Workspace(nil), workspaces.Workspaces...), nil
+}
+
+func (c *Controller) RemoveWorkspace(ctx context.Context, id string) error {
+	raw, _ := json.Marshal(localapi.WorkspaceRemoveParams{ID: strings.TrimSpace(id)})
+	_, err := c.handler.Handle(ctx, localapi.MethodWorkspaceRemove, raw)
+	return err
+}
+
+func (c *Controller) Diagnostics(ctx context.Context) ([]localapi.DoctorCheck, error) {
+	result, err := c.handler.Handle(ctx, localapi.MethodDoctor, nil)
+	if err != nil {
+		return nil, err
+	}
+	diagnostics, ok := result.(localapi.DoctorResult)
+	if !ok {
+		return nil, errors.New("diagnostics returned an invalid response")
+	}
+	return append([]localapi.DoctorCheck(nil), diagnostics.Checks...), nil
+}
+
 func (c *Controller) resolve(action ActionID, value string) (localapi.Method, any, bool) {
 	switch action {
 	case ActionEnableClient, ActionEnableHost:
