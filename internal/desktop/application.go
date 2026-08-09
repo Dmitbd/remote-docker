@@ -3,6 +3,7 @@ package desktop
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
 	"github.com/Dmitbd/remote-docker/internal/localapi"
+	productassets "github.com/Dmitbd/remote-docker/internal/assets"
 )
 
 const applicationID = "io.github.dmitbd.remote-docker"
@@ -36,6 +38,7 @@ type Application struct {
 	snapshot   SnapshotProvider
 	updates    <-chan lifecycle.Snapshot
 	icon       fyne.Resource
+	trayIcon   fyne.Resource
 	onQuit     func()
 
 	mu       sync.Mutex
@@ -191,6 +194,7 @@ func (a *Application) render(snapshot lifecycle.Snapshot) {
 		})
 	}
 	model := BuildViewModel(snapshot, a.selected, time.Now())
+	a.trayIcon = fyne.NewStaticResource("remote-docker-tray.png", productassets.TrayIcon(runtime.GOOS, productassets.TrayStateFor(snapshot)))
 	a.status.SetText(model.Status)
 	a.status.TextStyle = fyne.TextStyle{Bold: true}
 	a.role.SetText(model.Role)
@@ -386,7 +390,9 @@ func (a *Application) configureTray() {
 		fyne.NewMenuItem("Завершить работу", func() { a.perform(ActionQuit, "") }),
 	)
 	desktopApp.SetSystemTrayMenu(menu)
-	if a.icon != nil {
+	if a.trayIcon != nil {
+		desktopApp.SetSystemTrayIcon(a.trayIcon)
+	} else if a.icon != nil {
 		desktopApp.SetSystemTrayIcon(a.icon)
 	}
 	desktopApp.SetSystemTrayWindow(a.window)

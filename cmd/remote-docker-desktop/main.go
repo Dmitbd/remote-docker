@@ -12,7 +12,9 @@ import (
 	"sync"
 	"time"
 
+	"fyne.io/fyne/v2"
 	"github.com/Dmitbd/remote-docker/internal/app"
+	productassets "github.com/Dmitbd/remote-docker/internal/assets"
 	"github.com/Dmitbd/remote-docker/internal/config"
 	"github.com/Dmitbd/remote-docker/internal/desktop"
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
@@ -112,6 +114,7 @@ func run() error {
 	uiController := desktop.NewController(controller, machine.Snapshot)
 	application, err := desktop.NewApplication(desktop.ApplicationOptions{
 		Controller: uiController, Snapshot: machine.Snapshot, Updates: updates,
+		Icon: fyne.NewStaticResource("remote-docker.png", productassets.AppIcon()),
 		OnQuit: func() {
 			cancel()
 			_ = listener.Close()
