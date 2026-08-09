@@ -12,8 +12,19 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Dmitbd/remote-docker/internal/metrics"
 	"golang.org/x/crypto/ssh"
 )
+
+func TestMetricsResultMapPreservesAvailabilityInsteadOfInventingZero(t *testing.T) {
+	result := metricsResultMap(metrics.RemoteSample{
+		DockerContainers: metrics.Unavailable[int]("Docker is stopped"),
+	})
+	containers, ok := result["docker_containers"].(map[string]any)
+	if !ok || containers["available"] != false || containers["reason"] != "Docker is stopped" {
+		t.Fatalf("metrics result = %#v", result)
+	}
+}
 
 func TestRPCHealthAndMethodAllowlist(t *testing.T) {
 	input := strings.NewReader(

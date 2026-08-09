@@ -81,6 +81,13 @@ func TestBuildViewModelExplainsWhoEndedTheConnection(t *testing.T) {
 	}
 }
 
+func TestResourceRoleLabelsExplainWhereDockerRuns(t *testing.T) {
+	roles := ResourceRoleLabels()
+	if roles.Mac != "Mac передаёт исходники и команды" || roles.Windows != "Windows выполняет Docker-нагрузку" {
+		t.Fatalf("ResourceRoleLabels() = %#v", roles)
+	}
+}
+
 func hasViewAction(actions []Action, id ActionID) bool {
 	for _, action := range actions {
 		if action.ID == id {

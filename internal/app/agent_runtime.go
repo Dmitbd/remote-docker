@@ -29,6 +29,7 @@ import (
 	"github.com/Dmitbd/remote-docker/internal/dockercli"
 	"github.com/Dmitbd/remote-docker/internal/localapi"
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
+	"github.com/Dmitbd/remote-docker/internal/metrics"
 	"github.com/Dmitbd/remote-docker/internal/pairing"
 	"github.com/Dmitbd/remote-docker/internal/portrelay"
 	"github.com/Dmitbd/remote-docker/internal/provision"
@@ -213,10 +214,15 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 			remote: sshRemoteSync{store: store, sshConfigPath: sshConfigPath},
 		}
 	}
+	var remoteMetrics metrics.RemoteSampler
+	if runtime.GOOS != "windows" {
+		remoteMetrics = sshRemoteMetrics{store: store, sshConfigPath: sshConfigPath}
+	}
 	controller := &productionAgentController{
 		store: store, pairing: pairingCoordinator,
 		sync:           syncInspector,
 		dockerPreparer: &productionDockerPreparer{store: store, sync: syncReadiness},
+		metrics:        metrics.NewCollector(metrics.Options{Remote: remoteMetrics}),
 	}
 	agent := NewAgent(observer, restorer, controller)
 	controller.diagnostics = newProductionDiagnosticsWithOptions(productionDiagnosticsOptions{
@@ -440,6 +446,7 @@ type productionAgentController struct {
 	sync           productionSyncInspector
 	dockerPreparer dockerPreparer
 	diagnostics    productionDiagnostics
+	metrics        *metrics.Collector
 	afterPair      func(context.Context)
 	mu             sync.Mutex
 }
@@ -591,6 +598,15 @@ func (c *productionAgentController) Handle(ctx context.Context, method localapi.
 		return localapi.RecoverResult{
 			State: string(status.State), Message: status.Message, Attempts: attempts,
 		}, nil
+	case localapi.MethodResourceStatus:
+		if c.metrics == nil {
+			return nil, unavailable("resource monitoring is unavailable")
+		}
+		params := localapi.ResourceStatusParams{}
+		if err := decodeOptionalControlParams(raw, &params); err != nil {
+			return nil, err
+		}
+		return c.metrics.Sample(ctx, params.Active), nil
 	default:
 		return nil, &localapi.PublicError{Code: localapi.ErrorInvalidRequest, Message: "unsupported agent operation"}
 	}

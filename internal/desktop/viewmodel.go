@@ -64,6 +64,18 @@ type ViewModel struct {
 	Actions         []Action
 }
 
+type ResourceRoles struct {
+	Mac     string
+	Windows string
+}
+
+func ResourceRoleLabels() ResourceRoles {
+	return ResourceRoles{
+		Mac:     "Mac передаёт исходники и команды",
+		Windows: "Windows выполняет Docker-нагрузку",
+	}
+}
+
 func BuildViewModel(snapshot lifecycle.Snapshot, selected Section, now time.Time) ViewModel {
 	if selected == "" {
 		selected = SectionConnection

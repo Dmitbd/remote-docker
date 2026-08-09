@@ -196,6 +196,8 @@ func runRPCWithAllOperations(
 			} else {
 				outgoing.Result = map[string]any{"disconnected": true}
 			}
+		} else if incoming.Method == "metrics.sample" && len(incoming.Params) == 0 {
+			outgoing.Result = metricsResultMap(collectManagedRuntimeMetrics(context.Background()))
 		} else if incoming.Method == "sync.configure" {
 			var params remoteSyncConfigureParams
 			if syncRuntime == nil || decodeRPCParams(incoming.Params, &params) != nil {
@@ -239,6 +241,16 @@ func runRPCWithAllOperations(
 		return 1
 	}
 	return 0
+}
+
+func metricsResultMap(sample any) map[string]any {
+	encoded, err := json.Marshal(sample)
+	if err != nil {
+		return map[string]any{}
+	}
+	result := map[string]any{}
+	_ = json.Unmarshal(encoded, &result)
+	return result
 }
 
 func presenceRPCResult(result presenceResult) map[string]any {

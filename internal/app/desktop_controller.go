@@ -120,7 +120,10 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 		}
 		return c.delegate(ctx, method, raw)
 	case localapi.MethodResourceStatus:
-		return nil, unavailable("resource monitoring is not available yet")
+		snapshot := c.supervisor.Snapshot()
+		active := snapshot.State == lifecycle.StateConnected || snapshot.State == lifecycle.StateConnecting || snapshot.State == lifecycle.StateReconnecting
+		params, _ := json.Marshal(localapi.ResourceStatusParams{Active: active})
+		return c.delegate(ctx, method, params)
 	default:
 		return c.delegate(ctx, method, raw)
 	}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	"github.com/Dmitbd/remote-docker/internal/metrics"
 )
 
 const CurrentSchemaVersion = 4
@@ -167,6 +169,12 @@ type LifecycleActionResult struct {
 type ShutdownResult struct {
 	Stopped bool `json:"stopped"`
 }
+
+type ResourceStatusParams struct {
+	Active bool `json:"active"`
+}
+
+type ResourceStatusResult = metrics.Sample
 
 type Device struct {
 	ID      string `json:"id"`

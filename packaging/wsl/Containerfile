@@ -4,6 +4,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 COPY cmd/remote-docker-remote ./cmd/remote-docker-remote
 COPY internal/credentials ./internal/credentials
+COPY internal/metrics ./internal/metrics
 COPY internal/syncer ./internal/syncer
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath -ldflags='-s -w' -o /out/remote-docker-remote ./cmd/remote-docker-remote

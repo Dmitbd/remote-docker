@@ -17,6 +17,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
 	"github.com/Dmitbd/remote-docker/internal/localapi"
+	"github.com/Dmitbd/remote-docker/internal/metrics"
 	productassets "github.com/Dmitbd/remote-docker/internal/assets"
 )
 
@@ -50,6 +51,7 @@ type Application struct {
 	candidates []localapi.PairingCandidate
 	workspaces []localapi.Workspace
 	checks []localapi.DoctorCheck
+	resources metrics.Sample
 	lastDiagnosticsPoll time.Time
 }
 
@@ -150,6 +152,16 @@ func (a *Application) pollOnce(ctx context.Context) {
 			a.mu.Unlock()
 			fyne.Do(func() { a.render(a.snapshot()) })
 		}
+	} else if selected == SectionResources {
+		pollCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		resources, err := a.controller.Resources(pollCtx)
+		cancel()
+		if err == nil {
+			a.mu.Lock()
+			a.resources = resources
+			a.mu.Unlock()
+			fyne.Do(func() { a.render(a.snapshot()) })
+		}
 	}
 }
 
@@ -225,7 +237,7 @@ func (a *Application) render(snapshot lifecycle.Snapshot) {
 	case SectionDiagnostics:
 		body = a.diagnosticsBody()
 	case SectionResources:
-		body = container.NewVBox(widget.NewLabel("Нагрузка"), widget.NewLabel("Показатели появятся после подключения."))
+		body = a.resourcesBody()
 	default:
 		body = a.connectionBody(model, snapshot)
 	}

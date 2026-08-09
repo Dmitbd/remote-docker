@@ -102,6 +102,21 @@ func (c *Controller) Diagnostics(ctx context.Context) ([]localapi.DoctorCheck, e
 	return append([]localapi.DoctorCheck(nil), diagnostics.Checks...), nil
 }
 
+func (c *Controller) Resources(ctx context.Context) (localapi.ResourceStatusResult, error) {
+	if c == nil || c.handler == nil {
+		return localapi.ResourceStatusResult{}, errors.New("desktop controller is unavailable")
+	}
+	result, err := c.handler.Handle(ctx, localapi.MethodResourceStatus, nil)
+	if err != nil {
+		return localapi.ResourceStatusResult{}, err
+	}
+	resources, ok := result.(localapi.ResourceStatusResult)
+	if !ok {
+		return localapi.ResourceStatusResult{}, errors.New("resource status returned an invalid response")
+	}
+	return resources, nil
+}
+
 func (c *Controller) resolve(action ActionID, value string) (localapi.Method, any, bool) {
 	switch action {
 	case ActionEnableClient, ActionEnableHost:
