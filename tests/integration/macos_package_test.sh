@@ -43,11 +43,9 @@ export REMOTE_DOCKER_NOTARY_KEYCHAIN_PROFILE="PACKAGE_TEST_SECRET_NOTARY_PROFILE
 payload="${test_root}/layout/payload"
 scripts="${test_root}/layout/scripts"
 app="${payload}/Applications/Remote Docker.app"
-agent_app="${app}/Contents/Library/LoginItems/Remote Docker Agent.app"
 libexec="${payload}/usr/local/libexec/remote-docker"
 
-assert_executable "${app}/Contents/MacOS/remote-docker-tray"
-assert_executable "${agent_app}/Contents/MacOS/remote-docker-agent"
+assert_executable "${app}/Contents/MacOS/remote-docker-desktop"
 assert_executable "${payload}/usr/local/bin/remote-docker"
 assert_executable "${libexec}/bin/docker"
 assert_executable "${libexec}/docker-real"
@@ -58,32 +56,21 @@ assert_executable "${libexec}/uninstall"
 assert_executable "${app}/Contents/libexec/remote-docker/docker-real"
 assert_executable "${app}/Contents/libexec/remote-docker/ssh-bin/ssh"
 [[ ! -e "${libexec}/bin/ssh" ]] || fail "SSH adapter must not shadow the user's normal ssh command"
-assert_file "${payload}/Library/LaunchAgents/io.github.dmitbd.remote-docker.agent.plist"
+assert_file "${app}/Contents/Resources/remote-docker.icns"
+[[ ! -d "${app}/Contents/Library/LoginItems" ]] || fail "manual application contains a LoginItems helper"
+[[ ! -d "${payload}/Library/LaunchAgents" ]] || fail "manual package contains a LaunchAgent directory"
 assert_file "${payload}/etc/paths.d/remote-docker"
 
 /usr/bin/plutil -lint "${app}/Contents/Info.plist" >/dev/null
 assert_plist_value "${app}/Contents/Info.plist" CFBundleIdentifier io.github.dmitbd.remote-docker
-assert_plist_value "${app}/Contents/Info.plist" CFBundleExecutable remote-docker-tray
-assert_plist_value "${app}/Contents/Info.plist" LSUIElement true
+assert_plist_value "${app}/Contents/Info.plist" CFBundleExecutable remote-docker-desktop
+assert_plist_value "${app}/Contents/Info.plist" CFBundleIconFile remote-docker.icns
+if /usr/bin/plutil -extract LSUIElement raw -o - "${app}/Contents/Info.plist" >/dev/null 2>&1; then
+  fail "manual application must open a normal window instead of acting as a UIElement-only helper"
+fi
 assert_plist_value "${app}/Contents/Info.plist" NSBonjourServices.0 _remote-docker._tcp
 local_network_usage="$(/usr/bin/plutil -extract NSLocalNetworkUsageDescription raw -o - "${app}/Contents/Info.plist")"
 [[ -n "${local_network_usage}" ]] || fail "macOS app does not explain why it needs local network access"
-/usr/bin/plutil -lint "${agent_app}/Contents/Info.plist" >/dev/null
-assert_plist_value "${agent_app}/Contents/Info.plist" CFBundleIdentifier io.github.dmitbd.remote-docker.agent
-assert_plist_value "${agent_app}/Contents/Info.plist" CFBundleExecutable remote-docker-agent
-agent_local_network_usage="$(/usr/bin/plutil -extract NSLocalNetworkUsageDescription raw -o - "${agent_app}/Contents/Info.plist")"
-[[ -n "${agent_local_network_usage}" ]] || fail "macOS agent does not explain why it needs local network access"
-
-launch_agent="${payload}/Library/LaunchAgents/io.github.dmitbd.remote-docker.agent.plist"
-/usr/bin/plutil -lint "${launch_agent}" >/dev/null
-assert_plist_value "${launch_agent}" Label io.github.dmitbd.remote-docker.agent
-assert_plist_value "${launch_agent}" ProgramArguments.0 "/Applications/Remote Docker.app/Contents/Library/LoginItems/Remote Docker Agent.app/Contents/MacOS/remote-docker-agent"
-assert_plist_value "${launch_agent}" RunAtLoad true
-assert_plist_value "${launch_agent}" AssociatedBundleIdentifiers.0 io.github.dmitbd.remote-docker.agent
-assert_plist_value "${launch_agent}" AssociatedBundleIdentifiers.1 io.github.dmitbd.remote-docker
-if /usr/bin/plutil -extract UserName raw -o - "${launch_agent}" >/dev/null 2>&1; then
-  fail "LaunchAgent must inherit the logged-in user instead of naming root or another account"
-fi
 
 path_entry="$(sed -n '1p' "${payload}/etc/paths.d/remote-docker")"
 [[ "${path_entry}" == "/usr/local/libexec/remote-docker/bin" ]] || fail "managed Docker launcher is not first in its PATH fragment"
@@ -115,7 +102,9 @@ for guard in "${scripts}/preinstall" "${scripts}/postinstall" "${libexec}/uninst
 done
 grep -F 'printf ' "${scripts}/postinstall" | grep -F '"${docker_link_owner_value}"' >/dev/null || fail "postinstall does not record ownership of its managed docker link"
 grep -F 'rm -f "${docker_link}"' "${libexec}/uninstall" >/dev/null || fail "uninstall cannot remove its own exact managed docker link"
-grep -F 'asuser "${console_uid}" "${launchctl_bin}" bootstrap "${domain}" "${plist}"' "${scripts}/postinstall" >/dev/null || fail "postinstall does not bootstrap the LaunchAgent in the logged-in user's context"
+if grep -R -E 'launchctl|LaunchAgents|LoginItems|RunAtLoad' "${scripts}" "${app}" "${libexec}/uninstall" >/dev/null; then
+  fail "manual package still contains an automatic-start mechanism"
+fi
 
 /usr/bin/ruby -rjson -e 'JSON.parse(File.read(ARGV.fetch(0)))' "${repo_root}/packaging/versions.json"
 for key in go docker_cli compose syncthing; do
@@ -128,8 +117,8 @@ for key in go docker_cli compose syncthing; do
 done
 grep -F 'verify-checksum.sh" "${checksums_file}" "${download_path}" "${filename}"' "${build_script}" >/dev/null || fail "downloads are not verified before use"
 grep -F 'xattr -crs "${payload}"' "${build_script}" >/dev/null || fail "payload xattrs are not cleared without following package symlinks"
-grep -F -- '--identifier io.github.dmitbd.remote-docker.agent "${agent_bundle}"' "${build_script}" >/dev/null || fail "free macOS package does not bind the helper app identity"
-grep -F 'dwarfdump --uuid "${agent_executable}"' "${package_inspector}" >/dev/null || fail "package inspection does not require a Local Network-compatible Mach-O UUID"
+grep -F -- '--identifier io.github.dmitbd.remote-docker "${app_bundle}"' "${build_script}" >/dev/null || fail "free macOS package does not bind the application identity"
+grep -F 'dwarfdump --uuid "${app_executable}"' "${package_inspector}" >/dev/null || fail "package inspection does not require an executable application Mach-O UUID"
 grep -F -- "--filter '(^|/)\\._'" "${build_script}" >/dev/null || fail "pkgbuild does not exclude AppleDouble metadata"
 for extractor in 'tar -x' 'unzip -q'; do
   grep -F "${extractor}" "${build_script}" >/dev/null || fail "build script does not handle expected archive type"

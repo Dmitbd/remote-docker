@@ -29,15 +29,22 @@ for tree in "${inspection_root}/expanded/Payload" "${inspection_root}/expanded/S
   fi
 done
 
-agent_app="${inspection_root}/expanded/Payload/Applications/Remote Docker.app/Contents/Library/LoginItems/Remote Docker Agent.app"
-if [[ -d "${agent_app}" ]]; then
-  agent_executable="${agent_app}/Contents/MacOS/remote-docker-agent"
-  [[ -x "${agent_executable}" ]] || {
-    printf '%s\n' "package has no executable macOS background agent" >&2
-    exit 1
-  }
-  if ! dwarfdump --uuid "${agent_executable}" | grep -E '^UUID: [0-9A-F-]+ \(' >/dev/null; then
-    printf '%s\n' "macOS background agent has no Mach-O UUID for Local Network policy" >&2
-    exit 1
-  fi
+payload_root="${inspection_root}/expanded/Payload"
+app_contents="${payload_root}/Applications/Remote Docker.app/Contents"
+app_executable="${app_contents}/MacOS/remote-docker-desktop"
+[[ -x "${app_executable}" ]] || {
+  printf '%s\n' "package has no executable Remote Docker desktop application" >&2
+  exit 1
+}
+[[ -f "${app_contents}/Resources/remote-docker.icns" ]] || {
+  printf '%s\n' "package has no application icon" >&2
+  exit 1
+}
+if find "${payload_root}" -path '*/Library/LoginItems/*' -o -path '*/Library/LaunchAgents/*' | grep . >/dev/null; then
+  printf '%s\n' "package contains an automatic-start helper" >&2
+  exit 1
+fi
+if ! dwarfdump --uuid "${app_executable}" | grep -E '^UUID: [0-9A-F-]+ \(' >/dev/null; then
+  printf '%s\n' "macOS application has no Mach-O UUID for Local Network policy" >&2
+  exit 1
 fi
