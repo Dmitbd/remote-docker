@@ -140,6 +140,28 @@ func TestProvisionScriptKeepsConfirmationAndMutationOrder(t *testing.T) {
 	}
 }
 
+func TestProvisionScriptReportsEarlyValidationFailuresToInstaller(t *testing.T) {
+	script := readWindowsScript(t, "provision.ps1")
+
+	tryBlock := strings.Index(script, "try {")
+	confirmation := strings.Index(script, "if (-not $ConfirmProvisioning)")
+	rootValidation := strings.Index(script, "Assert-ManagedDirectory -Path $ApplicationRoot")
+	catchBlock := strings.LastIndex(script, "catch {")
+	stderr := strings.Index(script, "[Console]::Error.WriteLine($reason)")
+	exit := strings.Index(script, "exit 1")
+	if tryBlock < 0 || confirmation <= tryBlock || rootValidation <= confirmation || catchBlock <= rootValidation || stderr <= catchBlock || exit <= stderr {
+		t.Fatal("provision.ps1 does not report early validation failures through one installer-visible error boundary")
+	}
+	for _, fragment := range []string{"$logReady = $false", "$progressReady = $false"} {
+		if !strings.Contains(script, fragment) {
+			t.Fatalf("provision.ps1 is missing guarded failure state %q", fragment)
+		}
+	}
+	if strings.Contains(script, "throw $reason") {
+		t.Fatal("provision.ps1 rethrows the failure instead of returning one concise installer-visible error")
+	}
+}
+
 func TestProvisionFirstBootIsLFStableAndIdempotentAfterPartialImport(t *testing.T) {
 	script := readWindowsScript(t, "provision.ps1")
 

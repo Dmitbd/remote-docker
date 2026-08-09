@@ -39,7 +39,7 @@ Describe 'Windows Setup EXE contract' {
         (Join-Path $windowsPackaging 'installer\pages.nsh') | Should -Not -Exist
     }
 
-    It 'shows an explicit manual installation flow' {
+    It 'shows one explicit manual installation-location flow' {
         $installer = Read-RepositoryFile $installerSource
         $pages = Read-RepositoryFile $pagesSource
         $strings = Read-RepositoryFile $stringsSource
@@ -47,27 +47,45 @@ Describe 'Windows Setup EXE contract' {
         $versionInfo = $installer.IndexOf('VIAddVersionKey /LANG=${LANG_RUSSIAN}')
 
         $installer | Should -Match 'MUI_PAGE_WELCOME'
-        $installer | Should -Match 'Page custom PreflightPageCreate'
-        $installer | Should -Match 'MUI_PAGE_COMPONENTS'
-        $installer | Should -Match 'MUI_PAGE_DIRECTORY'
-        $installer | Should -Match 'Page custom DataPageCreate DataPageLeave'
+        $installer | Should -Match 'Page custom InstallLocationPageCreate InstallLocationPageLeave'
+        $installer | Should -Not -Match 'PreflightPageCreate'
+        $installer | Should -Not -Match 'MUI_PAGE_COMPONENTS'
+        $installer | Should -Not -Match 'MUI_PAGE_DIRECTORY'
+        $installer | Should -Not -Match 'DataPageCreate|DataPageLeave'
         $installer | Should -Match 'MUI_PAGE_INSTFILES'
         $installer | Should -Match 'MUI_FINISHPAGE_RUN_NOTCHECKED'
         $languageLoad | Should -BeGreaterThan -1
         $versionInfo | Should -BeGreaterThan $languageLoad
         $installer | Should -Match 'CreateShortCut "\$SMPROGRAMS\\Remote Docker\\Remote Docker\.lnk"'
-        $installer | Should -Match 'Section /o .*DesktopShortcut'
+        $installer | Should -Not -Match 'Section /o .*DesktopShortcut'
         $installer | Should -Match 'CreateShortCut "\$DESKTOP\\Remote Docker\.lnk"'
         $installer | Should -Match 'RemoteDocker\.exe'
         $installer | Should -Match 'remote-docker\.ico'
-        $pages | Should -Match 'SelectDataDirectory'
-        $pages | Should -Match 'VirtualizationPreflight'
+        $pages | Should -Match 'BaseDirectoryInput'
+        $pages | Should -Match 'DesktopShortcutCheckbox'
+        $pages | Should -Match 'StrCpy \$INSTDIR "\$BaseDirectory\\App"'
+        $pages | Should -Match 'StrCpy \$DataDirectory "\$BaseDirectory\\Data"'
+        $strings | Should -Match 'InstallLocationTitle'
+        $strings | Should -Match 'CreateDesktopShortcut'
         $strings | Should -Match 'InstallingFiles'
         $strings | Should -Match 'ProvisioningWSL'
         $strings | Should -Match 'ConfiguringDocker'
         $strings | Should -Match 'ConfiguringFirewall'
         $strings | Should -Match 'InstallRetry'
         $strings | Should -Match 'InstallLogPath'
+    }
+
+    It 'reuses registered roots without automatically migrating existing data' {
+        $installer = Read-RepositoryFile $installerSource
+        $pages = Read-RepositoryFile $pagesSource
+        $combined = "$installer`n$pages"
+
+        $installer | Should -Match 'ReadRegStr \$ExistingApplicationRoot HKLM "Software\\Remote Docker" "InstallDirectory"'
+        $installer | Should -Match 'ReadRegStr \$ExistingDataRoot HKLM "Software\\Remote Docker" "DataDirectory"'
+        $installer | Should -Match 'StrCpy \$INSTDIR \$ExistingApplicationRoot'
+        $installer | Should -Match 'StrCpy \$DataDirectory \$ExistingDataRoot'
+        $pages | Should -Match '\$ExistingInstall == "1"'
+        $combined | Should -Not -Match 'Move-Item|Copy-Item|Rename-Item'
     }
 
     It 'never registers the application for automatic startup' {
@@ -101,6 +119,8 @@ Describe 'Windows Setup EXE contract' {
         $script | Should -Match 'cmd/remote-docker-desktop'
         $script | Should -Match 'cmd/remote-docker-remote'
         $script | Should -Match 'Remote-Docker-\$Version-x64-Setup\.exe'
+        $script | Should -Match "'/INPUTCHARSET'"
+        $script | Should -Match "'UTF8'"
         $script | Should -Not -Match 'cmd/remote-docker-agent|cmd/remote-docker-tray|\.msi'
     }
 
@@ -139,9 +159,31 @@ Describe 'Windows Setup EXE contract' {
         $installer | Should -Match 'installer-reboot\.pending'
         $installer | Should -Match 'Delete .*installer-reboot\.pending'
         $installer | Should -Match 'SetRebootFlag true'
+        $installer | Should -Match '(?s)\$ProvisionExit == 3010.*SetErrorLevel 3010.*Quit.*CreatingShortcuts'
         $installer | Should -Not -Match 'Exec(?:Wait)?\s+''?"?\$INSTDIR\\RemoteDocker\.exe'
         $status | Should -Match 'ConvertTo-Json'
         $status | Should -Match 'Add-Content\s+-LiteralPath\s+\$ProgressPath'
+    }
+
+    It 'creates a real log and exits cleanly when provisioning is cancelled' {
+        $installer = Read-RepositoryFile $installerSource
+        $script = Read-RepositoryFile $provisionScript
+
+        $logCreate = $installer.IndexOf('FileOpen $0 "$LogPath" w')
+        $provision = $installer.IndexOf('nsExec::ExecToStack /TIMEOUT=3600000')
+        $register = $installer.IndexOf('WriteRegStr HKLM "Software\Remote Docker"')
+
+        $logCreate | Should -BeGreaterThan -1
+        $provision | Should -BeGreaterThan $logCreate
+        $register | Should -BeGreaterThan $provision
+        $installer | Should -Match '\$ProvisionOutput'
+        $installer | Should -Match '(?s)provision_failed:.*SetErrorLevel 1.*Quit'
+        $installer | Should -Not -Match 'Abort "\$\(InstallFailed\)'
+        $script | Should -Match '\$logReady = \$false'
+        $script | Should -Match '\$progressReady = \$false'
+        $script | Should -Match '\[Console\]::Error\.WriteLine\(\$reason\)'
+        $script | Should -Match '(?s)try \{.*if \(-not \$ConfirmProvisioning\).*Assert-ManagedDirectory -Path \$ApplicationRoot.*catch \{'
+        $script | Should -Not -Match 'throw \$reason'
     }
 
     It 'preserves managed WSL data by default and deletes only with exact confirmation' {

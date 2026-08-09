@@ -22,13 +22,17 @@ Name "Remote Docker"
 Caption "Установка Remote Docker"
 OutFile "${OUTPUT_FILE}"
 InstallDir "$PROGRAMFILES64\Remote Docker"
-InstallDirRegKey HKLM "Software\Remote Docker" "InstallDirectory"
 Icon "${ICON_SOURCE}"
 UninstallIcon "${ICON_SOURCE}"
 BrandingText "Remote Docker"
 VIProductVersion "${PRODUCT_VERSION}.0"
 
 Var DataDirectory
+Var BaseDirectory
+Var ExistingApplicationRoot
+Var ExistingDataRoot
+Var ExistingInstall
+Var CreateDesktopShortcut
 Var ProvisionExit
 Var ProvisionOutput
 Var ProgressPath
@@ -42,16 +46,12 @@ Var LogPath
 !define MUI_UNICON "${ICON_SOURCE}"
 !define MUI_WELCOMEPAGE_TITLE "Установка Remote Docker"
 !define MUI_WELCOMEPAGE_TEXT "$(ProductDescription)$\r$\n$\r$\nПриложение запускается только вручную."
-!define MUI_COMPONENTSPAGE_SMALLDESC
 !define MUI_FINISHPAGE_RUN "$INSTDIR\RemoteDocker.exe"
 !define MUI_FINISHPAGE_RUN_TEXT "Запустить Remote Docker"
 !define MUI_FINISHPAGE_RUN_NOTCHECKED
 
 !insertmacro MUI_PAGE_WELCOME
-Page custom PreflightPageCreate
-!insertmacro MUI_PAGE_COMPONENTS
-!insertmacro MUI_PAGE_DIRECTORY
-Page custom DataPageCreate DataPageLeave
+Page custom InstallLocationPageCreate InstallLocationPageLeave
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
@@ -74,7 +74,25 @@ Function .onInit
     Abort
   ${EndIf}
   SetRegView 64
-  StrCpy $DataDirectory "$PROGRAMDATA\RemoteDocker"
+  SetShellVarContext all
+  StrCpy $ExistingInstall "0"
+  StrCpy $CreateDesktopShortcut ${BST_CHECKED}
+  ReadRegStr $ExistingApplicationRoot HKLM "Software\Remote Docker" "InstallDirectory"
+  ReadRegStr $ExistingDataRoot HKLM "Software\Remote Docker" "DataDirectory"
+  ${If} $ExistingApplicationRoot != ""
+  ${AndIf} $ExistingDataRoot != ""
+    StrCpy $ExistingInstall "1"
+    StrCpy $INSTDIR $ExistingApplicationRoot
+    StrCpy $DataDirectory $ExistingDataRoot
+    IfFileExists "$DESKTOP\Remote Docker.lnk" 0 +2
+    StrCpy $CreateDesktopShortcut ${BST_CHECKED}
+    IfFileExists "$DESKTOP\Remote Docker.lnk" +2 0
+    StrCpy $CreateDesktopShortcut ${BST_UNCHECKED}
+  ${Else}
+    StrCpy $BaseDirectory "$PROGRAMFILES64\Remote Docker"
+    StrCpy $INSTDIR "$BaseDirectory\App"
+    StrCpy $DataDirectory "$BaseDirectory\Data"
+  ${EndIf}
 FunctionEnd
 
 Section "Основные файлы и Docker-среда" CoreSection
@@ -87,6 +105,9 @@ Section "Основные файлы и Docker-среда" CoreSection
   CreateDirectory "$DataDirectory"
   StrCpy $ProgressPath "$DataDirectory\installer-progress.jsonl"
   StrCpy $LogPath "$DataDirectory\installer.log"
+  FileOpen $0 "$LogPath" w
+  FileWrite $0 "Remote Docker ${PRODUCT_VERSION}$\r$\n"
+  FileClose $0
 
   DetailPrint "$(InstallingFiles)"
   IfFileExists "$INSTDIR\RemoteDocker.exe" 0 +4
@@ -122,8 +143,15 @@ retry_provision:
     FileClose $0
     SetRebootFlag true
     MessageBox MB_OK|MB_ICONINFORMATION "$(RebootRequired)"
+    SetErrorLevel 3010
+    Quit
   ${ElseIf} $ProvisionExit != 0
-    MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "$(InstallFailed)$\r$\n$\r$\n$(InstallLogPath) $LogPath$\r$\n$\r$\n$(InstallRetry)" IDRETRY retry_provision IDCANCEL provision_failed
+    ${If} $ProvisionOutput != ""
+      FileOpen $0 "$LogPath" a
+      FileWrite $0 "$ProvisionOutput$\r$\n"
+      FileClose $0
+    ${EndIf}
+    MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "$(InstallFailed)$\r$\n$\r$\n$ProvisionOutput$\r$\n$\r$\n$(InstallLogPath) $LogPath$\r$\n$\r$\n$(InstallRetry)" IDRETRY retry_provision IDCANCEL provision_failed
   ${Else}
     Delete "$DataDirectory\installer-reboot.pending"
   ${EndIf}
@@ -132,6 +160,11 @@ retry_provision:
   CreateDirectory "$SMPROGRAMS\Remote Docker"
   CreateShortCut "$SMPROGRAMS\Remote Docker\Remote Docker.lnk" "$INSTDIR\RemoteDocker.exe" "" "$INSTDIR\remote-docker.ico"
   CreateShortCut "$SMPROGRAMS\Remote Docker\Удалить Remote Docker.lnk" "$INSTDIR\Uninstall.exe"
+  ${If} $CreateDesktopShortcut == ${BST_CHECKED}
+    CreateShortCut "$DESKTOP\Remote Docker.lnk" "$INSTDIR\RemoteDocker.exe" "" "$INSTDIR\remote-docker.ico"
+  ${Else}
+    Delete "$DESKTOP\Remote Docker.lnk"
+  ${EndIf}
 
   WriteRegStr HKLM "Software\Remote Docker" "InstallDirectory" "$INSTDIR"
   WriteRegStr HKLM "Software\Remote Docker" "DataDirectory" "$DataDirectory"
@@ -147,14 +180,9 @@ retry_provision:
 
 provision_failed:
   Delete "$DataDirectory\installer-reboot.pending"
-  SetErrors
-  Abort "$(InstallFailed) $(InstallLogPath) $LogPath"
+  SetErrorLevel 1
+  Quit
 provision_done:
-SectionEnd
-
-Section /o "$(DesktopShortcutName)" DesktopShortcut
-  SetShellVarContext all
-  CreateShortCut "$DESKTOP\Remote Docker.lnk" "$INSTDIR\RemoteDocker.exe" "" "$INSTDIR\remote-docker.ico"
 SectionEnd
 
 Section "Uninstall"

@@ -111,48 +111,56 @@ function Test-ManagedDistro {
     return $true
 }
 
-if (-not $ConfirmProvisioning) {
-    throw 'No changes were made. The installer must explicitly confirm provisioning.'
-}
-
-Assert-Administrator
-$ApplicationRoot = Assert-AbsolutePath -Path $ApplicationRoot -Description 'Application root'
-$DataRoot = Assert-AbsolutePath -Path $DataRoot -Description 'Data root'
-$ProgressPath = Assert-AbsolutePath -Path $ProgressPath -Description 'Progress path'
-$LogPath = Assert-AbsolutePath -Path $LogPath -Description 'Log path'
-if ([string]::Equals($ApplicationRoot.TrimEnd('\'), $DataRoot.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw 'Application and data roots must be different.'
-}
-Assert-ManagedDirectory -Path $ApplicationRoot
-if (-not (Test-Path -LiteralPath $DataRoot)) {
-    New-Item -ItemType Directory -Path $DataRoot -Force | Out-Null
-}
-Assert-ManagedDirectory -Path $DataRoot
-if ((Split-Path -Parent $ProgressPath) -ne $DataRoot -or (Split-Path -Parent $LogPath) -ne $DataRoot) {
-    throw 'Installer status and log files must be direct children of the selected data root.'
-}
-Set-Content -LiteralPath $ProgressPath -Value '' -Encoding utf8
-Set-Content -LiteralPath $LogPath -Value '' -Encoding utf8
-$dataMarker = Join-Path $DataRoot '.remote-docker-managed-data'
-$dataMarkerValue = 'remote-docker-managed-data-v1'
-if (Test-Path -LiteralPath $dataMarker -PathType Leaf) {
-    if ((Get-Content -LiteralPath $dataMarker -Raw).Trim() -ne $dataMarkerValue) {
-        throw 'The selected data root contains an invalid ownership marker.'
-    }
-}
-else {
-    Set-Content -LiteralPath $dataMarker -Value $dataMarkerValue -Encoding ascii
-}
-
-$desktopExecutable = Join-Path $ApplicationRoot 'RemoteDocker.exe'
-$rootfsPath = Join-Path $ApplicationRoot 'assets\remote-docker-rootfs.tar.zst'
-$rootfsChecksumPath = "$rootfsPath.sha256"
-$distroRoot = Join-Path $DataRoot 'wsl'
-if (-not (Test-Path -LiteralPath $desktopExecutable -PathType Leaf)) {
-    throw "Remote Docker executable was not found at '$desktopExecutable'."
-}
+$logReady = $false
+$progressReady = $false
 
 try {
+    if (-not $ConfirmProvisioning) {
+        throw 'No changes were made. The installer must explicitly confirm provisioning.'
+    }
+
+    Assert-Administrator
+    $ApplicationRoot = Assert-AbsolutePath -Path $ApplicationRoot -Description 'Application root'
+    $DataRoot = Assert-AbsolutePath -Path $DataRoot -Description 'Data root'
+    $ProgressPath = Assert-AbsolutePath -Path $ProgressPath -Description 'Progress path'
+    $LogPath = Assert-AbsolutePath -Path $LogPath -Description 'Log path'
+    if ([string]::Equals($ApplicationRoot.TrimEnd('\'), $DataRoot.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Application and data roots must be different.'
+    }
+    Assert-ManagedDirectory -Path $ApplicationRoot
+    if (-not (Test-Path -LiteralPath $DataRoot)) {
+        New-Item -ItemType Directory -Path $DataRoot -Force | Out-Null
+    }
+    Assert-ManagedDirectory -Path $DataRoot
+    if ((Split-Path -Parent $ProgressPath) -ne $DataRoot -or (Split-Path -Parent $LogPath) -ne $DataRoot) {
+        throw 'Installer status and log files must be direct children of the selected data root.'
+    }
+    if (-not (Test-Path -LiteralPath $LogPath -PathType Leaf)) {
+        Set-Content -LiteralPath $LogPath -Value '' -Encoding utf8
+    }
+    $logReady = $true
+    Write-InstallLog -Message 'Provisioning started.'
+    Set-Content -LiteralPath $ProgressPath -Value '' -Encoding utf8
+    $progressReady = $true
+    $dataMarker = Join-Path $DataRoot '.remote-docker-managed-data'
+    $dataMarkerValue = 'remote-docker-managed-data-v1'
+    if (Test-Path -LiteralPath $dataMarker -PathType Leaf) {
+        if ((Get-Content -LiteralPath $dataMarker -Raw).Trim() -ne $dataMarkerValue) {
+            throw 'The selected data root contains an invalid ownership marker.'
+        }
+    }
+    else {
+        Set-Content -LiteralPath $dataMarker -Value $dataMarkerValue -Encoding ascii
+    }
+
+    $desktopExecutable = Join-Path $ApplicationRoot 'RemoteDocker.exe'
+    $rootfsPath = Join-Path $ApplicationRoot 'assets\remote-docker-rootfs.tar.zst'
+    $rootfsChecksumPath = "$rootfsPath.sha256"
+    $distroRoot = Join-Path $DataRoot 'wsl'
+    if (-not (Test-Path -LiteralPath $desktopExecutable -PathType Leaf)) {
+        throw "Remote Docker executable was not found at '$desktopExecutable'."
+    }
+
     Write-RemoteDockerProvisionStatus -ProgressPath $ProgressPath -Phase 'preflight' -State 'started' -Message 'Checking Windows components.'
     $requiredFeatures = @('Microsoft-Windows-Subsystem-Linux', 'VirtualMachinePlatform')
     $disabledFeatures = @()
@@ -266,7 +274,18 @@ try {
 }
 catch {
     $reason = $_.Exception.Message -replace '[\r\n]+', ' '
-    Write-InstallLog -Message "Provisioning failed: $reason"
-    Write-RemoteDockerProvisionStatus -ProgressPath $ProgressPath -Phase 'complete' -State 'failed' -Message $reason
-    throw $reason
+    if ($logReady) {
+        try {
+            Write-InstallLog -Message "Provisioning failed: $reason"
+        }
+        catch {}
+    }
+    if ($progressReady) {
+        try {
+            Write-RemoteDockerProvisionStatus -ProgressPath $ProgressPath -Phase 'complete' -State 'failed' -Message $reason
+        }
+        catch {}
+    }
+    [Console]::Error.WriteLine($reason)
+    exit 1
 }

@@ -1,61 +1,59 @@
-Var PreflightDialog
-Var DataDialog
-Var DataDirectoryInput
-Var DataBrowseButton
+Var InstallLocationDialog
+Var BaseDirectoryInput
+Var BaseBrowseButton
+Var DesktopShortcutCheckbox
 
-Function PreflightPageCreate
-  nsDialogs::Create 1018
-  Pop $PreflightDialog
-  ${If} $PreflightDialog == error
-    Abort
-  ${EndIf}
-
-  ${NSD_CreateLabel} 0 0 100% 18u "$(PreflightTitle)"
-  Pop $0
-  CreateFont $1 "$(^Font)" "$(^FontSize)" 700
-  SendMessage $0 ${WM_SETFONT} $1 1
-  ${NSD_CreateLabel} 0 24u 100% 48u "$(PreflightBody)"
-  Pop $0
-  ${NSD_CreateLabel} 0 82u 100% 24u "$(VirtualizationPreflight)"
-  Pop $0
-  nsDialogs::Show
-FunctionEnd
-
-Function SelectDataDirectory
-  nsDialogs::SelectFolderDialog "$(SelectDataDirectory)" "$DataDirectory"
+Function SelectBaseDirectory
+  nsDialogs::SelectFolderDialog "$(SelectBaseDirectory)" "$BaseDirectory"
   Pop $0
   ${If} $0 != error
-    StrCpy $DataDirectory $0
-    ${NSD_SetText} $DataDirectoryInput $DataDirectory
+    StrCpy $BaseDirectory $0
+    ${NSD_SetText} $BaseDirectoryInput $BaseDirectory
   ${EndIf}
 FunctionEnd
 
-Function DataPageCreate
-  nsDialogs::Create 1018
-  Pop $DataDialog
-  ${If} $DataDialog == error
+Function InstallLocationPageCreate
+  ${If} $ExistingInstall == "1"
     Abort
   ${EndIf}
 
-  ${NSD_CreateLabel} 0 0 100% 18u "$(SelectDataDirectory)"
+  nsDialogs::Create 1018
+  Pop $InstallLocationDialog
+  ${If} $InstallLocationDialog == error
+    Abort
+  ${EndIf}
+
+  ${NSD_CreateLabel} 0 0 100% 18u "$(InstallLocationTitle)"
   Pop $0
   CreateFont $1 "$(^Font)" "$(^FontSize)" 700
   SendMessage $0 ${WM_SETFONT} $1 1
-  ${NSD_CreateLabel} 0 24u 100% 38u "$(SelectDataDirectoryHelp)"
+  ${NSD_CreateLabel} 0 24u 100% 38u "$(InstallLocationHelp)"
   Pop $0
-  ${NSD_CreateDirRequest} 0 72u 78% 14u "$DataDirectory"
-  Pop $DataDirectoryInput
-  ${NSD_CreateBrowseButton} 80% 71u 20% 15u "Обзор..."
-  Pop $DataBrowseButton
-  ${NSD_OnClick} $DataBrowseButton SelectDataDirectory
+  ${NSD_CreateDirRequest} 0 72u 78% 14u "$BaseDirectory"
+  Pop $BaseDirectoryInput
+  ${NSD_CreateBrowseButton} 80% 71u 20% 15u "$(BrowseButton)"
+  Pop $BaseBrowseButton
+  ${NSD_OnClick} $BaseBrowseButton SelectBaseDirectory
+  ${NSD_CreateCheckbox} 0 102u 100% 14u "$(CreateDesktopShortcut)"
+  Pop $DesktopShortcutCheckbox
+  ${NSD_SetState} $DesktopShortcutCheckbox $CreateDesktopShortcut
   nsDialogs::Show
 FunctionEnd
 
-Function DataPageLeave
-  ${NSD_GetText} $DataDirectoryInput $DataDirectory
-  ${GetRoot} "$DataDirectory" $0
+Function InstallLocationPageLeave
+  ${NSD_GetText} $BaseDirectoryInput $BaseDirectory
+  ${NSD_GetState} $DesktopShortcutCheckbox $CreateDesktopShortcut
+  ${GetRoot} "$BaseDirectory" $0
   ${If} $0 == ""
-    MessageBox MB_OK|MB_ICONEXCLAMATION "$(InvalidDataDirectory)"
+    MessageBox MB_OK|MB_ICONEXCLAMATION "$(InvalidBaseDirectory)"
     Abort
   ${EndIf}
+  GetFullPathName $BaseDirectory "$BaseDirectory"
+  ${GetRoot} "$BaseDirectory" $0
+  ${If} $BaseDirectory == $0
+    MessageBox MB_OK|MB_ICONEXCLAMATION "$(InvalidBaseDirectory)"
+    Abort
+  ${EndIf}
+  StrCpy $INSTDIR "$BaseDirectory\App"
+  StrCpy $DataDirectory "$BaseDirectory\Data"
 FunctionEnd

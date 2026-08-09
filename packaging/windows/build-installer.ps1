@@ -211,6 +211,8 @@ try {
 
     $setupPath = Join-Path $resolvedOutput "Remote-Docker-$Version-x64-Setup.exe"
     $defines = @(
+        '/INPUTCHARSET',
+        'UTF8',
         "/DPRODUCT_VERSION=$Version",
         "/DOUTPUT_FILE=$setupPath",
         "/DAPP_SOURCE=$desktopSource",
