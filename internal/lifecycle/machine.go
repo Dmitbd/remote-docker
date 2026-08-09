@@ -40,6 +40,7 @@ const (
 	EventPairingCompleted    EventType = "pairing_completed"
 	EventConnectionStarted   EventType = "connection_started"
 	EventConnected           EventType = "connected"
+	EventHeartbeat           EventType = "heartbeat"
 	EventDisconnectRequested EventType = "disconnect_requested"
 	EventNetworkLost         EventType = "network_lost"
 	EventNetworkRestored     EventType = "network_restored"
@@ -84,6 +85,19 @@ func WithClock(now func() time.Time) Option {
 		if now != nil {
 			machine.now = now
 		}
+	}
+}
+
+// WithTrustedPeer restores the one public trusted peer without starting any
+// runtime work. Construction still begins paused.
+func WithTrustedPeer(peer Peer) Option {
+	return func(machine *Machine) {
+		if strings.TrimSpace(peer.ID) == "" || strings.TrimSpace(peer.Name) == "" {
+			return
+		}
+		trusted := peer
+		machine.snapshot.Peer = &trusted
+		machine.snapshot.TrustedPeers = 1
 	}
 }
 
@@ -281,6 +295,11 @@ func (m *Machine) applyLocked(event Event) error {
 		snapshot.Sync.State = ServiceReady
 		snapshot.Recovery = nil
 		snapshot.LastDisconnect = nil
+	case EventHeartbeat:
+		if snapshot.State != StateConnected {
+			return m.transitionError(event, "connection is not active")
+		}
+		snapshot.Latency = event.Latency
 	case EventDisconnectRequested:
 		if snapshot.State != StateConnected && snapshot.State != StateReconnecting {
 			return m.transitionError(event, "connection is not active")

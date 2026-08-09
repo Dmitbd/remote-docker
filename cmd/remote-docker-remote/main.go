@@ -97,6 +97,16 @@ func runRPCWithAllOperations(
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), 1<<20)
 	encoder := json.NewEncoder(output)
+	presence := newPresenceManager(presenceOptions{Ready: func(ctx context.Context) (bool, bool) {
+		if diagnosticsRuntime == nil {
+			return false, false
+		}
+		observation, err := diagnosticsRuntime.Observe(ctx)
+		if err != nil {
+			return false, false
+		}
+		return observation.DockerSocket, observation.SyncthingService
+	}})
 	for scanner.Scan() {
 		var incoming request
 		if err := json.Unmarshal(scanner.Bytes(), &incoming); err != nil {
@@ -159,6 +169,33 @@ func runRPCWithAllOperations(
 			} else {
 				outgoing.Result = map[string]any{"stopped": true}
 			}
+		} else if incoming.Method == "presence.hello" {
+			var params presenceHelloParams
+			if decodeRPCParams(incoming.Params, &params) != nil {
+				outgoing.Error = &rpcError{Code: -32602, Message: "invalid params"}
+			} else if result, err := presence.Hello(context.Background(), params); err != nil {
+				outgoing.Error = &rpcError{Code: -32007, Message: "presence session unavailable"}
+			} else {
+				outgoing.Result = presenceRPCResult(result)
+			}
+		} else if incoming.Method == "presence.heartbeat" {
+			var params presenceHeartbeatParams
+			if decodeRPCParams(incoming.Params, &params) != nil {
+				outgoing.Error = &rpcError{Code: -32602, Message: "invalid params"}
+			} else if result, err := presence.Heartbeat(context.Background(), params); err != nil {
+				outgoing.Error = &rpcError{Code: -32008, Message: "presence heartbeat rejected"}
+			} else {
+				outgoing.Result = presenceRPCResult(result)
+			}
+		} else if incoming.Method == "presence.disconnect" {
+			var params presenceDisconnectParams
+			if decodeRPCParams(incoming.Params, &params) != nil {
+				outgoing.Error = &rpcError{Code: -32602, Message: "invalid params"}
+			} else if err := presence.Disconnect(context.Background(), params); err != nil {
+				outgoing.Error = &rpcError{Code: -32009, Message: "presence disconnect rejected"}
+			} else {
+				outgoing.Result = map[string]any{"disconnected": true}
+			}
 		} else if incoming.Method == "sync.configure" {
 			var params remoteSyncConfigureParams
 			if syncRuntime == nil || decodeRPCParams(incoming.Params, &params) != nil {
@@ -202,6 +239,14 @@ func runRPCWithAllOperations(
 		return 1
 	}
 	return 0
+}
+
+func presenceRPCResult(result presenceResult) map[string]any {
+	return map[string]any{
+		"session_id": result.SessionID, "server_monotonic_ms": result.ServerMonotonicMS,
+		"docker_ready": result.DockerReady, "sync_ready": result.SyncReady,
+		"terminal": result.Terminal, "reason": result.Reason,
+	}
 }
 
 func decodeRPCParams(raw json.RawMessage, destination any) error {
