@@ -49,17 +49,17 @@ type terminalSession struct {
 
 // Server owns one short-lived pairing session.
 type Server struct {
-	mu          sync.Mutex
-	identity    ServerIdentity
-	displayName string
-	device      DeviceInfo
-	installer   Installer
+	mu           sync.Mutex
+	identity     ServerIdentity
+	displayName  string
+	device       DeviceInfo
+	installer    Installer
 	sessionGuard func(context.Context) error
 	afterInstall func(context.Context, string) error
-	now         func() time.Time
-	random      io.Reader
-	active      *sessionState
-	terminal    map[string]terminalSession
+	now          func() time.Time
+	random       io.Reader
+	active       *sessionState
+	terminal     map[string]terminalSession
 }
 
 // ServerOption changes a server dependency.

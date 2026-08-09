@@ -296,10 +296,10 @@ func TestRPCDiagnosticsReturnStableErrorsWithoutCommandOutput(t *testing.T) {
 }
 
 type recordingRemoteDiagnostics struct {
-	observation remoteDiagnosticObservation
-	observeErr  error
-	restartErr  error
-	restarts    int
+	observation    remoteDiagnosticObservation
+	observeErr     error
+	restartErr     error
+	restarts       int
 	containerStops int
 }
 

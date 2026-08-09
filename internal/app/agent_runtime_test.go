@@ -20,8 +20,8 @@ import (
 	"github.com/Dmitbd/remote-docker/internal/diagnostics"
 	"github.com/Dmitbd/remote-docker/internal/discovery"
 	"github.com/Dmitbd/remote-docker/internal/dockercli"
-	"github.com/Dmitbd/remote-docker/internal/localapi"
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
+	"github.com/Dmitbd/remote-docker/internal/localapi"
 	"github.com/Dmitbd/remote-docker/internal/pairing"
 	"github.com/Dmitbd/remote-docker/internal/portrelay"
 	"github.com/Dmitbd/remote-docker/internal/sshtransport"
@@ -460,7 +460,7 @@ func TestMacPairingCoordinatorCancelsWithoutManualCodeAndClearsPendingSecret(t *
 		Store: config.Store{Path: filepath.Join(root, "config.json")}, Secrets: credentials.NewMemoryStore(),
 		Transport: transport, Docker: &runtimeDockerExecutor{}, DockerCLI: "docker-real", DockerContext: "remote-docker",
 		ClientDeviceID: func(context.Context) (string, error) { return "LOCAL-SYNC", nil },
-		SSHConfigPath: filepath.Join(root, "ssh_config"), KnownHostsPath: filepath.Join(root, "known_hosts"),
+		SSHConfigPath:  filepath.Join(root, "ssh_config"), KnownHostsPath: filepath.Join(root, "known_hosts"),
 		AgentSocketPath: filepath.Join(root, "ssh-agent.sock"), ControlDir: filepath.Join(root, "control"),
 	})
 	started, err := coordinator.Start(context.Background(), "windows-peer")
@@ -482,10 +482,10 @@ func TestMacPairingCoordinatorCancelsWithoutManualCodeAndClearsPendingSecret(t *
 }
 
 type runtimePairingTransport struct {
-	hostKey string
-	private ed25519.PrivateKey
-	revoked string
-	status pairing.SessionState
+	hostKey   string
+	private   ed25519.PrivateKey
+	revoked   string
+	status    pairing.SessionState
 	cancelled string
 }
 

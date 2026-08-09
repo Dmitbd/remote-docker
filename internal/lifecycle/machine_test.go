@@ -159,7 +159,7 @@ func TestExplicitDisconnectStopsBeforeReturningToRoleIdleState(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			machine := connectedMachine(t, tt.role)
 			stopping := mustApply(t, machine, Event{
-				Type: EventDisconnectRequested,
+				Type:       EventDisconnectRequested,
 				Disconnect: &Disconnect{Initiator: InitiatorLocal, Reason: ReasonUserDisconnect},
 			})
 			if stopping.State != StateStopping || !stopping.ActionInProgress {

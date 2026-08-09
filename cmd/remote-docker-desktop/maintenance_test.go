@@ -19,9 +19,9 @@ func TestRunMaintenanceCommandRoutesPrivateInstallerActions(t *testing.T) {
 		t.Run(test.argument, func(t *testing.T) {
 			called := ""
 			dependencies := maintenanceDependencies{
-				prepareWSL: func(context.Context) error { called = "prepare"; return nil },
+				prepareWSL:          func(context.Context) error { called = "prepare"; return nil },
 				deleteWSLCredential: func() error { called = "delete"; return nil },
-				shutdownDesktop: func(context.Context) error { called = "shutdown"; return nil },
+				shutdownDesktop:     func(context.Context) error { called = "shutdown"; return nil },
 			}
 			handled, err := runMaintenanceCommand(context.Background(), []string{test.argument}, dependencies)
 			if !handled || err != nil || called != test.wantCall {

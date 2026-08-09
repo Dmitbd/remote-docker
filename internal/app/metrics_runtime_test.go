@@ -29,7 +29,9 @@ func TestSSHRemoteMetricsUsesOnePinnedReadOnlyRPC(t *testing.T) {
 			}) {
 				t.Fatalf("SSH args = %#v", command.Args)
 			}
-			var request struct{ Method string `json:"method"` }
+			var request struct {
+				Method string `json:"method"`
+			}
 			if err := json.NewDecoder(command.Stdin).Decode(&request); err != nil || request.Method != "metrics.sample" {
 				t.Fatalf("RPC request = %#v, %v", request, err)
 			}

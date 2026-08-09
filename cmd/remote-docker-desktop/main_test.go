@@ -1,12 +1,33 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Dmitbd/remote-docker/internal/config"
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
 )
+
+func TestWaitForDesktopShutdownRequiresCompletion(t *testing.T) {
+	done := make(chan error)
+	if err := waitForDesktopShutdown(done, time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("waitForDesktopShutdown() error = %v, want deadline exceeded", err)
+	}
+	completed := make(chan error, 1)
+	completed <- nil
+	if err := waitForDesktopShutdown(completed, time.Second); err != nil {
+		t.Fatalf("completed waitForDesktopShutdown() error = %v", err)
+	}
+	wantErr := errors.New("runtime stop failed")
+	failed := make(chan error, 1)
+	failed <- wantErr
+	if err := waitForDesktopShutdown(failed, time.Second); !errors.Is(err, wantErr) {
+		t.Fatalf("failed waitForDesktopShutdown() error = %v, want %v", err, wantErr)
+	}
+}
 
 func TestInitialTrustedPeerRestoresOnlyActivePublicRecord(t *testing.T) {
 	store := config.Store{Path: filepath.Join(t.TempDir(), "config.json")}

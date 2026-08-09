@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	createNoWindow        = 0x08000000
+	createNoWindow         = 0x08000000
 	createBreakawayFromJob = 0x01000000
 )
 

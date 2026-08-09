@@ -138,12 +138,12 @@ func TestDesktopControllerRequiresWindowsApprovalBeforeCompletingPairing(t *test
 		localapi.MethodPairStatus: localapi.PairingStatusResult{
 			SessionID: "session-1", Code: "654321", Status: "pending",
 			ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano),
-			Peer: localapi.LifecyclePeer{ID: "mac", Name: "Mac", OS: "macos"},
+			Peer:      localapi.LifecyclePeer{ID: "mac", Name: "Mac", OS: "macos"},
 		},
 		localapi.MethodPairApprove: localapi.PairingStatusResult{
 			SessionID: "session-1", Code: "654321", Status: "approved",
 			ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano),
-			Peer: localapi.LifecyclePeer{ID: "mac", Name: "Mac", OS: "macos"},
+			Peer:      localapi.LifecyclePeer{ID: "mac", Name: "Mac", OS: "macos"},
 		},
 	}}
 	controller, _ := NewDesktopController(supervisor, fallback)
@@ -175,7 +175,7 @@ func TestDesktopControllerCompletesMacPairingAfterRemoteApproval(t *testing.T) {
 		},
 		localapi.MethodPairStatus: localapi.PairingStatusResult{
 			SessionID: "session-1", Code: "123456", Status: "completed", ExpiresAt: expires,
-			Peer: localapi.LifecyclePeer{ID: "temporary-windows", Name: "Windows PC", OS: "windows"},
+			Peer:   localapi.LifecyclePeer{ID: "temporary-windows", Name: "Windows PC", OS: "windows"},
 			Device: &localapi.Device{ID: "trusted-windows", Name: "Windows PC", Address: "192.168.1.20"},
 		},
 	}}

@@ -14,11 +14,11 @@ func collectManagedRuntimeMetrics(ctx context.Context) metrics.RemoteSample {
 	reason := "Windows не предоставляет точную привязку CPU и RAM к одной WSL-среде"
 	result := metrics.RemoteSample{
 		WindowsRemoteDocker: metrics.ProcessUsage{
-			CPUPercent: metrics.Unavailable[float64]("Windows-приложение измеряет свой процесс локально"),
+			CPUPercent:  metrics.Unavailable[float64]("Windows-приложение измеряет свой процесс локально"),
 			MemoryBytes: metrics.Unavailable[uint64]("Windows-приложение измеряет свой процесс локально"),
 		},
 		WindowsManagedWSL: metrics.ProcessUsage{
-			CPUPercent: metrics.Unavailable[float64](reason),
+			CPUPercent:  metrics.Unavailable[float64](reason),
 			MemoryBytes: metrics.Unavailable[uint64](reason),
 		},
 		ManagedDiskBytes: metrics.Unavailable[uint64]("точный размер managed WSL недоступен без полного сканирования диска"),

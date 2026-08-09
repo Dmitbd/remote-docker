@@ -133,8 +133,8 @@ func TestClientPresenceReportsLocalAndWindowsDisconnectInitiators(t *testing.T) 
 }
 
 type recordingPresenceTransport struct {
-	sessionID       string
-	heartbeat       PresenceHeartbeatResult
+	sessionID        string
+	heartbeat        PresenceHeartbeatResult
 	disconnectReason string
 }
 

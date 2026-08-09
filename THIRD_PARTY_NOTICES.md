@@ -25,6 +25,7 @@ Remote Docker binaries also include code from these modules:
 
 | Module | License | Source and license |
 | --- | --- | --- |
+| `fyne.io/fyne/v2` | BSD-3-Clause | <https://github.com/fyne-io/fyne> |
 | `fyne.io/systray` | MIT | <https://github.com/fyne-io/systray> |
 | `github.com/Microsoft/go-winio` | MIT | <https://github.com/microsoft/go-winio> |
 | `github.com/grandcat/zeroconf` | MIT | <https://github.com/grandcat/zeroconf> |
@@ -39,3 +40,13 @@ Remote Docker binaries also include code from these modules:
 
 Copyright notices and complete license texts remain available in the linked
 upstream source distributions. This notice does not alter any upstream license.
+
+## Build and installer tools
+
+These pinned tools are used to produce the free unsigned packages. They are not
+installed as independently running Remote Docker components.
+
+| Component | License | Source and license |
+| --- | --- | --- |
+| NSIS | zlib/libpng | <https://nsis.sourceforge.io/License> |
+| LLVM-MinGW | Apache License 2.0 with LLVM Exceptions, plus bundled notices | <https://github.com/mstorsjo/llvm-mingw> |

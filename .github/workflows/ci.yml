@@ -5,19 +5,24 @@ on:
     paths:
       - '.github/workflows/ci.yml'
       - '.github/workflows/release.yml'
-      - 'cmd/remote-docker-agent/**'
+      - 'assets/icon/**'
+      - 'cmd/remote-docker-desktop/**'
       - 'cmd/remote-docker-remote/**'
       - 'cmd/remote-docker/**'
       - 'cmd/remote-docker-ssh/**'
-      - 'cmd/remote-docker-tray/**'
       - 'internal/**'
       - 'packaging/macos/**'
       - 'packaging/windows/**'
       - 'packaging/wsl/**'
+      - 'tools/iconbuild/**'
+      - 'tests/e2e/**'
       - 'tests/integration/windows_package.Tests.ps1'
       - 'tests/integration/macos_package_test.sh'
       - 'tests/integration/rootfs_test.sh'
       - 'tests/integration/release_workflow_test.sh'
+      - 'README.md'
+      - 'THIRD_PARTY_NOTICES.md'
+      - 'docs/**'
       - 'go.mod'
       - 'go.sum'
   workflow_dispatch:
@@ -90,23 +95,24 @@ jobs:
         shell: pwsh
         run: Invoke-Pester -Path tests/integration/windows_package.Tests.ps1 -CI
 
-      - name: Build unsigned development MSI
+      - name: Build unsigned development Setup EXE
         shell: pwsh
         run: >-
-          ./packaging/windows/build-msi.ps1
-          -Version 0.0.10
+          ./packaging/windows/build-installer.ps1
+          -Version 0.2.0
           -RootfsPath dist/remote-docker-rootfs.tar.zst
 
-      - name: Confirm development binaries are unsigned
+      - name: Confirm the development installer is unsigned
         shell: pwsh
         run: |
-          $files = Get-ChildItem -LiteralPath dist/windows -Recurse -File | Where-Object Extension -in '.exe', '.msi'
-          if ($files.Count -ne 3) { throw "Expected two executables and one MSI, found $($files.Count)." }
-          foreach ($file in $files) {
-            if ((Get-AuthenticodeSignature -LiteralPath $file.FullName).Status -ne 'NotSigned') {
-              throw "Development artifact must be unsigned: $($file.Name)"
-            }
+          $installer = Get-Item -LiteralPath dist/windows/Remote-Docker-0.2.0-x64-Setup.exe
+          $legacyPackages = @(Get-ChildItem -LiteralPath dist/windows -Recurse -File -Include '*.msi')
+          if ($legacyPackages.Count -ne 0) { throw 'Legacy MSI output must not be produced.' }
+          if ((Get-AuthenticodeSignature -LiteralPath $installer.FullName).Status -ne 'NotSigned') {
+            throw "Development installer must be unsigned: $($installer.Name)"
           }
+          $hash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $($installer.Name)" | Set-Content -LiteralPath dist/windows/Remote-Docker-Windows-x64-SHA256SUMS -Encoding ascii
 
       - name: Upload unsigned development package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact@v7

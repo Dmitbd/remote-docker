@@ -38,7 +38,7 @@ func OwnedProcessUsage(records []ProcessRecord, rootPID int) ProcessUsage {
 	}
 	if usage.Processes == 0 {
 		return ProcessUsage{
-			CPUPercent: Unavailable[float64]("процессы Remote Docker не найдены"),
+			CPUPercent:  Unavailable[float64]("процессы Remote Docker не найдены"),
 			MemoryBytes: Unavailable[uint64]("процессы Remote Docker не найдены"),
 		}
 	}

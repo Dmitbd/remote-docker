@@ -171,7 +171,7 @@ func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (loc
 	c.mu.Unlock()
 	return localapi.PairStartResult{
 		SessionID: descriptor.ID, Code: code,
-		Peer: localapi.LifecyclePeer{ID: target.InstanceID, Name: target.Name, OS: "windows", Address: target.Address},
+		Peer:      localapi.LifecyclePeer{ID: target.InstanceID, Name: target.Name, OS: "windows", Address: target.Address},
 		ExpiresAt: descriptor.ExpiresAt.UTC().Format(time.RFC3339Nano),
 	}, nil
 }
@@ -366,8 +366,8 @@ func pairingStatusResult(pending pendingPairing, status pairing.SessionStatus) l
 	code, _ := pairing.Code(pending.descriptor)
 	return localapi.PairingStatusResult{
 		SessionID: status.SessionID,
-		Peer: localapi.LifecyclePeer{ID: pending.target.InstanceID, Name: pending.target.Name, OS: "windows", Address: pending.target.Address},
-		Code: code, Status: string(status.State), ExpiresAt: status.ExpiresAt.UTC().Format(time.RFC3339Nano),
+		Peer:      localapi.LifecyclePeer{ID: pending.target.InstanceID, Name: pending.target.Name, OS: "windows", Address: pending.target.Address},
+		Code:      code, Status: string(status.State), ExpiresAt: status.ExpiresAt.UTC().Format(time.RFC3339Nano),
 	}
 }
 

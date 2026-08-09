@@ -33,12 +33,12 @@ type presenceDisconnectParams struct {
 }
 
 type presenceResult struct {
-	SessionID        string `json:"session_id,omitempty"`
+	SessionID         string `json:"session_id,omitempty"`
 	ServerMonotonicMS int64  `json:"server_monotonic_ms"`
-	DockerReady      bool   `json:"docker_ready"`
-	SyncReady        bool   `json:"sync_ready"`
-	Terminal         bool   `json:"terminal,omitempty"`
-	Reason           string `json:"reason,omitempty"`
+	DockerReady       bool   `json:"docker_ready"`
+	SyncReady         bool   `json:"sync_ready"`
+	Terminal          bool   `json:"terminal,omitempty"`
+	Reason            string `json:"reason,omitempty"`
 }
 
 type presenceOptions struct {
@@ -48,22 +48,22 @@ type presenceOptions struct {
 }
 
 type presenceLease struct {
-	deviceID string
-	name     string
-	version  string
-	sessionID string
-	sequence uint64
-	lastSeen time.Time
+	deviceID       string
+	name           string
+	version        string
+	sessionID      string
+	sequence       uint64
+	lastSeen       time.Time
 	terminalReason string
 }
 
 type presenceManager struct {
-	mu sync.Mutex
-	now func() time.Time
-	random io.Reader
-	ready func(context.Context) (bool, bool)
+	mu      sync.Mutex
+	now     func() time.Time
+	random  io.Reader
+	ready   func(context.Context) (bool, bool)
 	started time.Time
-	lease *presenceLease
+	lease   *presenceLease
 }
 
 func newPresenceManager(options presenceOptions) *presenceManager {

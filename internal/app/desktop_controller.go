@@ -226,8 +226,8 @@ func statusFromLifecycle(snapshot lifecycle.Snapshot) localapi.StatusResult {
 		Revision: snapshot.Revision, Role: string(snapshot.Role), State: string(snapshot.State),
 		LocalName: snapshot.LocalName, Paired: snapshot.TrustedPeers == 1,
 		TrustedPeers: snapshot.TrustedPeers, ConnectionLimit: snapshot.ConnectionLimit,
-		Docker: localapi.ServiceStatus{State: string(snapshot.Docker.State), Message: snapshot.Docker.Message},
-		Sync: localapi.ServiceStatus{State: string(snapshot.Sync.State), Pending: snapshot.Sync.Pending},
+		Docker:    localapi.ServiceStatus{State: string(snapshot.Docker.State), Message: snapshot.Docker.Message},
+		Sync:      localapi.ServiceStatus{State: string(snapshot.Sync.State), Pending: snapshot.Sync.Pending},
 		LatencyMS: snapshot.Latency.Milliseconds(), ActionInProgress: snapshot.ActionInProgress,
 		Terminal: snapshot.Terminal,
 	}

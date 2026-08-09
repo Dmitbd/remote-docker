@@ -34,7 +34,6 @@ const (
 	StepFirstBoot                ApplyStep = "first_boot"
 	StepHealthCheck              ApplyStep = "health_check"
 	StepConfigurePrivateFirewall ApplyStep = "configure_private_firewall"
-	StepRegisterAutostart        ApplyStep = "register_autostart"
 )
 
 // ApplyExecutor maps a reviewed step to the platform-specific implementation.
@@ -96,7 +95,6 @@ func Apply(ctx context.Context, plan Plan, confirmed bool, executor ApplyExecuto
 	for _, step := range []ApplyStep{
 		StepHealthCheck,
 		StepConfigurePrivateFirewall,
-		StepRegisterAutostart,
 	} {
 		if result, failed := runApplyStep(ctx, executor, step); failed {
 			return result

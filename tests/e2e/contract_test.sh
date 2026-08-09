@@ -5,6 +5,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 required_scripts=(
   tests/e2e/lib.sh
+  tests/e2e/desktop_lifecycle.sh
+  tests/e2e/pairing_approval.sh
   tests/e2e/docker_compatibility.sh
   tests/e2e/workspace_sync.sh
   tests/e2e/reconnect.sh
@@ -19,7 +21,17 @@ done
 
 for relative in "${required_scripts[@]:1}"; do
   path="${repo_root}/${relative}"
-  grep -q 'e2e_require_opt_in' "${path}" || { printf 'missing destructive-test opt-in: %s\n' "${relative}" >&2; exit 1; }
+  grep -q 'e2e_require_opt_in' "${path}" || { printf 'missing acceptance-test opt-in: %s\n' "${relative}" >&2; exit 1; }
+done
+
+engine_scripts=(
+  tests/e2e/docker_compatibility.sh
+  tests/e2e/workspace_sync.sh
+  tests/e2e/reconnect.sh
+  tests/e2e/security.sh
+)
+for relative in "${engine_scripts[@]}"; do
+  path="${repo_root}/${relative}"
   grep -q 'e2e_assert_remote_engine' "${path}" || { printf 'missing remote-engine identity gate: %s\n' "${relative}" >&2; exit 1; }
 done
 
@@ -29,6 +41,9 @@ done
 
 grep -q 'Managed by Remote Docker' "${repo_root}/tests/e2e/lib.sh"
 grep -q 'ssh://remote-docker-device-' "${repo_root}/tests/e2e/lib.sh"
+grep -q 'CLEAN_REBOOT' "${repo_root}/tests/e2e/desktop_lifecycle.sh"
+grep -q 'SAME_CODE' "${repo_root}/tests/e2e/pairing_approval.sh"
+grep -q 'ONE_TRUSTED_PEER' "${repo_root}/tests/e2e/pairing_approval.sh"
 grep -q 'docker compose' "${repo_root}/tests/e2e/docker_compatibility.sh"
 grep -q 'container-to-mac' "${repo_root}/tests/e2e/workspace_sync.sh"
 grep -q 'REMOTE_DOCKER_E2E_REBOOT_CONFIRMED' "${repo_root}/tests/e2e/reconnect.sh"

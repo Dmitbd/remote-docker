@@ -26,7 +26,6 @@ func TestApplyRunsProvisioningInOrder(t *testing.T) {
 		StepFirstBoot,
 		StepHealthCheck,
 		StepConfigurePrivateFirewall,
-		StepRegisterAutostart,
 	}
 	if !reflect.DeepEqual(executor.steps, want) {
 		t.Fatalf("steps = %#v, want %#v", executor.steps, want)
@@ -109,8 +108,9 @@ func TestProvisionScriptKeepsConfirmationAndMutationOrder(t *testing.T) {
 	script := readWindowsScript(t, "provision.ps1")
 	ordered := []string{
 		"if (-not $ConfirmProvisioning)",
-		"Enable-WindowsOptionalFeature",
+		"Assert-ManagedDirectory -Path $ApplicationRoot",
 		"New-Item -ItemType Directory",
+		"Enable-WindowsOptionalFeature",
 		"Get-FileHash",
 		"'--import'",
 		"$firstBoot = @(",
@@ -128,7 +128,7 @@ func TestProvisionScriptKeepsConfirmationAndMutationOrder(t *testing.T) {
 		}
 		last = position
 	}
-	for _, fragment := range []string{"-Program $agentExecutable", "-Profile Private", "-RemoteAddress LocalSubnet"} {
+	for _, fragment := range []string{"-Program $desktopExecutable", "-Profile Private", "-RemoteAddress LocalSubnet"} {
 		if !strings.Contains(script, fragment) {
 			t.Fatalf("provision.ps1 is missing firewall restriction %q", fragment)
 		}
@@ -140,14 +140,16 @@ func TestProvisionScriptKeepsConfirmationAndMutationOrder(t *testing.T) {
 	}
 }
 
-func TestProvisionFirstBootIsLFStableAndResumesPartialImport(t *testing.T) {
+func TestProvisionFirstBootIsLFStableAndIdempotentAfterPartialImport(t *testing.T) {
 	script := readWindowsScript(t, "provision.ps1")
 
 	for _, fragment := range []string{
-		"$firstBootRequired = -not $distroExists",
-		"if ($firstBootRequired)",
+		"$distroExists = Test-ManagedDistro",
+		"if (-not $distroExists)",
 		"$firstBoot = @(",
 		") -join \"`n\"",
+		"managed.json.tmp",
+		"mv -f /etc/remote-docker/managed.json.tmp /etc/remote-docker/managed.json",
 		"/etc/remote-docker/managed.json",
 	} {
 		if !strings.Contains(script, fragment) {
@@ -165,31 +167,38 @@ func TestProvisionFirstBootIsLFStableAndResumesPartialImport(t *testing.T) {
 	}
 }
 
-func TestProvisionMissingFirstBootMarkerDoesNotFailThePowerShellProbe(t *testing.T) {
+func TestProvisionRecreatesManagedMetadataWithoutDependingOnItsPresence(t *testing.T) {
 	script := readWindowsScript(t, "provision.ps1")
 
 	for _, fragment := range []string{
-		"$managedMetadataProbe = 'if [ -f /etc/remote-docker/managed.json ]; then cat /etc/remote-docker/managed.json; fi'",
-		"'--exec', '/bin/sh', '-c', $managedMetadataProbe",
-		"$firstBootRequired = $installedMetadata -ne $managedMetadata",
+		"$distroExists = Test-ManagedDistro",
+		"$firstBoot = @(",
+		"install -d -m 0755 /etc/remote-docker",
+		"managed.json.tmp",
+		"-Description 'Managed WSL first boot'",
 	} {
 		if !strings.Contains(script, fragment) {
-			t.Fatalf("provision.ps1 is missing non-failing marker probe fragment %q", fragment)
+			t.Fatalf("provision.ps1 is missing idempotent metadata preparation fragment %q", fragment)
 		}
 	}
-	if strings.Contains(script, "--exec cat /etc/remote-docker/managed.json") {
-		t.Fatal("provision.ps1 probes an optional marker with a failing native cat command")
+	if strings.Contains(script, "managedMetadataProbe") || strings.Contains(script, "firstBootRequired") {
+		t.Fatal("provision.ps1 must not require optional managed metadata before idempotent first boot")
 	}
 }
 
 func TestUninstallPreservesDataUnlessSeparatelyConfirmed(t *testing.T) {
 	script := readWindowsScript(t, "uninstall.ps1")
 	preserve := strings.Index(script, "if (-not $DeleteData)")
-	printName := strings.Index(script, "WSL distribution to delete: $managedDistroName")
+	exactPhrase := strings.Index(script, "$DataRemovalConfirmation -ne 'DELETE-REMOTE-DOCKER-DATA'")
+	ownership := strings.Index(script, "Managed data ownership marker is missing or invalid")
 	confirm := strings.Index(script, "$PSCmdlet.ShouldProcess")
 	deleteDistro := strings.Index(script, "Invoke-Wsl -ArgumentList @('--unregister', $managedDistroName)")
-	if preserve < 0 || printName <= preserve || confirm <= printName || deleteDistro <= confirm {
+	deleteTree := strings.Index(script, "Remove-Item -LiteralPath $distroRoot -Recurse -Force")
+	if preserve < 0 || exactPhrase <= preserve || ownership <= exactPhrase || confirm <= ownership || deleteDistro <= confirm || deleteTree <= confirm {
 		t.Fatalf("uninstall.ps1 does not preserve and separately confirm data deletion")
+	}
+	if strings.Contains(script, "Remove-Item -LiteralPath $ApplicationRoot -Recurse") {
+		t.Fatal("uninstall.ps1 must not recursively remove the selected application root")
 	}
 }
 

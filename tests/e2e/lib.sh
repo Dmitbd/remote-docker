@@ -24,9 +24,9 @@ e2e_assert_remote_engine() {
   e2e_require_command remote-docker
 
   local status context engine
-  status="$(remote-docker status --json)" || e2e_fail 'the background agent is unavailable'
+  status="$(remote-docker status --json)" || e2e_fail 'the desktop application is unavailable'
   printf '%s' "${status}" | grep -Eq '"state"[[:space:]]*:[[:space:]]*"Ready"' ||
-    e2e_fail 'the background agent is not Ready'
+    e2e_fail 'the desktop connection is not Ready'
 
   context="$(docker context inspect remote-docker --format '{{.Metadata.Description}}|{{(index .Endpoints "docker").Host}}')" ||
     e2e_fail 'the managed Docker context is unavailable'

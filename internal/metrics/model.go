@@ -17,9 +17,9 @@ func Unavailable[T any](reason string) Metric[T] {
 }
 
 type ProcessUsage struct {
-	CPUPercent Metric[float64] `json:"cpu_percent"`
-	MemoryBytes Metric[uint64] `json:"memory_bytes"`
-	Processes  int             `json:"processes,omitempty"`
+	CPUPercent  Metric[float64] `json:"cpu_percent"`
+	MemoryBytes Metric[uint64]  `json:"memory_bytes"`
+	Processes   int             `json:"processes,omitempty"`
 }
 
 type Rate struct {
@@ -35,20 +35,20 @@ type RunningState struct {
 }
 
 type Sample struct {
-	At                   time.Time       `json:"at"`
-	MacRemoteDocker      ProcessUsage    `json:"mac_remote_docker"`
-	WindowsRemoteDocker  ProcessUsage    `json:"windows_remote_docker"`
-	WindowsManagedWSL    ProcessUsage    `json:"windows_managed_wsl"`
-	DockerContainers     Metric[int]     `json:"docker_containers"`
-	SyncNetwork          Rate            `json:"sync_network"`
-	ManagedDiskBytes     Metric[uint64]  `json:"managed_disk_bytes"`
-	LocalDockerEngine    RunningState    `json:"local_docker_engine"`
+	At                  time.Time      `json:"at"`
+	MacRemoteDocker     ProcessUsage   `json:"mac_remote_docker"`
+	WindowsRemoteDocker ProcessUsage   `json:"windows_remote_docker"`
+	WindowsManagedWSL   ProcessUsage   `json:"windows_managed_wsl"`
+	DockerContainers    Metric[int]    `json:"docker_containers"`
+	SyncNetwork         Rate           `json:"sync_network"`
+	ManagedDiskBytes    Metric[uint64] `json:"managed_disk_bytes"`
+	LocalDockerEngine   RunningState   `json:"local_docker_engine"`
 }
 
 type RemoteSample struct {
 	WindowsRemoteDocker ProcessUsage   `json:"windows_remote_docker"`
-	WindowsManagedWSL ProcessUsage   `json:"windows_managed_wsl"`
-	DockerContainers  Metric[int]    `json:"docker_containers"`
-	ManagedDiskBytes  Metric[uint64] `json:"managed_disk_bytes"`
-	SyncNetworkTotal  Metric[uint64] `json:"sync_network_total"`
+	WindowsManagedWSL   ProcessUsage   `json:"windows_managed_wsl"`
+	DockerContainers    Metric[int]    `json:"docker_containers"`
+	ManagedDiskBytes    Metric[uint64] `json:"managed_disk_bytes"`
+	SyncNetworkTotal    Metric[uint64] `json:"sync_network_total"`
 }

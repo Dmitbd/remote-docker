@@ -46,10 +46,10 @@ e2e_wait_until "${REMOTE_DOCKER_E2E_RECONNECT_TIMEOUT:-180}" 'Docker recovery af
 e2e_wait_until "${REMOTE_DOCKER_E2E_RECONNECT_TIMEOUT:-180}" 'localhost relay after Wi-Fi interruption' relay_ready
 [[ "$(docker exec "${container}" cat /state/sentinel)" == 'preserved' ]] || e2e_fail 'named-volume state was lost after network recovery'
 
-e2e_note 'Restart the Windows PC, wait until its desktop and Remote Docker tray are available, then type REBOOTED.'
+e2e_note 'Restart Windows. Before launching anything, verify that Remote Docker, its managed WSL distribution, and its console windows are not running. Then launch Remote Docker manually, start hosting, and type REBOOTED.'
 read -r REMOTE_DOCKER_E2E_REBOOT_CONFIRMED
 [[ "${REMOTE_DOCKER_E2E_REBOOT_CONFIRMED}" == 'REBOOTED' ]] || e2e_fail 'Windows reboot was not explicitly confirmed'
-e2e_wait_until "${REMOTE_DOCKER_E2E_RECONNECT_TIMEOUT:-300}" 'Docker recovery after Windows restart' docker info
+e2e_wait_until "${REMOTE_DOCKER_E2E_RECONNECT_TIMEOUT:-300}" 'Docker recovery after manual Windows app launch' docker info
 e2e_wait_until "${REMOTE_DOCKER_E2E_RECONNECT_TIMEOUT:-300}" 'restart-policy container recovery' \
   container_running
 e2e_wait_until "${REMOTE_DOCKER_E2E_RECONNECT_TIMEOUT:-300}" 'localhost relay after Windows restart' relay_ready

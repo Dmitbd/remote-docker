@@ -39,7 +39,7 @@ func (s *windowsSampler) Sample(ctx context.Context, at time.Time, active bool) 
 		reason := "измерения managed WSL недоступны"
 		remote = RemoteSample{
 			WindowsManagedWSL: ProcessUsage{CPUPercent: Unavailable[float64](reason), MemoryBytes: Unavailable[uint64](reason)},
-			DockerContainers: Unavailable[int](reason), ManagedDiskBytes: Unavailable[uint64](reason),
+			DockerContainers:  Unavailable[int](reason), ManagedDiskBytes: Unavailable[uint64](reason),
 			SyncNetworkTotal: Unavailable[uint64](reason),
 		}
 	}
@@ -111,7 +111,7 @@ func (windowsWSLRemote) SampleRemote(ctx context.Context) (RemoteSample, error) 
 		return RemoteSample{}, err
 	}
 	var response struct {
-		Result RemoteSample `json:"result"`
+		Result RemoteSample    `json:"result"`
 		Error  json.RawMessage `json:"error"`
 	}
 	if err := json.Unmarshal(responseBody, &response); err != nil || len(response.Error) != 0 {

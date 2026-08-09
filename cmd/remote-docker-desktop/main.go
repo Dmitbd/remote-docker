@@ -133,12 +133,14 @@ func run() error {
 		return err
 	}
 	handler.setShow(application.Show)
+	shutdownDone := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		_, _ = controller.Handle(shutdownCtx, localapi.MethodShutdown, nil)
+		_, shutdownErr := controller.Handle(shutdownCtx, localapi.MethodShutdown, nil)
 		shutdownCancel()
 		application.Quit()
+		shutdownDone <- shutdownErr
 	}()
 	application.Run(ctx)
 	cancel()
@@ -147,7 +149,21 @@ func run() error {
 	case <-serveDone:
 	case <-time.After(2 * time.Second):
 	}
+	if err := waitForDesktopShutdown(shutdownDone, 32*time.Second); err != nil {
+		return fmt.Errorf("stop desktop runtime: %w", err)
+	}
 	return nil
+}
+
+func waitForDesktopShutdown(done <-chan error, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func initialTrustedPeer(store config.Store, role lifecycle.Role) *lifecycle.Peer {

@@ -21,20 +21,20 @@ const (
 type ActionID string
 
 const (
-	ActionEnableClient  ActionID = "enable-client"
-	ActionEnableHost    ActionID = "enable-host"
-	ActionStartSearch   ActionID = "start-search"
-	ActionStopSearch    ActionID = "stop-search"
-	ActionConnect       ActionID = "connect"
-	ActionApprovePair   ActionID = "approve-pair"
-	ActionRejectPair    ActionID = "reject-pair"
-	ActionCancelPair    ActionID = "cancel-pair"
-	ActionPause         ActionID = "pause"
-	ActionDisconnect    ActionID = "disconnect"
-	ActionForgetDevice  ActionID = "forget-device"
-	ActionAddWorkspace  ActionID = "add-workspace"
-	ActionDiagnostics   ActionID = "diagnostics"
-	ActionQuit          ActionID = "quit"
+	ActionEnableClient ActionID = "enable-client"
+	ActionEnableHost   ActionID = "enable-host"
+	ActionStartSearch  ActionID = "start-search"
+	ActionStopSearch   ActionID = "stop-search"
+	ActionConnect      ActionID = "connect"
+	ActionApprovePair  ActionID = "approve-pair"
+	ActionRejectPair   ActionID = "reject-pair"
+	ActionCancelPair   ActionID = "cancel-pair"
+	ActionPause        ActionID = "pause"
+	ActionDisconnect   ActionID = "disconnect"
+	ActionForgetDevice ActionID = "forget-device"
+	ActionAddWorkspace ActionID = "add-workspace"
+	ActionDiagnostics  ActionID = "diagnostics"
+	ActionQuit         ActionID = "quit"
 )
 
 type Action struct {
@@ -82,7 +82,7 @@ func BuildViewModel(snapshot lifecycle.Snapshot, selected Section, now time.Time
 	}
 	model := ViewModel{
 		LocalName: snapshot.LocalName, Selected: selected,
-		Sections: []Section{SectionConnection, SectionWorkspaces, SectionDiagnostics, SectionResources},
+		Sections:        []Section{SectionConnection, SectionWorkspaces, SectionDiagnostics, SectionResources},
 		ConnectionCount: fmt.Sprintf("%d из %d", snapshot.TrustedPeers, maximum(snapshot.ConnectionLimit, 1)),
 	}
 	if snapshot.Role == lifecycle.RoleWindowsHost {
@@ -199,6 +199,9 @@ func displayPairCode(code string) string {
 func serviceLabel(name string, state lifecycle.ServiceState) string {
 	switch state {
 	case lifecycle.ServiceReady:
+		if name == "Синхронизация" {
+			return name + " готова"
+		}
 		return name + " готов"
 	case lifecycle.ServiceStarting:
 		return name + " запускается"

@@ -40,9 +40,9 @@ func WithWatchdogFactory(factory WatchdogFactory) SupervisorOption {
 // Supervisor is the only owner allowed to start and stop session
 // infrastructure. Construction is inert and every launch begins paused.
 type Supervisor struct {
-	machine     *lifecycle.Machine
-	runtime     SessionRuntime
-	stopTimeout time.Duration
+	machine         *lifecycle.Machine
+	runtime         SessionRuntime
+	stopTimeout     time.Duration
 	watchdogFactory WatchdogFactory
 
 	mu       sync.Mutex

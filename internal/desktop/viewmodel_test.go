@@ -9,8 +9,8 @@ import (
 
 func TestBuildViewModelStartsPausedWithRoleSpecificManualEnable(t *testing.T) {
 	for _, tt := range []struct {
-		role lifecycle.Role
-		want ActionID
+		role      lifecycle.Role
+		want      ActionID
 		roleLabel string
 	}{
 		{role: lifecycle.RoleMacClient, want: ActionEnableClient, roleLabel: "Mac · отправляет Docker-команды"},

@@ -11,9 +11,9 @@ import (
 func TestPresenceManagerOwnsOneLeaseAndRejectsSequenceReplay(t *testing.T) {
 	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
 	manager := newPresenceManager(presenceOptions{
-		Now: func() time.Time { return now },
+		Now:    func() time.Time { return now },
 		Random: strings.NewReader("0123456789abcdef0123456789abcdef"),
-		Ready: func(context.Context) (bool, bool) { return true, true },
+		Ready:  func(context.Context) (bool, bool) { return true, true },
 	})
 	hello, err := manager.Hello(context.Background(), presenceHelloParams{
 		ClientDeviceID: "mac-one", ClientName: "MacBook", AppVersion: "0.1.0",

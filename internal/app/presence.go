@@ -245,7 +245,7 @@ func (p *HostPresence) Tick(ctx context.Context) error {
 		_, _ = p.machine.Apply(lifecycle.Event{Type: lifecycle.EventProblemDetected, Problem: &lifecycle.Problem{
 			Code: "network_cleanup_failed", Device: lifecycle.InitiatorLocal,
 			Message: "Remote Docker could not stop cleanly after the connection was lost.",
-			Action: "Open diagnostics and stop Remote Docker again.",
+			Action:  "Open diagnostics and stop Remote Docker again.",
 		}})
 		return err
 	}

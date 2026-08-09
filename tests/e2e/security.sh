@@ -43,7 +43,7 @@ marker="remote-docker-e2e-secret-$$"
 doctor_output="$(REMOTE_DOCKER_E2E_SECRET_MARKER="${marker}" remote-docker doctor --json)"
 [[ "${doctor_output}" != *"${marker}"* ]] || e2e_fail 'diagnostics exposed an environment secret marker'
 
-socket_path="${config_root}/agent.sock"
+socket_path="${HOME}/Library/Caches/RemoteDocker/agent.sock"
 if [[ -S "${socket_path}" ]]; then
   mode="$(stat -f '%Lp' "${socket_path}")"
   [[ "${mode}" == '600' ]] || e2e_fail "local control socket mode is ${mode}, expected 600"

@@ -88,31 +88,30 @@ jobs:
       - name: Build unsigned Windows package
         shell: pwsh
         run: >-
-          ./packaging/windows/build-msi.ps1
+          ./packaging/windows/build-installer.ps1
           -Version $env:RELEASE_VERSION
           -RootfsPath dist/remote-docker-rootfs.tar.zst
 
-      - name: Confirm Windows artifacts are unsigned
+      - name: Confirm the Windows Setup EXE is unsigned
         shell: pwsh
         run: |
-          $files = @(Get-ChildItem -LiteralPath dist/windows -Recurse -File | Where-Object Extension -in '.exe', '.msi')
-          if ($files.Count -ne 3) { throw "Expected two executables and one MSI, found $($files.Count)." }
-          foreach ($file in $files) {
-            if ((Get-AuthenticodeSignature -LiteralPath $file.FullName).Status -ne 'NotSigned') {
-              throw "Free release artifact must be unsigned: $($file.Name)"
-            }
+          $installer = Get-Item -LiteralPath "dist/windows/Remote-Docker-$env:RELEASE_VERSION-x64-Setup.exe"
+          $legacyPackages = @(Get-ChildItem -LiteralPath dist/windows -Recurse -File -Include '*.msi')
+          if ($legacyPackages.Count -ne 0) { throw 'Legacy MSI output must not be produced.' }
+          if ((Get-AuthenticodeSignature -LiteralPath $installer.FullName).Status -ne 'NotSigned') {
+            throw "Free release installer must be unsigned: $($installer.Name)"
           }
 
       - name: Create Windows provenance manifest
         shell: pwsh
         run: |
-          $files = @(Get-ChildItem -LiteralPath dist/windows -Recurse -File | Where-Object Extension -in '.exe', '.msi')
-          $artifacts = foreach ($file in $files) {
+          $installer = Get-Item -LiteralPath "dist/windows/Remote-Docker-$env:RELEASE_VERSION-x64-Setup.exe"
+          $artifacts = @(
             [ordered]@{
-              name = [IO.Path]::GetRelativePath((Resolve-Path dist/windows).Path, $file.FullName).Replace('\', '/')
-              sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              name = $installer.Name
+              sha256 = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             }
-          }
+          )
           [ordered]@{
             version = $env:RELEASE_VERSION
             source_commit = $env:GITHUB_SHA

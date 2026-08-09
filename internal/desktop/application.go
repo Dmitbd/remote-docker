@@ -15,10 +15,10 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+	productassets "github.com/Dmitbd/remote-docker/internal/assets"
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
 	"github.com/Dmitbd/remote-docker/internal/localapi"
 	"github.com/Dmitbd/remote-docker/internal/metrics"
-	productassets "github.com/Dmitbd/remote-docker/internal/assets"
 )
 
 const applicationID = "io.github.dmitbd.remote-docker"
@@ -42,17 +42,17 @@ type Application struct {
 	trayIcon   fyne.Resource
 	onQuit     func()
 
-	mu       sync.Mutex
-	selected Section
-	content  *fyne.Container
-	status   *widget.Label
-	role     *widget.Label
+	mu                   sync.Mutex
+	selected             Section
+	content              *fyne.Container
+	status               *widget.Label
+	role                 *widget.Label
 	lastPairNotification string
-	candidates []localapi.PairingCandidate
-	workspaces []localapi.Workspace
-	checks []localapi.DoctorCheck
-	resources metrics.Sample
-	lastDiagnosticsPoll time.Time
+	candidates           []localapi.PairingCandidate
+	workspaces           []localapi.Workspace
+	checks               []localapi.DoctorCheck
+	resources            metrics.Sample
+	lastDiagnosticsPoll  time.Time
 }
 
 func NewApplication(options ApplicationOptions) (*Application, error) {
@@ -201,7 +201,7 @@ func (a *Application) render(snapshot lifecycle.Snapshot) {
 		snapshot.Pairing.Status == lifecycle.PairingPending && snapshot.Pairing.SessionID != a.lastPairNotification {
 		a.lastPairNotification = snapshot.Pairing.SessionID
 		a.app.SendNotification(&fyne.Notification{
-			Title: "Запрос на подключение",
+			Title:   "Запрос на подключение",
 			Content: "Откройте Remote Docker и сравните код на Mac и Windows.",
 		})
 	}

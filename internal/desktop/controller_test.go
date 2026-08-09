@@ -49,7 +49,7 @@ func TestControllerAddsOnlySelectedWorkspacePath(t *testing.T) {
 func TestControllerReadsCandidatesAndPollsPairingWithoutManualCode(t *testing.T) {
 	handler := &recordingHandler{results: map[localapi.Method]any{
 		localapi.MethodPairCandidates: localapi.PairCandidatesResult{Candidates: []localapi.PairingCandidate{{ID: "pc", Name: "Windows PC"}}},
-		localapi.MethodPairStatus: localapi.PairingStatusResult{SessionID: "session", Code: "123456", Status: "pending"},
+		localapi.MethodPairStatus:     localapi.PairingStatusResult{SessionID: "session", Code: "123456", Status: "pending"},
 	}}
 	controller := NewController(handler, func() lifecycle.Snapshot {
 		return lifecycle.Snapshot{Pairing: &lifecycle.Pairing{SessionID: "session", Code: "123456"}}
@@ -70,7 +70,7 @@ func TestControllerReadsCandidatesAndPollsPairingWithoutManualCode(t *testing.T)
 func TestControllerReadsWorkspacesAndDiagnostics(t *testing.T) {
 	handler := &recordingHandler{results: map[localapi.Method]any{
 		localapi.MethodWorkspaceList: localapi.WorkspaceListResult{Workspaces: []localapi.Workspace{{ID: "one", Path: "/project"}}},
-		localapi.MethodDoctor: localapi.DoctorResult{Checks: []localapi.DoctorCheck{{Name: "docker", OK: true}}},
+		localapi.MethodDoctor:        localapi.DoctorResult{Checks: []localapi.DoctorCheck{{Name: "docker", OK: true}}},
 	}}
 	controller := NewController(handler, func() lifecycle.Snapshot { return lifecycle.Snapshot{} })
 	workspaces, err := controller.Workspaces(context.Background())
@@ -87,9 +87,9 @@ func TestControllerReadsWorkspacesAndDiagnostics(t *testing.T) {
 }
 
 type recordingHandler struct {
-	method localapi.Method
-	params json.RawMessage
-	results map[localapi.Method]any
+	method         localapi.Method
+	params         json.RawMessage
+	results        map[localapi.Method]any
 	lastPairParams any
 }
 

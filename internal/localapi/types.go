@@ -101,24 +101,24 @@ func (f HandlerFunc) Handle(ctx context.Context, method Method, params json.RawM
 }
 
 type StatusResult struct {
-	Revision         uint64              `json:"revision,omitempty"`
-	Role             string              `json:"role,omitempty"`
-	State            string              `json:"state"`
-	LocalName        string              `json:"local_name,omitempty"`
-	Paired           bool                `json:"paired"`
-	Message          string              `json:"message,omitempty"`
-	Peer             *LifecyclePeer      `json:"peer,omitempty"`
-	TrustedPeers     int                 `json:"trusted_peers"`
-	ConnectionLimit  int                 `json:"connection_limit,omitempty"`
+	Revision         uint64               `json:"revision,omitempty"`
+	Role             string               `json:"role,omitempty"`
+	State            string               `json:"state"`
+	LocalName        string               `json:"local_name,omitempty"`
+	Paired           bool                 `json:"paired"`
+	Message          string               `json:"message,omitempty"`
+	Peer             *LifecyclePeer       `json:"peer,omitempty"`
+	TrustedPeers     int                  `json:"trusted_peers"`
+	ConnectionLimit  int                  `json:"connection_limit,omitempty"`
 	Pairing          *PairingStatusResult `json:"pairing,omitempty"`
-	Docker           ServiceStatus       `json:"docker"`
-	Sync             ServiceStatus       `json:"sync"`
-	LatencyMS        int64               `json:"latency_ms,omitempty"`
-	Recovery         *RecoveryStatus     `json:"recovery,omitempty"`
-	LastDisconnect   *DisconnectStatus   `json:"last_disconnect,omitempty"`
-	ActionInProgress bool                `json:"action_in_progress,omitempty"`
-	Problem          *ProblemStatus      `json:"problem,omitempty"`
-	Terminal         bool                `json:"terminal,omitempty"`
+	Docker           ServiceStatus        `json:"docker"`
+	Sync             ServiceStatus        `json:"sync"`
+	LatencyMS        int64                `json:"latency_ms,omitempty"`
+	Recovery         *RecoveryStatus      `json:"recovery,omitempty"`
+	LastDisconnect   *DisconnectStatus    `json:"last_disconnect,omitempty"`
+	ActionInProgress bool                 `json:"action_in_progress,omitempty"`
+	Problem          *ProblemStatus       `json:"problem,omitempty"`
+	Terminal         bool                 `json:"terminal,omitempty"`
 }
 
 type LifecyclePeer struct {
@@ -201,10 +201,10 @@ type PairStartParams struct {
 }
 
 type PairStartResult struct {
-	SessionID string `json:"session_id"`
-	Code      string `json:"code,omitempty"`
+	SessionID string        `json:"session_id"`
+	Code      string        `json:"code,omitempty"`
 	Peer      LifecyclePeer `json:"peer"`
-	ExpiresAt string `json:"expires_at"`
+	ExpiresAt string        `json:"expires_at"`
 }
 
 type PairSessionParams struct {
