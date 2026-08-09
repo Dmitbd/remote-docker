@@ -107,11 +107,15 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 		if snapshot.Peer == nil || strings.TrimSpace(params.DeviceID) != "" && params.DeviceID != snapshot.Peer.ID {
 			return nil, needsAction("trusted device was not found")
 		}
-		if c.fallback != nil {
-			unpairRaw, _ := json.Marshal(localapi.UnpairParams{DeviceID: snapshot.Peer.ID})
-			if _, err := c.fallback.Handle(ctx, localapi.MethodUnpair, unpairRaw); err != nil {
-				return nil, err
-			}
+		if !c.supervisor.machine.Allowed(lifecycle.CommandForget) {
+			return nil, needsAction("disconnect before forgetting the trusted device")
+		}
+		if c.fallback == nil {
+			return nil, unavailable("paired device cleanup is unavailable")
+		}
+		unpairRaw, _ := json.Marshal(localapi.UnpairParams{DeviceID: snapshot.Peer.ID, LocalOnly: params.LocalOnly})
+		if _, err := c.fallback.Handle(ctx, localapi.MethodUnpair, unpairRaw); err != nil {
+			return nil, err
 		}
 		if _, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventTrustForgotten}); err != nil {
 			return nil, needsAction("disconnect before forgetting the trusted device")

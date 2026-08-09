@@ -235,15 +235,62 @@ func TestDesktopControllerCompletesMacPairingAfterRemoteApproval(t *testing.T) {
 	}
 }
 
+func TestDesktopControllerForgetsTrustOnlyAfterLocalCleanupSucceeds(t *testing.T) {
+	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "saved", Name: "Saved Windows"}))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := &recordingLocalHandler{}
+	controller, _ := NewDesktopController(supervisor, fallback)
+
+	if _, err := controller.Handle(context.Background(), localapi.MethodForgetDevice, json.RawMessage(`{"device_id":"saved","local_only":true}`)); err != nil {
+		t.Fatalf("ForgetDevice error = %v", err)
+	}
+	if got := supervisor.Snapshot(); got.TrustedPeers != 0 || got.Peer != nil {
+		t.Fatalf("trusted snapshot after forget = %#v", got)
+	}
+	if len(fallback.methods) != 1 || fallback.methods[0] != localapi.MethodUnpair {
+		t.Fatalf("delegated methods = %v, want [Unpair]", fallback.methods)
+	}
+	var params localapi.UnpairParams
+	if err := json.Unmarshal(fallback.raws[0], &params); err != nil {
+		t.Fatalf("decode delegated Unpair params: %v", err)
+	}
+	if params.DeviceID != "saved" || !params.LocalOnly {
+		t.Fatalf("delegated Unpair params = %#v", params)
+	}
+}
+
+func TestDesktopControllerKeepsTrustWhenLocalCleanupFails(t *testing.T) {
+	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "saved", Name: "Saved Windows"}))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	cleanupErr := errors.New("managed SSH cleanup failed")
+	controller, _ := NewDesktopController(supervisor, &recordingLocalHandler{err: cleanupErr})
+
+	_, err = controller.Handle(context.Background(), localapi.MethodForgetDevice, json.RawMessage(`{"device_id":"saved","local_only":true}`))
+	if !errors.Is(err, cleanupErr) {
+		t.Fatalf("ForgetDevice error = %v, want cleanup error", err)
+	}
+	if got := supervisor.Snapshot(); got.TrustedPeers != 1 || got.Peer == nil || got.Peer.ID != "saved" {
+		t.Fatalf("trusted snapshot changed after cleanup failure = %#v", got)
+	}
+}
+
 type recordingLocalHandler struct {
 	methods []localapi.Method
+	raws    []json.RawMessage
 	result  any
 	results map[localapi.Method]any
 	err     error
 }
 
-func (h *recordingLocalHandler) Handle(_ context.Context, method localapi.Method, _ json.RawMessage) (any, error) {
+func (h *recordingLocalHandler) Handle(_ context.Context, method localapi.Method, raw json.RawMessage) (any, error) {
 	h.methods = append(h.methods, method)
+	h.raws = append(h.raws, append(json.RawMessage(nil), raw...))
 	if result, ok := h.results[method]; ok {
 		return result, h.err
 	}

@@ -72,6 +72,17 @@ func WriteConfig(path string, config Config) error {
 	return writePrivateFile(path, []byte(content))
 }
 
+// RemoveConfig deletes only the absolute app-managed SSH configuration file.
+func RemoveConfig(path string) error {
+	if !filepath.IsAbs(path) || filepath.Base(filepath.Clean(path)) != "ssh_config" {
+		return errors.New("managed SSH config path must be an absolute ssh_config path")
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove managed SSH config: %w", err)
+	}
+	return nil
+}
+
 func hostAlias(deviceID string) (string, error) {
 	if deviceID == "" || len(deviceID) > 64 {
 		return "", errors.New("invalid SSH device ID")

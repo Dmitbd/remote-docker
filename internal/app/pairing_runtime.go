@@ -400,7 +400,7 @@ func pairingStatusResult(pending pendingPairing, status pairing.SessionStatus) l
 	}
 }
 
-func (c *macPairingCoordinator) Unpair(ctx context.Context, deviceID string) error {
+func (c *macPairingCoordinator) Unpair(ctx context.Context, deviceID string, localOnly bool) error {
 	cfg, err := loadAgentConfig(c.options.Store)
 	if err != nil {
 		return unavailable("cannot read paired device configuration")
@@ -409,21 +409,47 @@ func (c *macPairingCoordinator) Unpair(ctx context.Context, deviceID string) err
 		deviceID = cfg.ActiveDevice
 	}
 	device, exists := cfg.Devices[deviceID]
-	if !exists || strings.TrimSpace(device.ClientDeviceID) == "" {
+	if !exists {
 		return needsAction("paired device was not found")
 	}
-	if err := c.options.Transport.Revoke(ctx, device, device.ClientDeviceID); err != nil {
-		return unavailable("remote pairing revocation failed")
+	if !localOnly {
+		if strings.TrimSpace(device.ClientDeviceID) == "" {
+			return needsAction("paired device was not found")
+		}
+		if err := c.options.Transport.Revoke(ctx, device, device.ClientDeviceID); err != nil {
+			return unavailable("remote pairing revocation failed")
+		}
+	}
+	return c.forgetLocal(deviceID)
+}
+
+func (c *macPairingCoordinator) forgetLocal(deviceID string) error {
+	cfg, err := loadAgentConfig(c.options.Store)
+	if err != nil {
+		return unavailable("cannot read paired device configuration")
+	}
+	if deviceID == "" {
+		deviceID = cfg.ActiveDevice
+	}
+	if _, exists := cfg.Devices[deviceID]; !exists {
+		return needsAction("paired device was not found")
+	}
+	alias := "remote-docker-device-" + deviceID
+	if err := sshtransport.RemovePinnedHost(c.options.KnownHostsPath, alias); err != nil {
+		return unavailable("cannot remove pinned SSH identity")
+	}
+	if err := sshtransport.RemoveConfig(c.options.SSHConfigPath); err != nil {
+		return unavailable("cannot remove managed SSH configuration")
+	}
+	if err := c.options.Secrets.Delete(deviceID, sshtransport.SSHPrivateKeyCredential); err != nil && !errors.Is(err, credentials.ErrNotFound) {
+		return unavailable("cannot delete paired SSH identity")
 	}
 	delete(cfg.Devices, deviceID)
 	if cfg.ActiveDevice == deviceID {
 		cfg.ActiveDevice = ""
 	}
 	if err := c.options.Store.Save(cfg); err != nil {
-		return unavailable("cannot save pairing revocation")
-	}
-	if err := c.options.Secrets.Delete(deviceID, sshtransport.SSHPrivateKeyCredential); err != nil && !errors.Is(err, credentials.ErrNotFound) {
-		return unavailable("cannot delete revoked SSH identity")
+		return unavailable("cannot save pairing removal")
 	}
 	return nil
 }

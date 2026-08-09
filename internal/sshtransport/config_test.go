@@ -119,6 +119,59 @@ func TestPinKnownHostRejectsChangedKeyWithoutOverwriting(t *testing.T) {
 	}
 }
 
+func TestRemovePinnedHostRemovesOnlyExactManagedAlias(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "known_hosts")
+	alias := "remote-docker-device-A1B2C3"
+	content := "github.com ssh-ed25519 github-key\n" +
+		alias + " " + authorizedPublicKey(t) + "\n" +
+		alias + "-backup ssh-ed25519 backup-key\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("seed known_hosts: %v", err)
+	}
+
+	if err := RemovePinnedHost(path, alias); err != nil {
+		t.Fatalf("RemovePinnedHost() error = %v", err)
+	}
+	want := "github.com ssh-ed25519 github-key\n" + alias + "-backup ssh-ed25519 backup-key\n"
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(got) != want {
+		t.Fatalf("known_hosts after removal = %q, want %q", got, want)
+	}
+}
+
+func TestRemoveConfigDeletesOnlyAbsoluteManagedPath(t *testing.T) {
+	root := t.TempDir()
+	managedPath := filepath.Join(root, "ssh_config")
+	unmanagedPath := filepath.Join(root, "user_config")
+	for _, path := range []string{managedPath, unmanagedPath} {
+		if err := os.WriteFile(path, []byte("config\n"), 0o600); err != nil {
+			t.Fatalf("seed %s: %v", path, err)
+		}
+	}
+
+	if err := RemoveConfig("ssh_config"); err == nil {
+		t.Fatal("RemoveConfig(relative path) error = nil")
+	}
+	if err := RemoveConfig(unmanagedPath); err == nil {
+		t.Fatal("RemoveConfig(unmanaged path) error = nil")
+	}
+	if _, err := os.Stat(unmanagedPath); err != nil {
+		t.Fatalf("unmanaged config changed: %v", err)
+	}
+	if err := RemoveConfig(managedPath); err != nil {
+		t.Fatalf("RemoveConfig(managed path) error = %v", err)
+	}
+	if _, err := os.Stat(managedPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("managed config after removal error = %v", err)
+	}
+	if err := RemoveConfig(managedPath); err != nil {
+		t.Fatalf("RemoveConfig(missing managed path) error = %v", err)
+	}
+}
+
 func authorizedPublicKey(t *testing.T) string {
 	t.Helper()
 	publicKey, _, err := ed25519.GenerateKey(nil)

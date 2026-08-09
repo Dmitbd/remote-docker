@@ -505,7 +505,7 @@ type runtimePairingCoordinator interface {
 	Approve(context.Context, string) (localapi.PairingStatusResult, error)
 	Reject(context.Context, string) (localapi.PairingStatusResult, error)
 	Cancel(context.Context, string) (localapi.PairingStatusResult, error)
-	Unpair(context.Context, string) error
+	Unpair(context.Context, string, bool) error
 }
 
 type productionAgentController struct {
@@ -617,7 +617,7 @@ func (c *productionAgentController) Handle(ctx context.Context, method localapi.
 		if err := decodeControlParams(raw, &params); err != nil {
 			return nil, err
 		}
-		if err := c.pairing.Unpair(ctx, params.DeviceID); err != nil {
+		if err := c.pairing.Unpair(ctx, params.DeviceID, params.LocalOnly); err != nil {
 			return nil, err
 		}
 		return map[string]bool{"unpaired": true}, nil
@@ -1391,7 +1391,10 @@ func (windowsPairingCoordinator) Cancel(context.Context, string) (localapi.Pairi
 	return localapi.PairingStatusResult{}, needsAction("only the Mac client can cancel its pairing request")
 }
 
-func (c windowsPairingCoordinator) Unpair(ctx context.Context, deviceID string) error {
+func (c windowsPairingCoordinator) Unpair(ctx context.Context, deviceID string, localOnly bool) error {
+	if localOnly {
+		return needsAction("local-only forgetting is available only on the Mac client")
+	}
 	if strings.TrimSpace(deviceID) == "" {
 		return needsAction("client device ID is required")
 	}

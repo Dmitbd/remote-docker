@@ -219,11 +219,13 @@ type DisconnectParams struct {
 }
 
 type ForgetDeviceParams struct {
-	DeviceID string `json:"device_id,omitempty"`
+	DeviceID  string `json:"device_id,omitempty"`
+	LocalOnly bool   `json:"local_only,omitempty"`
 }
 
 type UnpairParams struct {
-	DeviceID string `json:"device_id,omitempty"`
+	DeviceID  string `json:"device_id,omitempty"`
+	LocalOnly bool   `json:"local_only,omitempty"`
 }
 
 type Workspace struct {

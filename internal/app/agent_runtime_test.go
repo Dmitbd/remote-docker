@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"errors"
@@ -438,7 +439,7 @@ func TestMacPairingCoordinatorPersistsPinnedDeviceAndRevokesBeforeLocalRemoval(t
 		t.Fatalf("Docker context calls = %#v", docker.calls)
 	}
 
-	if err := coordinator.Unpair(context.Background(), confirmed.ID); err != nil {
+	if err := coordinator.Unpair(context.Background(), confirmed.ID, false); err != nil {
 		t.Fatalf("Unpair() error = %v", err)
 	}
 	if transport.revoked != device.ClientDeviceID {
@@ -450,6 +451,83 @@ func TestMacPairingCoordinatorPersistsPinnedDeviceAndRevokesBeforeLocalRemoval(t
 	}
 	if _, err := secrets.Get(confirmed.ID, sshtransport.SSHPrivateKeyCredential); !errors.Is(err, credentials.ErrNotFound) {
 		t.Fatalf("private key after unpair error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "ssh_config")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("managed SSH config after unpair error = %v", err)
+	}
+	knownHosts, err = os.ReadFile(filepath.Join(root, "known_hosts"))
+	if err != nil || len(knownHosts) != 0 {
+		t.Fatalf("known_hosts after unpair = %q, error = %v", knownHosts, err)
+	}
+}
+
+func TestMacPairingLocalForgetSkipsRemoteRevokeAndPreservesWorkspaces(t *testing.T) {
+	root := t.TempDir()
+	store := config.Store{Path: filepath.Join(root, "config.json")}
+	deviceID := "trusted-windows"
+	device := config.Device{
+		Name: "Saved Windows", Address: "192.168.1.20", SSHPort: 49222,
+		SSHHostPublicKey: testAuthorizedKey(t), SyncthingDeviceID: "WINDOWS-SYNC", ClientDeviceID: "LOCAL-SYNC",
+	}
+	workspaces := map[string]config.Workspace{
+		"workspace-1": {Path: "/Users/developer/project"},
+	}
+	localIdentity := []byte("local-syncthing-identity")
+	if err := store.Save(config.Config{
+		SchemaVersion: config.CurrentSchemaVersion, ActiveDevice: deviceID,
+		LocalSyncthingDeviceID: "LOCAL-SYNC", LocalSyncthingIdentity: append([]byte(nil), localIdentity...),
+		Devices: map[string]config.Device{deviceID: device}, Workspaces: workspaces,
+	}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	secrets := credentials.NewMemoryStore()
+	if err := secrets.Put(deviceID, sshtransport.SSHPrivateKeyCredential, []byte("managed-private-key")); err != nil {
+		t.Fatalf("seed SSH identity: %v", err)
+	}
+	sshConfigPath := filepath.Join(root, "ssh_config")
+	knownHostsPath := filepath.Join(root, "known_hosts")
+	if err := os.WriteFile(sshConfigPath, []byte("managed SSH config\n"), 0o600); err != nil {
+		t.Fatalf("seed managed SSH config: %v", err)
+	}
+	managedAlias := "remote-docker-device-" + deviceID
+	unrelatedKnownHost := "unrelated.example ssh-ed25519 unrelated-key\n"
+	if err := os.WriteFile(knownHostsPath, []byte(managedAlias+" "+device.SSHHostPublicKey+"\n"+unrelatedKnownHost), 0o600); err != nil {
+		t.Fatalf("seed known_hosts: %v", err)
+	}
+	transport := &runtimePairingTransport{revokeErr: errors.New("peer unreachable")}
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Store: store, Secrets: secrets, Transport: transport,
+		SSHConfigPath: sshConfigPath, KnownHostsPath: knownHostsPath,
+	})
+
+	if err := coordinator.Unpair(context.Background(), deviceID, true); err != nil {
+		t.Fatalf("Unpair(local only) error = %v", err)
+	}
+	if transport.revokeCalls != 0 {
+		t.Fatalf("remote revoke calls = %d, want zero", transport.revokeCalls)
+	}
+	got, err := store.Load()
+	if err != nil {
+		t.Fatalf("load config after local forget: %v", err)
+	}
+	if got.ActiveDevice != "" || len(got.Devices) != 0 {
+		t.Fatalf("trusted device survived local forget: %#v", got)
+	}
+	if !reflect.DeepEqual(got.Workspaces, workspaces) {
+		t.Fatalf("workspaces changed: got %#v want %#v", got.Workspaces, workspaces)
+	}
+	if got.LocalSyncthingDeviceID != "LOCAL-SYNC" || !bytes.Equal(got.LocalSyncthingIdentity, localIdentity) {
+		t.Fatalf("local Syncthing identity changed: id=%q identity=%q", got.LocalSyncthingDeviceID, got.LocalSyncthingIdentity)
+	}
+	if _, err := secrets.Get(deviceID, sshtransport.SSHPrivateKeyCredential); !errors.Is(err, credentials.ErrNotFound) {
+		t.Fatalf("private key after local forget error = %v", err)
+	}
+	if _, err := os.Stat(sshConfigPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("managed SSH config after local forget error = %v", err)
+	}
+	knownHosts, err := os.ReadFile(knownHostsPath)
+	if err != nil || string(knownHosts) != unrelatedKnownHost {
+		t.Fatalf("known_hosts after local forget = %q, error = %v", knownHosts, err)
 	}
 }
 
@@ -545,6 +623,8 @@ type runtimePairingTransport struct {
 	hostKey   string
 	private   ed25519.PrivateKey
 	revoked   string
+	revokeErr error
+	revokeCalls int
 	status    pairing.SessionState
 	cancelled string
 	targets   []pairingTarget
@@ -594,8 +674,9 @@ func (t *runtimePairingTransport) Cancel(_ context.Context, _ pairingTarget, des
 }
 
 func (t *runtimePairingTransport) Revoke(_ context.Context, _ config.Device, clientDeviceID string) error {
+	t.revokeCalls++
 	t.revoked = clientDeviceID
-	return nil
+	return t.revokeErr
 }
 
 type runtimeDockerExecutor struct{ calls [][]string }
