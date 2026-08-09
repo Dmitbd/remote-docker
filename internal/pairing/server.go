@@ -54,6 +54,8 @@ type Server struct {
 	displayName string
 	device      DeviceInfo
 	installer   Installer
+	sessionGuard func(context.Context) error
+	afterInstall func(context.Context, string) error
 	now         func() time.Time
 	random      io.Reader
 	active      *sessionState
@@ -83,6 +85,22 @@ func WithDeviceInfo(device DeviceInfo) ServerOption {
 func WithInstaller(installer Installer) ServerOption {
 	return func(server *Server) {
 		server.installer = installer
+	}
+}
+
+// WithSessionGuard rejects bootstrap before any session metadata is created.
+// The Windows host uses it to enforce the one-trusted-peer product limit.
+func WithSessionGuard(guard func(context.Context) error) ServerOption {
+	return func(server *Server) {
+		server.sessionGuard = guard
+	}
+}
+
+// WithAfterInstall persists public trust metadata after the managed WSL key is
+// installed. A failure revokes that exact key and keeps the session retryable.
+func WithAfterInstall(afterInstall func(context.Context, string) error) ServerOption {
+	return func(server *Server) {
+		server.afterInstall = afterInstall
 	}
 }
 
@@ -350,6 +368,12 @@ func (s *Server) serveStartSession(response http.ResponseWriter, request *http.R
 		writeError(response, http.StatusBadRequest, "invalid pairing session request")
 		return
 	}
+	if s.sessionGuard != nil {
+		if err := s.sessionGuard(request.Context()); err != nil {
+			writeError(response, http.StatusConflict, "connection limit reached; forget the trusted device first")
+			return
+		}
+	}
 	descriptor, err := s.StartSession(input.ClientPublicKey, MaxSessionTTL)
 	if errors.Is(err, ErrSessionActive) {
 		writeError(response, http.StatusConflict, "a pairing session is already active")
@@ -404,6 +428,14 @@ func (s *Server) confirm(ctx context.Context, request confirmRequest) (DeviceRec
 		if installErr != nil || strings.TrimSpace(device.SSHHostPublicKey) == "" || strings.TrimSpace(device.SyncthingDeviceID) == "" ||
 			device.SSHPort < 1 || device.SSHPort > 65535 || device.SyncthingPort < 1 || device.SyncthingPort > 65535 {
 			return DeviceRecord{}, http.StatusServiceUnavailable, "managed pairing installation failed"
+		}
+	}
+	if s.afterInstall != nil {
+		if err := s.afterInstall(ctx, request.DeviceID); err != nil {
+			if s.installer != nil {
+				_ = s.installer.Revoke(ctx, request.DeviceID)
+			}
+			return DeviceRecord{}, http.StatusServiceUnavailable, "cannot persist trusted device metadata"
 		}
 	}
 	record := DeviceRecord{

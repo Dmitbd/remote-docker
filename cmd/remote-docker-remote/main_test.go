@@ -75,6 +75,13 @@ func TestPairingInstallAndRevokeOwnOnlyManagedAuthorizedKey(t *testing.T) {
 	if !strings.Contains(string(contents), macKey) || !strings.Contains(string(contents), "remote-docker-device=mac-device") {
 		t.Fatalf("authorized keys = %q", contents)
 	}
+	otherKey := authorizedKey(t)
+	if code := runPairingInstall(context.Background(), runtime, []string{"--device", "other-device"}, strings.NewReader(otherKey+"\n"), &bytes.Buffer{}, &bytes.Buffer{}); code == 0 {
+		t.Fatal("pairing install replaced an existing trusted device")
+	}
+	if unchanged, readErr := os.ReadFile(authorizedKeysPath); readErr != nil || !bytes.Equal(unchanged, contents) {
+		t.Fatalf("existing authorization changed: %q error=%v", unchanged, readErr)
+	}
 
 	if code := runPairingRevoke(runtime, []string{"--device", "other-device"}, &bytes.Buffer{}); code == 0 {
 		t.Fatal("revoke for another device succeeded")

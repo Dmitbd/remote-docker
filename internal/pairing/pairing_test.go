@@ -98,6 +98,23 @@ func TestPairingBootstrapOverTLSBindsClientAndServerKeys(t *testing.T) {
 	assertHTTPStatus(t, err, http.StatusConflict)
 }
 
+func TestPairingBootstrapRejectsWhenTrustedPeerAlreadyExists(t *testing.T) {
+	server, err := NewServer(newServerIdentity(t), WithSessionGuard(func(context.Context) error {
+		return errors.New("trusted peer exists")
+	}))
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	httpServer := newPairingTLSTestServer(t, server)
+	defer httpServer.Close()
+	clientPublicKey, _, _ := ed25519.GenerateKey(nil)
+	_, err = Bootstrap(context.Background(), httpServer.URL, clientPublicKey, nil)
+	assertHTTPStatus(t, err, http.StatusConflict)
+	if _, _, active := server.ActiveSession(); active {
+		t.Fatal("rejected bootstrap created an active session")
+	}
+}
+
 func TestPairingInfoIsReadOnlyAndBoundToEphemeralTLSIdentity(t *testing.T) {
 	identity := newServerIdentity(t)
 	server, err := NewServer(identity, WithDisplayName("Windows Workstation"))
@@ -224,6 +241,39 @@ func TestPairingConfirmInstallsOnlyManagedClientKeyAndReturnsInstallerMetadata(t
 	}
 	if bytes.Contains(bytes.ToLower(raw), []byte("private")) {
 		t.Fatalf("pair response contains private material: %s", raw)
+	}
+}
+
+func TestPairingRollsBackManagedKeyWhenPublicTrustMetadataCannotBeSaved(t *testing.T) {
+	installer := &recordingPairInstaller{device: DeviceInfo{
+		SSHHostPublicKey: "ssh-ed25519 HOST", SyncthingDeviceID: "SYNC", SSHPort: 49222, SyncthingPort: 49220,
+	}}
+	server, err := NewServer(newServerIdentity(t), WithInstaller(installer), WithAfterInstall(func(context.Context, string) error {
+		return errors.New("disk unavailable")
+	}))
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	clientPublicKey, _, _ := ed25519.GenerateKey(nil)
+	descriptor, err := server.StartSession(clientPublicKey, MaxSessionTTL)
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+	if err := server.Approve(descriptor.ID); err != nil {
+		t.Fatalf("Approve() error = %v", err)
+	}
+	httpServer := newPairingTLSTestServer(t, server)
+	defer httpServer.Close()
+	client := Client{BaseURL: httpServer.URL, Session: descriptor, DeviceID: "mac", AuthorizedKey: "ssh-ed25519 KEY"}
+	code, _ := client.Code()
+	_, _, err = client.Confirm(context.Background(), code)
+	assertHTTPStatus(t, err, http.StatusServiceUnavailable)
+	if installer.installs != 1 || installer.revokes != 1 || installer.deviceID != "mac" {
+		t.Fatalf("installer calls installs=%d revokes=%d device=%q", installer.installs, installer.revokes, installer.deviceID)
+	}
+	status, ok := server.SessionStatus(descriptor.ID)
+	if !ok || status.State != SessionApproved {
+		t.Fatalf("session after rollback = %#v, %t", status, ok)
 	}
 }
 

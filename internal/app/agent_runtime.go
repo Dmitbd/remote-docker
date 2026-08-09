@@ -129,12 +129,13 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 	var windowsBridge localSyncLifecycle
 	if runtime.GOOS == "windows" {
 		installer := provision.WSLPairingInstaller{}
-		host, err := newWindowsPairingHost(installer)
+		registry := windowsPairingRegistry{store: store}
+		host, err := newWindowsPairingHostWithRegistry(installer, registry)
 		if err != nil {
 			return nil, err
 		}
 		pairHost = host
-		pairingCoordinator = windowsPairingCoordinator{server: host.server, installer: installer}
+		pairingCoordinator = windowsPairingCoordinator{server: host.server, installer: installer, registry: &registry}
 		managedRuntime, runtimeErr := provision.NewManagedWSLRuntime(executablePath, secrets)
 		if runtimeErr != nil {
 			return nil, runtimeErr
@@ -1046,6 +1047,10 @@ type windowsPairingHost struct {
 }
 
 func newWindowsPairingHost(installer pairing.Installer) (*windowsPairingHost, error) {
+	return newWindowsPairingHostWithRegistry(installer, windowsPairingRegistry{})
+}
+
+func newWindowsPairingHostWithRegistry(installer pairing.Installer, registry windowsPairingRegistry) (*windowsPairingHost, error) {
 	deviceName, err := os.Hostname()
 	if err != nil || strings.TrimSpace(deviceName) == "" {
 		return nil, errors.New("find Windows device name")
@@ -1054,10 +1059,19 @@ func newWindowsPairingHost(installer pairing.Installer) (*windowsPairingHost, er
 	if err != nil {
 		return nil, err
 	}
-	server, err := pairing.NewServer(
-		pairing.ServerIdentity{PrivateKey: privateKey},
+	options := []pairing.ServerOption{
 		pairing.WithInstaller(installer),
 		pairing.WithDisplayName(strings.TrimSpace(deviceName)),
+	}
+	if registry.store.Path != "" {
+		options = append(options,
+			pairing.WithSessionGuard(registry.Allow),
+			pairing.WithAfterInstall(registry.Commit),
+		)
+	}
+	server, err := pairing.NewServer(
+		pairing.ServerIdentity{PrivateKey: privateKey},
+		options...,
 	)
 	if err != nil {
 		return nil, err
@@ -1225,6 +1239,7 @@ func stopTimer(timer *time.Timer) {
 type windowsPairingCoordinator struct {
 	server    *pairing.Server
 	installer pairing.Installer
+	registry  *windowsPairingRegistry
 }
 
 func (windowsPairingCoordinator) Candidates(context.Context) (localapi.PairCandidatesResult, error) {
@@ -1298,6 +1313,11 @@ func (c windowsPairingCoordinator) Unpair(ctx context.Context, deviceID string) 
 	}
 	if err := c.installer.Revoke(ctx, deviceID); err != nil {
 		return unavailable("managed pairing revocation failed")
+	}
+	if c.registry != nil {
+		if err := c.registry.Forget(deviceID); err != nil {
+			return unavailable("cannot remove trusted device metadata")
+		}
 	}
 	return nil
 }

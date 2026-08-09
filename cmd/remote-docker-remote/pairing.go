@@ -51,6 +51,18 @@ func runPairingInstall(ctx context.Context, runtime pairingRuntime, args []strin
 		fmt.Fprintln(errorOutput, "invalid managed pairing key")
 		return 1
 	}
+	existing, err := os.ReadFile(runtime.AuthorizedKeysPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintln(errorOutput, "cannot read managed pairing key")
+		return 1
+	}
+	if len(existing) > 0 {
+		managedDeviceID, managed := managedPairingDeviceID(existing)
+		if !managed || managedDeviceID != deviceID {
+			fmt.Fprintln(errorOutput, "connection limit reached; forget the trusted device first")
+			return 1
+		}
+	}
 	hostRaw, err := os.ReadFile(runtime.HostPublicKeyPath)
 	if err != nil {
 		fmt.Fprintln(errorOutput, "managed SSH host identity is unavailable")
