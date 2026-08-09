@@ -82,6 +82,8 @@ Describe 'Windows Setup EXE contract' {
         $script | Should -Match '\$GoVersion\s*=\s*''1\.26\.5'''
         $script | Should -Match '\$NsisVersion\s*=\s*''3\.12'''
         $script | Should -Match '\$NsisSha256\s*=\s*''[a-f0-9]{64}'''
+        $script | Should -Match 'downloads\.sourceforge\.net/project/nsis/NSIS%203/\$NsisVersion/'
+        $script | Should -Match '\$attempt\s*-le\s*3'
         $script | Should -Match '\$LlvmMingwVersion\s*=\s*''20260616'''
         $script | Should -Match '\$LlvmMingwSha256\s*=\s*''[a-f0-9]{64}'''
         $script | Should -Match 'Get-FileHash'

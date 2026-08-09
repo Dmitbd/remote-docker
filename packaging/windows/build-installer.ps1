@@ -51,11 +51,27 @@ function Get-VerifiedDownload {
         [Parameter(Mandatory = $true)][ValidatePattern('^[a-f0-9]{64}$')][string]$Sha256
     )
 
-    Invoke-WebRequest -Uri $Uri -OutFile $Destination -MaximumRedirection 10
-    $actual = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actual -ne $Sha256) {
-        throw "Downloaded build tool SHA-256 mismatch for '$Uri'."
+    $lastFailure = ''
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        if (Test-Path -LiteralPath $Destination) {
+            Remove-Item -LiteralPath $Destination -Force
+        }
+        try {
+            Invoke-WebRequest -Uri $Uri -OutFile $Destination -MaximumRedirection 10
+            $actual = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -eq $Sha256) {
+                return
+            }
+            $lastFailure = "SHA-256 mismatch: expected '$Sha256', received '$actual'."
+        }
+        catch {
+            $lastFailure = $_.Exception.Message
+        }
+        if ($attempt -lt 3) {
+            Start-Sleep -Seconds (2 * $attempt)
+        }
     }
+    throw "Verified download failed after 3 attempts for '$Uri': $lastFailure"
 }
 
 function Assert-ManifestHash {
@@ -169,7 +185,7 @@ try {
 
     $nsisSetup = Join-Path $workRoot "nsis-$NsisVersion-setup.exe"
     Get-VerifiedDownload `
-        -Uri "https://prdownloads.sourceforge.net/nsis/nsis-$NsisVersion-setup.exe?download=" `
+        -Uri "https://downloads.sourceforge.net/project/nsis/NSIS%203/$NsisVersion/nsis-$NsisVersion-setup.exe" `
         -Destination $nsisSetup `
         -Sha256 $NsisSha256
     $nsisRoot = Join-Path $workRoot 'nsis'
