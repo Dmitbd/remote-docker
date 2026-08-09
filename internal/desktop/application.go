@@ -54,6 +54,7 @@ type Application struct {
 	resources            metrics.Sample
 	lastDiagnosticsPoll  time.Time
 	actionError          string
+	actionSequence       uint64
 }
 
 func NewApplication(options ApplicationOptions) (*Application, error) {
@@ -395,15 +396,17 @@ func (a *Application) diagnosticsBody() *fyne.Container {
 }
 
 func (a *Application) perform(action ActionID, value string) {
-	a.clearActionError()
+	sequence := a.beginAction()
 	fyne.Do(func() { a.render(a.snapshot()) })
 	go func() {
-		if err := a.controller.Perform(context.Background(), action, value); err != nil {
-			a.setActionError(err)
-			fyne.Do(func() { a.render(a.snapshot()) })
+		err := a.controller.Perform(context.Background(), action, value)
+		if !a.completeAction(sequence, err) {
 			return
 		}
-		a.clearActionError()
+		fyne.Do(func() { a.render(a.snapshot()) })
+		if err != nil {
+			return
+		}
 		if action == ActionQuit {
 			if a.onQuit != nil {
 				a.onQuit()
@@ -413,16 +416,26 @@ func (a *Application) perform(action ActionID, value string) {
 	}()
 }
 
-func (a *Application) setActionError(err error) {
+func (a *Application) beginAction() uint64 {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.actionError = safeActionMessage(err)
+	a.actionSequence++
+	a.actionError = ""
+	return a.actionSequence
 }
 
-func (a *Application) clearActionError() {
+func (a *Application) completeAction(sequence uint64, err error) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.actionError = ""
+	if sequence != a.actionSequence {
+		return false
+	}
+	if err != nil {
+		a.actionError = safeActionMessage(err)
+	} else {
+		a.actionError = ""
+	}
+	return true
 }
 
 func safeActionMessage(err error) string {
