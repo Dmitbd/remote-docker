@@ -43,6 +43,8 @@ Describe 'Windows Setup EXE contract' {
         $installer = Read-RepositoryFile $installerSource
         $pages = Read-RepositoryFile $pagesSource
         $strings = Read-RepositoryFile $stringsSource
+        $languageLoad = $installer.IndexOf('!insertmacro MUI_LANGUAGE "Russian"')
+        $versionInfo = $installer.IndexOf('VIAddVersionKey /LANG=${LANG_RUSSIAN}')
 
         $installer | Should -Match 'MUI_PAGE_WELCOME'
         $installer | Should -Match 'Page custom PreflightPageCreate'
@@ -51,6 +53,8 @@ Describe 'Windows Setup EXE contract' {
         $installer | Should -Match 'Page custom DataPageCreate DataPageLeave'
         $installer | Should -Match 'MUI_PAGE_INSTFILES'
         $installer | Should -Match 'MUI_FINISHPAGE_RUN_NOTCHECKED'
+        $languageLoad | Should -BeGreaterThan -1
+        $versionInfo | Should -BeGreaterThan $languageLoad
         $installer | Should -Match 'CreateShortCut "\$SMPROGRAMS\\Remote Docker\\Remote Docker\.lnk"'
         $installer | Should -Match 'Section /o .*DesktopShortcut'
         $installer | Should -Match 'CreateShortCut "\$DESKTOP\\Remote Docker\.lnk"'

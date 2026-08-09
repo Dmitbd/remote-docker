@@ -27,10 +27,6 @@ Icon "${ICON_SOURCE}"
 UninstallIcon "${ICON_SOURCE}"
 BrandingText "Remote Docker"
 VIProductVersion "${PRODUCT_VERSION}.0"
-VIAddVersionKey /LANG=${LANG_RUSSIAN} "ProductName" "Remote Docker"
-VIAddVersionKey /LANG=${LANG_RUSSIAN} "FileDescription" "Remote Docker Setup"
-VIAddVersionKey /LANG=${LANG_RUSSIAN} "FileVersion" "${PRODUCT_VERSION}"
-VIAddVersionKey /LANG=${LANG_RUSSIAN} "ProductVersion" "${PRODUCT_VERSION}"
 
 Var DataDirectory
 Var ProvisionExit
@@ -62,6 +58,11 @@ Page custom DataPageCreate DataPageLeave
 !insertmacro MUI_UNPAGE_INSTFILES
 
 !insertmacro MUI_LANGUAGE "Russian"
+
+VIAddVersionKey /LANG=${LANG_RUSSIAN} "ProductName" "Remote Docker"
+VIAddVersionKey /LANG=${LANG_RUSSIAN} "FileDescription" "Remote Docker Setup"
+VIAddVersionKey /LANG=${LANG_RUSSIAN} "FileVersion" "${PRODUCT_VERSION}"
+VIAddVersionKey /LANG=${LANG_RUSSIAN} "ProductVersion" "${PRODUCT_VERSION}"
 
 Function .onInit
   ${IfNot} ${RunningX64}
