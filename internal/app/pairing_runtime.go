@@ -36,11 +36,12 @@ import (
 const pairingDiscoveryTimeout = 3 * time.Second
 
 type pairingTarget struct {
-	InstanceID      string
-	Name            string
-	Address         string
-	PairingPort     int
-	ServerPublicKey ed25519.PublicKey
+	InstanceID           string
+	Name                 string
+	Address              string
+	PairingPort          int
+	ServerPublicKey      ed25519.PublicKey
+	TrustedAdvertisement bool
 }
 
 type pairingTransport interface {
@@ -87,28 +88,56 @@ func newMacPairingCoordinator(options macPairingOptions) *macPairingCoordinator 
 }
 
 func (c *macPairingCoordinator) Candidates(ctx context.Context) (localapi.PairCandidatesResult, error) {
-	if c == nil || c.options.Transport == nil {
+	if c == nil {
+		return localapi.PairCandidatesResult{}, unavailable("pairing discovery is unavailable")
+	}
+	cfg, err := loadAgentConfig(c.options.Store)
+	if err != nil {
+		return localapi.PairCandidatesResult{}, unavailable("cannot read paired device configuration")
+	}
+	activeID := strings.TrimSpace(cfg.ActiveDevice)
+	activeDevice, hasTrustedDevice := cfg.Devices[activeID]
+	result := localapi.PairCandidatesResult{Candidates: make([]localapi.PairingCandidate, 0, 1)}
+	if hasTrustedDevice {
+		result.Candidates = append(result.Candidates, localapi.PairingCandidate{
+			ID: activeID, Name: activeDevice.Name, Trusted: true,
+		})
+	}
+	if c.options.Transport == nil {
+		if hasTrustedDevice {
+			return result, nil
+		}
 		return localapi.PairCandidatesResult{}, unavailable("pairing discovery is unavailable")
 	}
 	targets, err := c.options.Transport.Candidates(ctx)
 	if err != nil {
+		if hasTrustedDevice {
+			return result, nil
+		}
 		return localapi.PairCandidatesResult{}, unavailable("cannot discover pairing devices")
 	}
-	result := localapi.PairCandidatesResult{Candidates: make([]localapi.PairingCandidate, 0, len(targets))}
+	newCandidates := make([]localapi.PairingCandidate, 0, len(targets))
 	for _, target := range targets {
+		if target.TrustedAdvertisement {
+			if hasTrustedDevice && target.InstanceID == activeID {
+				result.Candidates[0].Available = true
+			}
+			continue
+		}
 		if strings.TrimSpace(target.InstanceID) == "" || strings.TrimSpace(target.Name) == "" {
 			continue
 		}
-		result.Candidates = append(result.Candidates, localapi.PairingCandidate{
-			ID: target.InstanceID, Name: target.Name, Unverified: true,
+		newCandidates = append(newCandidates, localapi.PairingCandidate{
+			ID: target.InstanceID, Name: target.Name, Unverified: true, Available: true,
 		})
 	}
-	sort.Slice(result.Candidates, func(i, j int) bool {
-		if result.Candidates[i].Name == result.Candidates[j].Name {
-			return result.Candidates[i].ID < result.Candidates[j].ID
+	sort.Slice(newCandidates, func(i, j int) bool {
+		if newCandidates[i].Name == newCandidates[j].Name {
+			return newCandidates[i].ID < newCandidates[j].ID
 		}
-		return result.Candidates[i].Name < result.Candidates[j].Name
+		return newCandidates[i].Name < newCandidates[j].Name
 	})
+	result.Candidates = append(result.Candidates, newCandidates...)
 	return result, nil
 }
 
@@ -415,7 +444,17 @@ func (t discoveryPairingTransport) Candidates(ctx context.Context) ([]pairingTar
 	}
 	targets := make([]pairingTarget, 0, len(peers))
 	for _, peer := range peers {
-		if !peer.Pairing || len(peer.Addresses) == 0 {
+		if len(peer.Addresses) == 0 {
+			continue
+		}
+		if !peer.Pairing {
+			if strings.TrimSpace(peer.DeviceID) == "" {
+				continue
+			}
+			targets = append(targets, pairingTarget{
+				InstanceID: peer.DeviceID, Address: peer.Addresses[0].String(), PairingPort: peer.Port,
+				TrustedAdvertisement: true,
+			})
 			continue
 		}
 		target, inspectErr := t.inspectPeer(ctx, peer, peer.Addresses)

@@ -3,10 +3,12 @@ package desktop
 import (
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
+	"github.com/Dmitbd/remote-docker/internal/localapi"
 )
 
 type Section string
@@ -43,6 +45,14 @@ type Action struct {
 	Enabled     bool
 	Destructive bool
 	Icon        string
+}
+
+type DeviceRow struct {
+	ID      string
+	Name    string
+	Status  string
+	Kind    string
+	Actions []Action
 }
 
 type ViewModel struct {
@@ -187,6 +197,61 @@ func BuildViewModel(snapshot lifecycle.Snapshot, selected Section, now time.Time
 
 func enabledAction(id ActionID, label string) Action {
 	return Action{ID: id, Label: label, Enabled: true}
+}
+
+func BuildDeviceRows(snapshot lifecycle.Snapshot, candidates []localapi.PairingCandidate) []DeviceRow {
+	trusted := make([]DeviceRow, 0, 1)
+	newDevices := make([]DeviceRow, 0, len(candidates))
+	for _, candidate := range candidates {
+		if strings.TrimSpace(candidate.ID) == "" {
+			continue
+		}
+		row := buildDeviceRow(snapshot, candidate)
+		if candidate.Trusted {
+			trusted = append(trusted, row)
+		} else {
+			newDevices = append(newDevices, row)
+		}
+	}
+	sort.Slice(trusted, func(i, j int) bool {
+		if trusted[i].Name == trusted[j].Name {
+			return trusted[i].ID < trusted[j].ID
+		}
+		return trusted[i].Name < trusted[j].Name
+	})
+	sort.Slice(newDevices, func(i, j int) bool {
+		if newDevices[i].Name == newDevices[j].Name {
+			return newDevices[i].ID < newDevices[j].ID
+		}
+		return newDevices[i].Name < newDevices[j].Name
+	})
+	return append(trusted, newDevices...)
+}
+
+func buildDeviceRow(snapshot lifecycle.Snapshot, candidate localapi.PairingCandidate) DeviceRow {
+	row := DeviceRow{ID: candidate.ID, Name: candidate.Name}
+	if snapshot.State == lifecycle.StateConnected && snapshot.Peer != nil && snapshot.Peer.ID == candidate.ID {
+		row.Status = "Соединено"
+		row.Kind = "connected"
+		row.Actions = []Action{enabledAction(ActionDisconnect, "Отключиться")}
+		return row
+	}
+	if !candidate.Trusted {
+		row.Status = "Новое устройство"
+		row.Kind = "new"
+		row.Actions = []Action{enabledAction(ActionConnect, "Подключиться")}
+		return row
+	}
+	row.Kind = "saved"
+	forget := Action{ID: ActionForgetDevice, Label: "Забыть", Enabled: true, Destructive: true}
+	if candidate.Available {
+		row.Status = "Сохранено · доступно"
+		row.Actions = []Action{enabledAction(ActionConnect, "Подключиться"), forget}
+		return row
+	}
+	row.Status = "Сохранено · недоступно"
+	row.Actions = []Action{{ID: ActionConnect, Label: "Подключиться", Enabled: false}, forget}
+	return row
 }
 
 func displayPairCode(code string) string {

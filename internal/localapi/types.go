@@ -190,6 +190,8 @@ type PairingCandidate struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
 	Unverified bool   `json:"unverified"`
+	Trusted    bool   `json:"trusted"`
+	Available  bool   `json:"available"`
 }
 
 type PairCandidatesResult struct {

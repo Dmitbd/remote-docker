@@ -49,6 +49,33 @@ func TestDiscoveryPairingCandidatesResolveNameThroughTLSWithoutStartingSession(t
 	}
 }
 
+func TestDiscoveryPairingCandidatesExposeStableTrustedAdvertisementWithoutInferringName(t *testing.T) {
+	inspectCalls := 0
+	transport := discoveryPairingTransport{
+		discover: func(context.Context) ([]discovery.Peer, error) {
+			return []discovery.Peer{{
+				InstanceID: "trusted-windows", DeviceID: "trusted-windows", Pairing: false, Port: 43119,
+				Addresses: []net.IP{net.ParseIP("192.168.1.20")},
+			}}, nil
+		},
+		inspect: func(context.Context, string, string) (pairing.Info, error) {
+			inspectCalls++
+			return pairing.Info{}, errors.New("stable advertisement must not use a pairing identity")
+		},
+	}
+
+	targets, err := transport.Candidates(context.Background())
+	if err != nil {
+		t.Fatalf("Candidates() error = %v", err)
+	}
+	want := []pairingTarget{{
+		InstanceID: "trusted-windows", Address: "192.168.1.20", PairingPort: 43119, TrustedAdvertisement: true,
+	}}
+	if !reflect.DeepEqual(targets, want) || inspectCalls != 0 {
+		t.Fatalf("targets=%#v inspect=%d, want %#v/0", targets, inspectCalls, want)
+	}
+}
+
 func TestDiscoveryPairingBootstrapRequiresExplicitInstanceAndPinsInspectedTLSKey(t *testing.T) {
 	serverKey := make(ed25519.PublicKey, ed25519.PublicKeySize)
 	serverKey[0] = 7

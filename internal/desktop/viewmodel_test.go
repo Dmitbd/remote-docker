@@ -1,10 +1,12 @@
 package desktop
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
+	"github.com/Dmitbd/remote-docker/internal/localapi"
 )
 
 func TestBuildViewModelStartsPausedWithRoleSpecificManualEnable(t *testing.T) {
@@ -86,6 +88,56 @@ func TestResourceRoleLabelsExplainWhereDockerRuns(t *testing.T) {
 	if roles.Mac != "Mac передаёт исходники и команды" || roles.Windows != "Windows выполняет Docker-нагрузку" {
 		t.Fatalf("ResourceRoleLabels() = %#v", roles)
 	}
+}
+
+func TestBuildDeviceRowsShowsActionsByDeviceKind(t *testing.T) {
+	newDevice := localapi.PairingCandidate{ID: "new", Name: "New Windows", Available: true, Unverified: true}
+	savedAvailable := localapi.PairingCandidate{ID: "saved", Name: "Saved Windows", Trusted: true, Available: true}
+	savedUnavailable := localapi.PairingCandidate{ID: "offline", Name: "Offline Windows", Trusted: true}
+
+	rows := BuildDeviceRows(lifecycle.Snapshot{State: lifecycle.StateClientReady}, []localapi.PairingCandidate{
+		savedUnavailable, newDevice, savedAvailable,
+	})
+	if got := []string{rows[0].ID, rows[1].ID, rows[2].ID}; !reflect.DeepEqual(got, []string{"offline", "saved", "new"}) {
+		t.Fatalf("row order = %#v", got)
+	}
+	if got := deviceRowByID(t, rows, "new"); got.Status != "Новое устройство" || got.Kind != "new" ||
+		!reflect.DeepEqual(got.Actions, []Action{enabledAction(ActionConnect, "Подключиться")}) {
+		t.Fatalf("new row = %#v", got)
+	}
+	if got := deviceRowByID(t, rows, "saved"); got.Status != "Сохранено · доступно" || got.Kind != "saved" ||
+		!reflect.DeepEqual(got.Actions, []Action{
+			enabledAction(ActionConnect, "Подключиться"),
+			{ID: ActionForgetDevice, Label: "Забыть", Enabled: true, Destructive: true},
+		}) {
+		t.Fatalf("saved available row = %#v", got)
+	}
+	if got := deviceRowByID(t, rows, "offline"); got.Status != "Сохранено · недоступно" || got.Kind != "saved" ||
+		!reflect.DeepEqual(got.Actions, []Action{
+			{ID: ActionConnect, Label: "Подключиться", Enabled: false},
+			{ID: ActionForgetDevice, Label: "Забыть", Enabled: true, Destructive: true},
+		}) {
+		t.Fatalf("saved unavailable row = %#v", got)
+	}
+
+	connected := BuildDeviceRows(lifecycle.Snapshot{
+		State: lifecycle.StateConnected, Peer: &lifecycle.Peer{ID: "saved", Name: "Saved Windows"},
+	}, []localapi.PairingCandidate{savedAvailable})
+	if got := deviceRowByID(t, connected, "saved"); got.Status != "Соединено" || got.Kind != "connected" ||
+		!reflect.DeepEqual(got.Actions, []Action{enabledAction(ActionDisconnect, "Отключиться")}) {
+		t.Fatalf("connected row = %#v", got)
+	}
+}
+
+func deviceRowByID(t *testing.T, rows []DeviceRow, id string) DeviceRow {
+	t.Helper()
+	for _, row := range rows {
+		if row.ID == id {
+			return row
+		}
+	}
+	t.Fatalf("row %q not found in %#v", id, rows)
+	return DeviceRow{}
 }
 
 func hasViewAction(actions []Action, id ActionID) bool {

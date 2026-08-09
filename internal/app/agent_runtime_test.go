@@ -397,7 +397,7 @@ func TestMacPairingCoordinatorPersistsPinnedDeviceAndRevokesBeforeLocalRemoval(t
 	if err != nil {
 		t.Fatalf("Candidates() error = %v", err)
 	}
-	if want := []localapi.PairingCandidate{{ID: "windows-peer", Name: "Dev PC", Unverified: true}}; !reflect.DeepEqual(candidates.Candidates, want) {
+	if want := []localapi.PairingCandidate{{ID: "windows-peer", Name: "Dev PC", Unverified: true, Available: true}}; !reflect.DeepEqual(candidates.Candidates, want) {
 		t.Fatalf("candidates = %#v, want %#v", candidates.Candidates, want)
 	}
 
@@ -453,6 +453,66 @@ func TestMacPairingCoordinatorPersistsPinnedDeviceAndRevokesBeforeLocalRemoval(t
 	}
 }
 
+func TestMacPairingCandidatesKeepUnavailableTrustedDevice(t *testing.T) {
+	root := t.TempDir()
+	store := config.Store{Path: filepath.Join(root, "config.json")}
+	if err := store.Save(config.Config{
+		SchemaVersion: config.CurrentSchemaVersion,
+		ActiveDevice:  "trusted-windows",
+		Devices: map[string]config.Device{
+			"trusted-windows": {Name: "Saved Windows", Address: "192.168.1.20", SSHPort: 49222},
+		},
+	}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Store: store, Transport: &runtimePairingTransport{targets: []pairingTarget{}},
+	})
+	candidates, err := coordinator.Candidates(context.Background())
+	if err != nil {
+		t.Fatalf("Candidates() error = %v", err)
+	}
+	want := []localapi.PairingCandidate{{
+		ID: "trusted-windows", Name: "Saved Windows", Trusted: true, Available: false,
+	}}
+	if !reflect.DeepEqual(candidates.Candidates, want) {
+		t.Fatalf("candidates = %#v, want %#v", candidates.Candidates, want)
+	}
+}
+
+func TestMacPairingCandidatesMergeStableTrustedAdvertisement(t *testing.T) {
+	root := t.TempDir()
+	store := config.Store{Path: filepath.Join(root, "config.json")}
+	if err := store.Save(config.Config{
+		SchemaVersion: config.CurrentSchemaVersion,
+		ActiveDevice:  "trusted-windows",
+		Devices: map[string]config.Device{
+			"trusted-windows": {Name: "Saved Windows", Address: "192.168.1.20", SSHPort: 49222},
+		},
+	}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Store: store,
+		Transport: &runtimePairingTransport{targets: []pairingTarget{{
+			InstanceID: "trusted-windows", Name: "Untrusted mDNS name", Address: "10.0.0.20",
+			TrustedAdvertisement: true,
+		}}},
+	})
+	candidates, err := coordinator.Candidates(context.Background())
+	if err != nil {
+		t.Fatalf("Candidates() error = %v", err)
+	}
+	want := []localapi.PairingCandidate{{
+		ID: "trusted-windows", Name: "Saved Windows", Trusted: true, Available: true,
+	}}
+	if !reflect.DeepEqual(candidates.Candidates, want) {
+		t.Fatalf("candidates = %#v, want %#v", candidates.Candidates, want)
+	}
+}
+
 func TestMacPairingCoordinatorCancelsWithoutManualCodeAndClearsPendingSecret(t *testing.T) {
 	root := t.TempDir()
 	transport := &runtimePairingTransport{hostKey: testAuthorizedKey(t), status: pairing.SessionPending}
@@ -487,9 +547,13 @@ type runtimePairingTransport struct {
 	revoked   string
 	status    pairing.SessionState
 	cancelled string
+	targets   []pairingTarget
 }
 
-func (*runtimePairingTransport) Candidates(context.Context) ([]pairingTarget, error) {
+func (t *runtimePairingTransport) Candidates(context.Context) ([]pairingTarget, error) {
+	if t.targets != nil {
+		return append([]pairingTarget(nil), t.targets...), nil
+	}
 	return []pairingTarget{{Name: "Dev PC", InstanceID: "windows-peer", Address: "192.168.1.20", PairingPort: 43119}}, nil
 }
 
