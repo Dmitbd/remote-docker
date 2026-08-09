@@ -31,6 +31,28 @@ func TestSupervisorCreatesKeepsAndRemovesOneForwardPerPort(t *testing.T) {
 	}
 }
 
+func TestSupervisorCloseStopsEveryOwnedForward(t *testing.T) {
+	starter := &fakeForwardStarter{}
+	supervisor := NewSupervisor(starter, time.Millisecond, 4*time.Millisecond)
+	if err := supervisor.Apply(context.Background(), Snapshot{Mappings: []Mapping{
+		{Protocol: "tcp", LocalHost: "127.0.0.1", LocalPort: 8080, ContainerID: "one", RemotePort: 80},
+		{Protocol: "tcp", LocalHost: "127.0.0.1", LocalPort: 9090, ContainerID: "two", RemotePort: 90},
+	}}); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if err := supervisor.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	for index := 0; index < 2; index++ {
+		if !starter.process(index).closed {
+			t.Fatalf("owned forward %d remained running", index)
+		}
+	}
+	if !supervisor.Healthy() {
+		t.Fatal("closed empty supervisor must be healthy")
+	}
+}
+
 func TestSupervisorRestartsExitedForwardWithBackoff(t *testing.T) {
 	starter := &fakeForwardStarter{}
 	supervisor := NewSupervisor(starter, time.Millisecond, 4*time.Millisecond)

@@ -21,9 +21,11 @@ import (
 	"github.com/Dmitbd/remote-docker/internal/discovery"
 	"github.com/Dmitbd/remote-docker/internal/dockercli"
 	"github.com/Dmitbd/remote-docker/internal/localapi"
+	"github.com/Dmitbd/remote-docker/internal/lifecycle"
 	"github.com/Dmitbd/remote-docker/internal/pairing"
 	"github.com/Dmitbd/remote-docker/internal/portrelay"
 	"github.com/Dmitbd/remote-docker/internal/sshtransport"
+	"github.com/Dmitbd/remote-docker/internal/windowsbridge"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -175,6 +177,72 @@ func TestAgentRuntimeRunInvokesBoundedStartupRecoveryOnce(t *testing.T) {
 	default:
 		t.Fatal("local Syncthing lifecycle was not stopped")
 	}
+}
+
+func TestAgentRuntimeStartAndStopOwnOneSessionLifecycle(t *testing.T) {
+	restorer := newInfrastructureRestorer(func() (portrelay.Reconciler, error) {
+		return portrelay.Reconciler{}, nil
+	})
+	agent := NewAgent(nil, restorer, nil)
+	localSync := &recordingLocalSyncLifecycle{started: make(chan struct{}), stopped: make(chan struct{})}
+	runtimeAgent := &AgentRuntime{
+		agent: agent, restorer: restorer, localSync: localSync,
+		startupRecover: func(context.Context) error { return nil },
+	}
+	if err := runtimeAgent.Start(context.Background(), lifecycle.RoleMacClient); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if err := runtimeAgent.Start(context.Background(), lifecycle.RoleMacClient); err != nil {
+		t.Fatalf("second Start() error = %v", err)
+	}
+	select {
+	case <-localSync.started:
+	case <-time.After(time.Second):
+		t.Fatal("owned local sync runtime did not start")
+	}
+	if err := runtimeAgent.Stop(context.Background(), lifecycle.StopPause); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	select {
+	case <-localSync.stopped:
+	case <-time.After(time.Second):
+		t.Fatal("owned local sync runtime did not stop")
+	}
+	select {
+	case err := <-runtimeAgent.Done():
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Done() error = %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Done() did not report the completed session")
+	}
+}
+
+func TestAgentRuntimeStopCleansOnlyManagedWindowsRuntime(t *testing.T) {
+	restorer := newInfrastructureRestorer(func() (portrelay.Reconciler, error) {
+		return portrelay.Reconciler{}, nil
+	})
+	stopper := &recordingWindowsRuntimeStopper{}
+	runtimeAgent := &AgentRuntime{
+		agent: NewAgent(nil, restorer, nil), restorer: restorer, windowsStopper: stopper,
+		startupRecover: func(context.Context) error { return nil },
+	}
+	if err := runtimeAgent.Start(context.Background(), lifecycle.RoleWindowsHost); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if err := runtimeAgent.Stop(context.Background(), lifecycle.StopQuit); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if stopper.calls != 1 {
+		t.Fatalf("managed Windows stop calls = %d, want 1", stopper.calls)
+	}
+}
+
+type recordingWindowsRuntimeStopper struct{ calls int }
+
+func (s *recordingWindowsRuntimeStopper) StopManagedRuntime(context.Context) (windowsbridge.StopReport, error) {
+	s.calls++
+	return windowsbridge.StopReport{ContainersStopped: true, TargetStopped: true, DistroTerminated: true}, nil
 }
 
 func TestAgentRuntimeRunsWindowsBridgeAlongsideRuntimeIdentityLifecycle(t *testing.T) {

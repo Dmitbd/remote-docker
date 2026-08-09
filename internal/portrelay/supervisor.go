@@ -94,6 +94,29 @@ func (s *Supervisor) Healthy() bool {
 	return true
 }
 
+// Close stops only forwards created by this supervisor and clears all desired
+// state so no monitor goroutine can restart them.
+func (s *Supervisor) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	s.desired = make(map[int]Mapping)
+	active := make([]ForwardProcess, 0, len(s.active))
+	for port, entry := range s.active {
+		delete(s.active, port)
+		active = append(active, entry.process)
+	}
+	s.mu.Unlock()
+	var failures []error
+	for _, process := range active {
+		if process != nil {
+			failures = append(failures, process.Close())
+		}
+	}
+	return errors.Join(failures...)
+}
+
 // Apply reconciles the complete desired snapshot and never kills foreign processes.
 func (s *Supervisor) Apply(ctx context.Context, snapshot Snapshot) error {
 	if s == nil || s.starter == nil {

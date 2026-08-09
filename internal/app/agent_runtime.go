@@ -28,6 +28,7 @@ import (
 	"github.com/Dmitbd/remote-docker/internal/discovery"
 	"github.com/Dmitbd/remote-docker/internal/dockercli"
 	"github.com/Dmitbd/remote-docker/internal/localapi"
+	"github.com/Dmitbd/remote-docker/internal/lifecycle"
 	"github.com/Dmitbd/remote-docker/internal/pairing"
 	"github.com/Dmitbd/remote-docker/internal/portrelay"
 	"github.com/Dmitbd/remote-docker/internal/provision"
@@ -70,7 +71,19 @@ type AgentRuntime struct {
 	ssh            *managedSSHRuntime
 	localSync      localSyncLifecycle
 	windowsBridge  localSyncLifecycle
+	windowsStopper managedWindowsRuntimeStopper
 	startupRecover func(context.Context) error
+
+	sessionMu      sync.Mutex
+	sessionCancel  context.CancelFunc
+	sessionWait    chan struct{}
+	sessionDone    chan error
+	sessionErr     error
+	sessionRunning bool
+}
+
+type managedWindowsRuntimeStopper interface {
+	StopManagedRuntime(context.Context) (windowsbridge.StopReport, error)
 }
 
 // NewProductionAgentRuntime builds the real platform composition.
@@ -226,12 +239,113 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 	return &AgentRuntime{
 		agent: agent, restorer: restorer, pairHost: pairHost, ssh: sshRuntime, localSync: localSync,
 		windowsBridge:  windowsBridge,
+		windowsStopper: func() managedWindowsRuntimeStopper {
+			if runtime.GOOS == "windows" {
+				return windowsbridge.ManagedWSLOperations{}
+			}
+			return nil
+		}(),
 		startupRecover: selectStartupRecovery(runtime.GOOS, agent.Reconnect, startupSelfHeal),
 	}, nil
 }
 
 // Agent returns the concrete local API handler.
 func (r *AgentRuntime) Agent() *Agent { return r.agent }
+
+// Start activates one owned runtime session. Construction alone never starts
+// infrastructure, which keeps a manually launched desktop application paused.
+func (r *AgentRuntime) Start(parent context.Context, role lifecycle.Role) error {
+	if r == nil {
+		return errors.New("production background agent runtime is nil")
+	}
+	if role != lifecycle.RoleMacClient && role != lifecycle.RoleWindowsHost {
+		return errors.New("production background agent role is invalid")
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	r.sessionMu.Lock()
+	if r.sessionRunning {
+		r.sessionMu.Unlock()
+		return nil
+	}
+	sessionCtx, cancel := context.WithCancel(parent)
+	wait := make(chan struct{})
+	done := make(chan error, 1)
+	r.sessionCancel = cancel
+	r.sessionWait = wait
+	r.sessionDone = done
+	r.sessionErr = nil
+	r.sessionRunning = true
+	r.sessionMu.Unlock()
+
+	go func() {
+		err := r.Run(sessionCtx, time.Second)
+		r.sessionMu.Lock()
+		r.sessionErr = err
+		r.sessionRunning = false
+		close(wait)
+		r.sessionMu.Unlock()
+		done <- err
+		close(done)
+	}()
+	return nil
+}
+
+// Stop cancels the active session and waits for all Run-owned children. The
+// reason is intentionally typed even though current cleanup is identical;
+// Windows-specific graceful shutdown is added through the same boundary.
+func (r *AgentRuntime) Stop(ctx context.Context, _ lifecycle.StopReason) error {
+	if r == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	r.sessionMu.Lock()
+	cancel := r.sessionCancel
+	wait := r.sessionWait
+	if cancel == nil || wait == nil {
+		r.sessionMu.Unlock()
+		return nil
+	}
+	cancel()
+	r.sessionMu.Unlock()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-wait:
+		r.sessionMu.Lock()
+		runtimeErr := r.sessionErr
+		r.sessionCancel = nil
+		r.sessionWait = nil
+		r.sessionMu.Unlock()
+		if errors.Is(runtimeErr, context.Canceled) {
+			runtimeErr = nil
+		}
+		var managedErr error
+		if r.windowsStopper != nil {
+			_, managedErr = r.windowsStopper.StopManagedRuntime(ctx)
+		}
+		return errors.Join(runtimeErr, managedErr)
+	}
+}
+
+func (r *AgentRuntime) Done() <-chan error {
+	if r == nil {
+		done := make(chan error)
+		close(done)
+		return done
+	}
+	r.sessionMu.Lock()
+	defer r.sessionMu.Unlock()
+	if r.sessionDone == nil {
+		done := make(chan error)
+		close(done)
+		return done
+	}
+	return r.sessionDone
+}
 
 // Run owns all long-running infrastructure until ctx is cancelled.
 func (r *AgentRuntime) Run(ctx context.Context, interval time.Duration) error {

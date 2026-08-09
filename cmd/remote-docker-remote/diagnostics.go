@@ -76,6 +76,10 @@ func (o remoteSystemOperations) RestartSystemdTarget(ctx context.Context) error 
 	return nil
 }
 
+func (o remoteSystemOperations) StopContainers(ctx context.Context) error {
+	return (managedDockerContainers{}).StopContainers(ctx)
+}
+
 func systemdInvocation(operation systemdOperation) (string, []string, bool) {
 	switch operation {
 	case systemdTargetActive:

@@ -83,7 +83,9 @@ func (r WSLResolver) WSLAddress(ctx context.Context) (net.IP, error) {
 type commandOutputRunner struct{}
 
 func (commandOutputRunner) Output(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).Output()
+	command := exec.CommandContext(ctx, name, args...)
+	configureHiddenProcess(command)
+	return command.Output()
 }
 
 // Proxy forwards one fixed, authenticated service without inspecting its bytes.

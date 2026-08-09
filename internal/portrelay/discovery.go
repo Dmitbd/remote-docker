@@ -170,6 +170,9 @@ func (r Reconciler) HandleEvent(ctx context.Context, event Event) error {
 
 // Run reconnects the Docker event stream forever with bounded exponential backoff.
 func (r Reconciler) Run(ctx context.Context) error {
+	if closer, ok := r.Sink.(interface{ Close() error }); ok {
+		defer func() { _ = closer.Close() }()
+	}
 	minimum := r.MinBackoff
 	if minimum <= 0 {
 		minimum = 250 * time.Millisecond

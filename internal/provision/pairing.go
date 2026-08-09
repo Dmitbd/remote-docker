@@ -127,6 +127,7 @@ func (execPairingCommandRunner) Run(ctx context.Context, command PairingCommand)
 	process.Stdin = command.Stdin
 	process.Stdout = command.Stdout
 	process.Stderr = command.Stderr
+	configureHiddenProcess(process)
 	return process.Run()
 }
 

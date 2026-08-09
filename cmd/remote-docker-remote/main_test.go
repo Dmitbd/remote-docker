@@ -181,6 +181,32 @@ func TestRPCDiagnosticsExposeTypedObservationAndExactRecoveryOnly(t *testing.T) 
 	}
 }
 
+func TestRPCRuntimeStopContainersUsesOnlyTypedLifecycleOperation(t *testing.T) {
+	operations := &recordingRemoteDiagnostics{}
+	input := strings.NewReader(
+		`{"jsonrpc":"2.0","id":13,"method":"runtime.stop-containers"}` + "\n" +
+			`{"jsonrpc":"2.0","id":14,"method":"runtime.exec","params":{"command":"docker system prune"}}` + "\n",
+	)
+	var output bytes.Buffer
+	if code := runRPCWithOperations(input, &output, &bytes.Buffer{}, pairingRuntime{}, operations); code != 0 {
+		t.Fatalf("runRPCWithOperations() code = %d", code)
+	}
+	decoder := json.NewDecoder(&output)
+	var stopped, rejected response
+	if err := decoder.Decode(&stopped); err != nil {
+		t.Fatalf("decode stop response: %v", err)
+	}
+	if stopped.Error != nil || stopped.Result["stopped"] != true || operations.containerStops != 1 {
+		t.Fatalf("stop response = %#v, calls=%d", stopped, operations.containerStops)
+	}
+	if err := decoder.Decode(&rejected); err != nil {
+		t.Fatalf("decode rejected runtime operation: %v", err)
+	}
+	if rejected.Error == nil || rejected.Error.Code != -32601 {
+		t.Fatalf("arbitrary runtime response = %#v", rejected)
+	}
+}
+
 func TestRPCSyncMethodsAcceptOnlyTypedManagedOperations(t *testing.T) {
 	syncOperations := &recordingRemoteSync{}
 	input := strings.NewReader(
@@ -256,6 +282,7 @@ type recordingRemoteDiagnostics struct {
 	observeErr  error
 	restartErr  error
 	restarts    int
+	containerStops int
 }
 
 type recordingRemoteSync struct {
@@ -294,6 +321,11 @@ func (r *recordingRemoteDiagnostics) Observe(context.Context) (remoteDiagnosticO
 func (r *recordingRemoteDiagnostics) RestartSystemdTarget(context.Context) error {
 	r.restarts++
 	return r.restartErr
+}
+
+func (r *recordingRemoteDiagnostics) StopContainers(context.Context) error {
+	r.containerStops++
+	return nil
 }
 
 func testAuthorizedLine(t *testing.T, deviceID string) string {

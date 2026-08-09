@@ -29,6 +29,9 @@ const (
 	operationObserve              managedWSLOperation = "observe"
 	operationStartDistro          managedWSLOperation = "start_distro"
 	operationRestartSystemdTarget managedWSLOperation = "restart_systemd_target"
+	operationStopContainers       managedWSLOperation = "stop_containers"
+	operationStopSystemdTarget    managedWSLOperation = "stop_systemd_target"
+	operationTerminateDistro      managedWSLOperation = "terminate_distro"
 )
 
 type managedWSLRunner interface {
@@ -39,6 +42,12 @@ type managedWSLRunner interface {
 // caller can supply a command, argument, unit, distro, or shell fragment.
 type ManagedWSLOperations struct {
 	runner managedWSLRunner
+}
+
+type StopReport struct {
+	ContainersStopped bool `json:"containers_stopped"`
+	TargetStopped     bool `json:"target_stopped"`
+	DistroTerminated  bool `json:"distro_terminated"`
 }
 
 // Observe checks whether the distro is already running before using its typed
@@ -100,6 +109,67 @@ func (o ManagedWSLOperations) RestartSystemdTarget(ctx context.Context) error {
 	return o.runRecovery(ctx, operationRestartSystemdTarget)
 }
 
+func (o ManagedWSLOperations) StopContainers(ctx context.Context) error {
+	runner := o.runner
+	if runner == nil {
+		runner = execManagedWSLRunner{}
+	}
+	request, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "runtime.stop-containers",
+	})
+	if err != nil {
+		return errors.New("encode managed container stop request")
+	}
+	var output bytes.Buffer
+	if err := runner.Run(ctx, operationStopContainers, bytes.NewReader(append(request, '\n')), &output); err != nil {
+		return errors.New("stop managed Docker containers")
+	}
+	var response struct {
+		JSONRPC string `json:"jsonrpc"`
+		ID      int    `json:"id"`
+		Result  struct {
+			Stopped bool `json:"stopped"`
+		} `json:"result"`
+		Error json.RawMessage `json:"error"`
+	}
+	if err := json.NewDecoder(io.LimitReader(&output, 64<<10)).Decode(&response); err != nil ||
+		response.JSONRPC != "2.0" || response.ID != 1 || len(response.Error) != 0 || !response.Result.Stopped {
+		return errors.New("decode managed container stop response")
+	}
+	return nil
+}
+
+func (o ManagedWSLOperations) StopTarget(ctx context.Context) error {
+	return o.runRecovery(ctx, operationStopSystemdTarget)
+}
+
+func (o ManagedWSLOperations) TerminateDistro(ctx context.Context) error {
+	return o.runRecovery(ctx, operationTerminateDistro)
+}
+
+// StopManagedRuntime always attempts the exact distro termination even when a
+// graceful earlier phase fails. It never targets global WSL state.
+func (o ManagedWSLOperations) StopManagedRuntime(ctx context.Context) (StopReport, error) {
+	report := StopReport{}
+	var failures []error
+	if err := o.StopContainers(ctx); err != nil {
+		failures = append(failures, err)
+	} else {
+		report.ContainersStopped = true
+	}
+	if err := o.StopTarget(ctx); err != nil {
+		failures = append(failures, err)
+	} else {
+		report.TargetStopped = true
+	}
+	if err := o.TerminateDistro(ctx); err != nil {
+		failures = append(failures, err)
+	} else {
+		report.DistroTerminated = true
+	}
+	return report, errors.Join(failures...)
+}
+
 func (o ManagedWSLOperations) runRecovery(ctx context.Context, operation managedWSLOperation) error {
 	runner := o.runner
 	if runner == nil {
@@ -128,6 +198,17 @@ func managedWSLInvocation(operation managedWSLOperation) (string, []string, bool
 			"--distribution", managedDistroName, "--user", "root", "--exec",
 			"/usr/bin/systemctl", "restart", "remote-docker.target",
 		}, true
+	case operationStopContainers:
+		return "wsl.exe", []string{
+			"--distribution", managedDistroName, "--exec", "/usr/local/bin/remote-docker-remote", "rpc",
+		}, true
+	case operationStopSystemdTarget:
+		return "wsl.exe", []string{
+			"--distribution", managedDistroName, "--user", "root", "--exec",
+			"/usr/bin/systemctl", "stop", "remote-docker.target",
+		}, true
+	case operationTerminateDistro:
+		return "wsl.exe", []string{"--terminate", managedDistroName}, true
 	default:
 		return "", nil, false
 	}
@@ -144,5 +225,6 @@ func (execManagedWSLRunner) Run(ctx context.Context, operation managedWSLOperati
 	command.Stdin = stdin
 	command.Stdout = stdout
 	command.Stderr = io.Discard
+	configureHiddenProcess(command)
 	return command.Run()
 }

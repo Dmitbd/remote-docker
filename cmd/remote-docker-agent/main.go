@@ -6,16 +6,20 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	gouruntime "runtime"
 	"time"
 
 	"github.com/Dmitbd/remote-docker/internal/app"
 	"github.com/Dmitbd/remote-docker/internal/credentials"
 	"github.com/Dmitbd/remote-docker/internal/localapi"
+	"github.com/Dmitbd/remote-docker/internal/lifecycle"
 	"github.com/Dmitbd/remote-docker/internal/provision"
 )
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := context.WithCancel(ctx)
+	defer stopSignals()
 	defer stop()
 	if len(os.Args) == 2 && os.Args[1] == "--prepare-wsl" {
 		executablePath, err := os.Executable()
@@ -63,10 +67,36 @@ func main() {
 	}
 	defer listener.Close()
 
-	go func() {
-		_ = runtime.Run(ctx, time.Second)
-	}()
-	if err := (localapi.Server{Handler: runtime.Agent()}).Serve(ctx, listener); err != nil {
+	role := lifecycle.RoleMacClient
+	if gouruntime.GOOS == "windows" {
+		role = lifecycle.RoleWindowsHost
+	}
+	if err := runtime.Start(ctx, role); err != nil {
+		fmt.Fprintln(os.Stderr, "remote-docker-agent: background runtime could not start")
+		os.Exit(1)
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- (localapi.Server{Handler: runtime.Agent()}).Serve(ctx, listener) }()
+	select {
+	case runtimeErr := <-runtime.Done():
+		stop()
+		_ = listener.Close()
+		<-serveDone
+		if runtimeErr != nil && !errors.Is(runtimeErr, context.Canceled) {
+			fmt.Fprintln(os.Stderr, "remote-docker-agent: background runtime stopped")
+			os.Exit(1)
+		}
+	case serveErr := <-serveDone:
+		stop()
+		stopCtx, cancelStop := context.WithTimeout(context.Background(), 30*time.Second)
+		_ = runtime.Stop(stopCtx, lifecycle.StopQuit)
+		cancelStop()
+		if serveErr != nil {
+			fmt.Fprintln(os.Stderr, "remote-docker-agent: local control service stopped")
+			os.Exit(1)
+		}
+	}
+	if err := ctx.Err(); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintln(os.Stderr, "remote-docker-agent: local control service stopped")
 		os.Exit(1)
 	}

@@ -63,6 +63,15 @@ const (
 	ReasonRuntimeFailure ConnectionReason = "runtime_failure"
 )
 
+type StopReason string
+
+const (
+	StopPause      StopReason = "pause"
+	StopDisconnect StopReason = "disconnect"
+	StopQuit       StopReason = "quit"
+	StopFailure    StopReason = "failure"
+)
+
 type Peer struct {
 	ID      string
 	Name    string

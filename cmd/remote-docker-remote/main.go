@@ -150,6 +150,15 @@ func runRPCWithAllOperations(
 					outgoing.Result = map[string]any{"restarted": true}
 				}
 			}
+		} else if incoming.Method == "runtime.stop-containers" && len(incoming.Params) == 0 {
+			lifecycleRuntime, ok := diagnosticsRuntime.(remoteLifecycleRuntime)
+			if !ok || lifecycleRuntime == nil {
+				outgoing.Error = &rpcError{Code: -32005, Message: "managed container stop failed"}
+			} else if err := lifecycleRuntime.StopContainers(context.Background()); err != nil {
+				outgoing.Error = &rpcError{Code: -32005, Message: "managed container stop failed"}
+			} else {
+				outgoing.Result = map[string]any{"stopped": true}
+			}
 		} else if incoming.Method == "sync.configure" {
 			var params remoteSyncConfigureParams
 			if syncRuntime == nil || decodeRPCParams(incoming.Params, &params) != nil {

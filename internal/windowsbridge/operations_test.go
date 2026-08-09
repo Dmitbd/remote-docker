@@ -20,6 +20,9 @@ func TestManagedWSLOperationsUseOnlyExactAllowlistedInvocations(t *testing.T) {
 		{operation: operationObserve, binary: "wsl.exe", args: []string{"--distribution", "remote-docker", "--exec", "/usr/local/bin/remote-docker-remote", "rpc"}},
 		{operation: operationStartDistro, binary: "wsl.exe", args: []string{"--distribution", "remote-docker", "--exec", "/usr/local/bin/remote-docker-remote", "health"}},
 		{operation: operationRestartSystemdTarget, binary: "wsl.exe", args: []string{"--distribution", "remote-docker", "--user", "root", "--exec", "/usr/bin/systemctl", "restart", "remote-docker.target"}},
+		{operation: operationStopContainers, binary: "wsl.exe", args: []string{"--distribution", "remote-docker", "--exec", "/usr/local/bin/remote-docker-remote", "rpc"}},
+		{operation: operationStopSystemdTarget, binary: "wsl.exe", args: []string{"--distribution", "remote-docker", "--user", "root", "--exec", "/usr/bin/systemctl", "stop", "remote-docker.target"}},
+		{operation: operationTerminateDistro, binary: "wsl.exe", args: []string{"--terminate", "remote-docker"}},
 	}
 	for _, tt := range tests {
 		t.Run(string(tt.operation), func(t *testing.T) {
@@ -86,6 +89,24 @@ func TestManagedWSLRecoveryUsesTypedStartAndSystemdOperations(t *testing.T) {
 	}
 }
 
+func TestManagedWSLStopUsesGracefulOrderedCleanupForExactDistro(t *testing.T) {
+	runner := &recordingManagedWSLRunner{}
+	report, err := (ManagedWSLOperations{runner: runner}).StopManagedRuntime(context.Background())
+	if err != nil {
+		t.Fatalf("StopManagedRuntime() error = %v", err)
+	}
+	want := []managedWSLOperation{operationStopContainers, operationStopSystemdTarget, operationTerminateDistro}
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("operations = %v, want %v", runner.calls, want)
+	}
+	if !report.ContainersStopped || !report.TargetStopped || !report.DistroTerminated {
+		t.Fatalf("stop report = %#v", report)
+	}
+	if runner.requestMethod != "runtime.stop-containers" {
+		t.Fatalf("stop RPC method = %q", runner.requestMethod)
+	}
+}
+
 type recordingManagedWSLRunner struct {
 	calls         []managedWSLOperation
 	runningOutput string
@@ -98,16 +119,20 @@ func (r *recordingManagedWSLRunner) Run(_ context.Context, operation managedWSLO
 	switch operation {
 	case operationListRunning:
 		_, _ = io.WriteString(stdout, r.runningOutput)
-	case operationObserve:
+	case operationObserve, operationStopContainers:
 		var request struct {
 			Method string `json:"method"`
 		}
 		_ = json.NewDecoder(stdin).Decode(&request)
 		r.requestMethod = request.Method
+		result := any(r.observation)
+		if operation == operationStopContainers {
+			result = map[string]any{"stopped": true}
+		}
 		response := map[string]any{
 			"jsonrpc": "2.0",
 			"id":      1,
-			"result":  r.observation,
+			"result":  result,
 		}
 		var encoded bytes.Buffer
 		_ = json.NewEncoder(&encoded).Encode(response)
