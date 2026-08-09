@@ -81,8 +81,11 @@ Describe 'Windows Setup EXE contract' {
 
         $script | Should -Match '\$GoVersion\s*=\s*''1\.26\.5'''
         $script | Should -Match '\$NsisVersion\s*=\s*''3\.12'''
+        $script | Should -Match '\$NsisPackageSha256\s*=\s*''[a-f0-9]{64}'''
         $script | Should -Match '\$NsisSha256\s*=\s*''[a-f0-9]{64}'''
-        $script | Should -Match 'downloads\.sourceforge\.net/project/nsis/NSIS%203/\$NsisVersion/'
+        $script | Should -Match 'community\.chocolatey\.org/api/v2/package/nsis\.install/\$NsisVersion\.0'
+        $script | Should -Match 'tools\\nsis-\$NsisVersion-setup\.exe'
+        $script | Should -Match 'Packaged NSIS SHA-256 mismatch'
         $script | Should -Match '\$attempt\s*-le\s*3'
         $script | Should -Match '\$LlvmMingwVersion\s*=\s*''20260616'''
         $script | Should -Match '\$LlvmMingwSha256\s*=\s*''[a-f0-9]{64}'''

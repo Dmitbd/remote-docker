@@ -12,6 +12,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $GoVersion = '1.26.5'
 $NsisVersion = '3.12'
+$NsisPackageSha256 = '4a1bbf9987e5b9b6bda4c2433af62bb79f2d9d3bd67b392f29a069ecda8c5f64'
 $NsisSha256 = '3bc2b06253a7e4957111be152ac6a536e0c7478a706e19da814038db5d706495'
 $LlvmMingwVersion = '20260616'
 $LlvmMingwSha256 = 'b9b68a4d276e16fa25802aaba458e4638f64b3884c290aaccdc2d87083b6ca35'
@@ -183,11 +184,20 @@ try {
     $rootfsChecksum = Resolve-RequiredFile "$RootfsPath.sha256"
     Assert-ManifestHash -FilePath $resolvedRootfs -ManifestPath $rootfsChecksum -Description 'Rootfs'
 
-    $nsisSetup = Join-Path $workRoot "nsis-$NsisVersion-setup.exe"
+    $nsisPackage = Join-Path $workRoot "nsis.install-$NsisVersion.0.nupkg"
     Get-VerifiedDownload `
-        -Uri "https://downloads.sourceforge.net/project/nsis/NSIS%203/$NsisVersion/nsis-$NsisVersion-setup.exe" `
-        -Destination $nsisSetup `
-        -Sha256 $NsisSha256
+        -Uri "https://community.chocolatey.org/api/v2/package/nsis.install/$NsisVersion.0" `
+        -Destination $nsisPackage `
+        -Sha256 $NsisPackageSha256
+    $nsisArchive = "$nsisPackage.zip"
+    Copy-Item -LiteralPath $nsisPackage -Destination $nsisArchive
+    $nsisPackageRoot = Join-Path $workRoot 'nsis-package'
+    Expand-Archive -LiteralPath $nsisArchive -DestinationPath $nsisPackageRoot
+    $nsisSetup = Resolve-RequiredFile (Join-Path $nsisPackageRoot "tools\nsis-$NsisVersion-setup.exe")
+    $nsisSetupHash = (Get-FileHash -LiteralPath $nsisSetup -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($nsisSetupHash -ne $NsisSha256) {
+        throw "Packaged NSIS SHA-256 mismatch: expected '$NsisSha256', received '$nsisSetupHash'."
+    }
     $nsisRoot = Join-Path $workRoot 'nsis'
     $nsisProcess = Start-Process -FilePath $nsisSetup -ArgumentList @('/S', "/D=$nsisRoot") -Wait -PassThru -WindowStyle Hidden
     if ($nsisProcess.ExitCode -ne 0) {
