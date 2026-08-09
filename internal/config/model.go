@@ -1,6 +1,6 @@
 package config
 
-const CurrentSchemaVersion = 1
+const CurrentSchemaVersion = 2
 
 // Config contains non-secret application settings.
 type Config struct {

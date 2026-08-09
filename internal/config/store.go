@@ -2,11 +2,19 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
+
+type Migration struct {
+	FromVersion      int
+	ToVersion        int
+	RemovedDeviceIDs []string
+}
 
 // Store persists non-secret configuration as an atomic JSON file.
 type Store struct {
@@ -15,21 +23,35 @@ type Store struct {
 
 // Load reads and decodes the stored configuration.
 func (s Store) Load() (Config, error) {
+	cfg, _, err := s.LoadWithMigration()
+	return cfg, err
+}
+
+// LoadWithMigration reads configuration and returns public identifiers for
+// stale legacy device records. The application can use those identifiers to
+// remove the corresponding owner-scoped credentials explicitly.
+func (s Store) LoadWithMigration() (Config, Migration, error) {
 	data, err := os.ReadFile(s.Path)
 	if err != nil {
-		return Config{}, fmt.Errorf("read config: %w", err)
+		return Config{}, Migration{}, fmt.Errorf("read config: %w", err)
 	}
 
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return Config{}, fmt.Errorf("decode config: %w", err)
+		return Config{}, Migration{}, fmt.Errorf("decode config: %w", err)
 	}
-
-	return cfg, nil
+	migrated, migration, err := migrate(cfg)
+	if err != nil {
+		return Config{}, Migration{}, err
+	}
+	return migrated, migration, nil
 }
 
 // Save atomically replaces the stored configuration.
 func (s Store) Save(cfg Config) error {
+	if err := validate(cfg); err != nil {
+		return fmt.Errorf("validate config: %w", err)
+	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode config: %w", err)
@@ -67,6 +89,57 @@ func (s Store) Save(cfg Config) error {
 		return fmt.Errorf("replace config: %w", err)
 	}
 
+	return nil
+}
+
+func migrate(cfg Config) (Config, Migration, error) {
+	if cfg.SchemaVersion > CurrentSchemaVersion {
+		return Config{}, Migration{}, fmt.Errorf("configuration schema version %d is unsupported", cfg.SchemaVersion)
+	}
+	if cfg.SchemaVersion < 1 {
+		return Config{}, Migration{}, errors.New("configuration schema version is unsupported")
+	}
+	migration := Migration{FromVersion: cfg.SchemaVersion, ToVersion: CurrentSchemaVersion}
+	if cfg.SchemaVersion == 1 {
+		for id := range cfg.Devices {
+			if id != cfg.ActiveDevice {
+				migration.RemovedDeviceIDs = append(migration.RemovedDeviceIDs, id)
+				delete(cfg.Devices, id)
+			}
+		}
+		sort.Strings(migration.RemovedDeviceIDs)
+		if cfg.ActiveDevice != "" {
+			if _, ok := cfg.Devices[cfg.ActiveDevice]; !ok {
+				cfg.ActiveDevice = ""
+			}
+		}
+		if cfg.ActiveDevice == "" {
+			cfg.Devices = nil
+		}
+		cfg.SchemaVersion = CurrentSchemaVersion
+	}
+	if err := validate(cfg); err != nil {
+		return Config{}, Migration{}, fmt.Errorf("validate config: %w", err)
+	}
+	return cfg, migration, nil
+}
+
+func validate(cfg Config) error {
+	if cfg.SchemaVersion != CurrentSchemaVersion {
+		return fmt.Errorf("configuration schema version %d is unsupported", cfg.SchemaVersion)
+	}
+	if len(cfg.Devices) > 1 {
+		return errors.New("configuration supports only one trusted device")
+	}
+	if cfg.ActiveDevice == "" {
+		if len(cfg.Devices) != 0 {
+			return errors.New("trusted device requires an active device identifier")
+		}
+		return nil
+	}
+	if _, ok := cfg.Devices[cfg.ActiveDevice]; !ok {
+		return errors.New("active device record is missing")
+	}
 	return nil
 }
 
