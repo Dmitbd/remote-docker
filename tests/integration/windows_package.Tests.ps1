@@ -107,7 +107,7 @@ Describe 'Windows Setup EXE contract' {
         $script | Should -Match 'FileAttributes\]::ReparsePoint'
         $script | Should -Match 'Join-Path \$ApplicationRoot ''RemoteDocker\.exe'''
         $script | Should -Match 'Join-Path \$DataRoot ''wsl'''
-        $script | Should -Match 'Write-ProvisionStatus'
+        $script | Should -Match 'Write-RemoteDockerProvisionStatus'
         $script | Should -Match '--prepare-wsl'
         $script | Should -Match '''/usr/local/bin/remote-docker-remote'',\s*''runtime-status'''
         $script | Should -Match '-Profile\s+Private'
