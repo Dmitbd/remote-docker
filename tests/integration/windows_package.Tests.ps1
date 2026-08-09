@@ -8,6 +8,7 @@ BeforeAll {
     $stringsSource = Join-Path $windowsPackaging 'installer\strings.nsh'
     $buildScript = Join-Path $windowsPackaging 'build-installer.ps1'
     $updateScript = Join-Path $windowsPackaging 'install-agent.ps1'
+    $pathValidationScript = Join-Path $windowsPackaging 'scripts\path-validation.ps1'
     $provisionScript = Join-Path $windowsPackaging 'scripts\provision.ps1'
     $statusScript = Join-Path $windowsPackaging 'scripts\provision-status.ps1'
     $uninstallScript = Join-Path $windowsPackaging 'scripts\uninstall.ps1'
@@ -28,6 +29,7 @@ Describe 'Windows Setup EXE contract' {
             $stringsSource,
             $buildScript,
             $updateScript,
+            $pathValidationScript,
             $provisionScript,
             $statusScript,
             $uninstallScript
@@ -44,6 +46,7 @@ Describe 'Windows Setup EXE contract' {
         $pages = Read-RepositoryFile $pagesSource
         $strings = Read-RepositoryFile $stringsSource
         $languageLoad = $installer.IndexOf('!insertmacro MUI_LANGUAGE "Russian"')
+        $stringsLoad = $installer.IndexOf('!include "strings.nsh"')
         $versionInfo = $installer.IndexOf('VIAddVersionKey /LANG=${LANG_RUSSIAN}')
 
         $installer | Should -Match 'MUI_PAGE_WELCOME'
@@ -55,7 +58,11 @@ Describe 'Windows Setup EXE contract' {
         $installer | Should -Match 'MUI_PAGE_INSTFILES'
         $installer | Should -Match 'MUI_FINISHPAGE_RUN_NOTCHECKED'
         $languageLoad | Should -BeGreaterThan -1
+        $stringsLoad | Should -BeGreaterThan $languageLoad
         $versionInfo | Should -BeGreaterThan $languageLoad
+        $installer | Should -Match 'VIAddVersionKey /LANG=\$\{LANG_RUSSIAN\} "LegalCopyright"'
+        $installer | Should -Not -Match '\$PROGRAMDATA'
+        $installer | Should -Match 'StrCpy \$DataDirectory "\$APPDATA\\RemoteDocker"'
         $installer | Should -Match 'CreateShortCut "\$SMPROGRAMS\\Remote Docker\\Remote Docker\.lnk"'
         $installer | Should -Not -Match 'Section /o .*DesktopShortcut'
         $installer | Should -Match 'CreateShortCut "\$DESKTOP\\Remote Docker\.lnk"'
@@ -121,6 +128,7 @@ Describe 'Windows Setup EXE contract' {
         $script | Should -Match 'Remote-Docker-\$Version-x64-Setup\.exe'
         $script | Should -Match "'/INPUTCHARSET'"
         $script | Should -Match "'UTF8'"
+        $script | Should -Match "'/WX'"
         $script | Should -Not -Match 'cmd/remote-docker-agent|cmd/remote-docker-tray|\.msi'
     }
 
@@ -133,7 +141,7 @@ Describe 'Windows Setup EXE contract' {
         $script | Should -Match '\[string\]\$DataRoot'
         $script | Should -Match '\[string\]\$ProgressPath'
         $script | Should -Match '\[string\]\$LogPath'
-        $script | Should -Match 'IsPathFullyQualified'
+        $script | Should -Match 'Join-Path \$PSScriptRoot ''path-validation\.ps1'''
         $script | Should -Match 'FileAttributes\]::ReparsePoint'
         $script | Should -Match 'Join-Path \$ApplicationRoot ''RemoteDocker\.exe'''
         $script | Should -Match 'Join-Path \$DataRoot ''wsl'''
@@ -148,6 +156,25 @@ Describe 'Windows Setup EXE contract' {
         $import | Should -BeGreaterThan $rootCheck
         $script | Should -Not -Match 'Start-Process[^\n]+RemoteDocker|Get-Process\s+-Name\s+''RemoteDocker'
         $script | Should -Not -Match 'RemoteDockerAgent|RemoteDockerTray|ScheduledTask|CurrentVersion\\Run'
+    }
+
+    It 'uses one Windows PowerShell 5.1-compatible path validator' {
+        $helper = Read-RepositoryFile $pathValidationScript
+        $scripts = @($provisionScript, $uninstallScript, $updateScript)
+        $combined = ($scripts | ForEach-Object { Read-RepositoryFile $_ }) -join "`n"
+
+        $helper | Should -Match 'function Test-RemoteDockerFullyQualifiedPath'
+        $helper | Should -Match 'function Assert-RemoteDockerCanonicalPath'
+        $helper | Should -Match '\[System\.IO\.Path\]::GetPathRoot\(\$Path\)'
+        $helper | Should -Match '\[System\.IO\.Path\]::GetFullPath\(\$Path\)'
+        $helper | Should -Match '\$root -eq'
+        $helper | Should -Match '\^\[A-Za-z\]:\$'
+        $helper | Should -Not -Match 'IsPathFullyQualified'
+        $combined | Should -Not -Match 'IsPathFullyQualified'
+        foreach ($scriptPath in $scripts) {
+            (Read-RepositoryFile $scriptPath) | Should -Match 'Join-Path \$PSScriptRoot ''path-validation\.ps1'''
+        }
+        (Read-RepositoryFile $installerSource) | Should -Match 'File /oname=path-validation\.ps1'
     }
 
     It 'uses hidden installer execution and finite reboot state' {
@@ -226,7 +253,7 @@ Describe 'Windows Setup EXE contract' {
     It 'keeps public installer content generic' {
         $publicFiles = @(
             $installerSource, $pagesSource, $stringsSource, $buildScript, $updateScript,
-            $provisionScript, $statusScript, $uninstallScript, $testScript
+            $pathValidationScript, $provisionScript, $statusScript, $uninstallScript, $testScript
         )
         $internalPattern = 'S' + 'ber|Co' + 'work|Mid' + 'gard|Ygg' + 'drasil'
 

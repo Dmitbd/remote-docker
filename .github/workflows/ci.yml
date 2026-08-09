@@ -91,6 +91,23 @@ jobs:
       - name: Verify focused Windows provisioning package
         run: go test ./internal/provision
 
+      - name: Verify Windows PowerShell 5.1 path compatibility
+        shell: powershell
+        run: |
+          . (Resolve-Path 'packaging\windows\scripts\path-validation.ps1')
+          if (-not (Test-RemoteDockerFullyQualifiedPath -Path 'C:\Remote Docker')) {
+            throw 'A normal absolute drive path must be accepted.'
+          }
+          foreach ($invalidPath in @('relative\path', 'C:relative', '\current-drive')) {
+            if (Test-RemoteDockerFullyQualifiedPath -Path $invalidPath) {
+              throw "Non-qualified path was accepted: '$invalidPath'."
+            }
+          }
+          $canonical = Assert-RemoteDockerCanonicalPath -Path 'C:\Remote Docker' -Description 'Test path'
+          if ($canonical -ne 'C:\Remote Docker') {
+            throw "Unexpected canonical path '$canonical'."
+          }
+
       - name: Verify Windows package contract
         shell: pwsh
         run: Invoke-Pester -Path tests/integration/windows_package.Tests.ps1 -CI
@@ -99,13 +116,13 @@ jobs:
         shell: pwsh
         run: >-
           ./packaging/windows/build-installer.ps1
-          -Version 0.2.1
+          -Version 0.2.2
           -RootfsPath dist/remote-docker-rootfs.tar.zst
 
       - name: Confirm the development installer is unsigned
         shell: pwsh
         run: |
-          $installer = Get-Item -LiteralPath dist/windows/Remote-Docker-0.2.1-x64-Setup.exe
+          $installer = Get-Item -LiteralPath dist/windows/Remote-Docker-0.2.2-x64-Setup.exe
           $legacyPackages = @(Get-ChildItem -LiteralPath dist/windows -Recurse -File -Include '*.msi')
           if ($legacyPackages.Count -ne 0) { throw 'Legacy MSI output must not be produced.' }
           if ((Get-AuthenticodeSignature -LiteralPath $installer.FullName).Status -ne 'NotSigned') {

@@ -211,6 +211,7 @@ try {
 
     $setupPath = Join-Path $resolvedOutput "Remote-Docker-$Version-x64-Setup.exe"
     $defines = @(
+        '/WX',
         '/INPUTCHARSET',
         'UTF8',
         "/DPRODUCT_VERSION=$Version",
@@ -224,6 +225,7 @@ try {
         "/DPROBE_SOURCE=$(Resolve-RequiredFile (Join-Path $PSScriptRoot 'scripts\probe.ps1'))",
         "/DPROVISION_SOURCE=$(Resolve-RequiredFile (Join-Path $PSScriptRoot 'scripts\provision.ps1'))",
         "/DSTATUS_SOURCE=$(Resolve-RequiredFile (Join-Path $PSScriptRoot 'scripts\provision-status.ps1'))",
+        "/DPATH_VALIDATION_SOURCE=$(Resolve-RequiredFile (Join-Path $PSScriptRoot 'scripts\path-validation.ps1'))",
         "/DUNINSTALL_SOURCE=$(Resolve-RequiredFile (Join-Path $PSScriptRoot 'scripts\uninstall.ps1'))",
         "/DUPDATE_SOURCE=$(Resolve-RequiredFile (Join-Path $PSScriptRoot 'install-agent.ps1'))",
         $installerSource

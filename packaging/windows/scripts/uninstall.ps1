@@ -12,25 +12,14 @@ $managedRelease = 'remote-docker-managed-v1'
 $firewallRuleGroup = 'Remote Docker Managed Rules'
 $dataMarkerValue = 'remote-docker-managed-data-v1'
 
+. (Join-Path $PSScriptRoot 'path-validation.ps1')
+
 function Assert-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         throw 'Per-machine Remote Docker cleanup requires an elevated Administrator session.'
     }
-}
-
-function Assert-CanonicalRoot {
-    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Description)
-
-    if (-not [System.IO.Path]::IsPathFullyQualified($Path)) {
-        throw "$Description must be an absolute path."
-    }
-    $canonical = [System.IO.Path]::GetFullPath($Path)
-    if (-not [string]::Equals($canonical.TrimEnd('\'), $Path.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "$Description must already be canonical."
-    }
-    $canonical
 }
 
 function Assert-NoReparseTree {
@@ -76,8 +65,8 @@ function Invoke-Wsl {
 }
 
 Assert-Administrator
-$ApplicationRoot = Assert-CanonicalRoot -Path $ApplicationRoot -Description 'Application root'
-$DataRoot = Assert-CanonicalRoot -Path $DataRoot -Description 'Data root'
+$ApplicationRoot = Assert-RemoteDockerCanonicalPath -Path $ApplicationRoot -Description 'Application root'
+$DataRoot = Assert-RemoteDockerCanonicalPath -Path $DataRoot -Description 'Data root'
 $desktopExecutable = Join-Path $ApplicationRoot 'RemoteDocker.exe'
 $distroRoot = Join-Path $DataRoot 'wsl'
 $dataMarker = Join-Path $DataRoot '.remote-docker-managed-data'

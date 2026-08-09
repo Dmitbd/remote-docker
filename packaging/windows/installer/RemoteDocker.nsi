@@ -38,7 +38,6 @@ Var ProvisionOutput
 Var ProgressPath
 Var LogPath
 
-!include "strings.nsh"
 !include "remote-docker-pages.nsh"
 
 !define MUI_ABORTWARNING
@@ -58,11 +57,13 @@ Page custom InstallLocationPageCreate InstallLocationPageLeave
 !insertmacro MUI_UNPAGE_INSTFILES
 
 !insertmacro MUI_LANGUAGE "Russian"
+!include "strings.nsh"
 
 VIAddVersionKey /LANG=${LANG_RUSSIAN} "ProductName" "Remote Docker"
 VIAddVersionKey /LANG=${LANG_RUSSIAN} "FileDescription" "Remote Docker Setup"
 VIAddVersionKey /LANG=${LANG_RUSSIAN} "FileVersion" "${PRODUCT_VERSION}"
 VIAddVersionKey /LANG=${LANG_RUSSIAN} "ProductVersion" "${PRODUCT_VERSION}"
+VIAddVersionKey /LANG=${LANG_RUSSIAN} "LegalCopyright" "Copyright Remote Docker contributors"
 
 Function .onInit
   ${IfNot} ${RunningX64}
@@ -126,6 +127,7 @@ Section "Основные файлы и Docker-среда" CoreSection
   File /oname=probe.ps1 "${PROBE_SOURCE}"
   File /oname=provision.ps1 "${PROVISION_SOURCE}"
   File /oname=provision-status.ps1 "${STATUS_SOURCE}"
+  File /oname=path-validation.ps1 "${PATH_VALIDATION_SOURCE}"
   File /oname=uninstall.ps1 "${UNINSTALL_SOURCE}"
   File /oname=install-agent.ps1 "${UPDATE_SOURCE}"
 
@@ -190,7 +192,7 @@ Section "Uninstall"
   SetRegView 64
   ReadRegStr $DataDirectory HKLM "Software\Remote Docker" "DataDirectory"
   ${If} $DataDirectory == ""
-    StrCpy $DataDirectory "$PROGRAMDATA\RemoteDocker"
+    StrCpy $DataDirectory "$APPDATA\RemoteDocker"
   ${EndIf}
 
   nsExec::ExecToStack /TIMEOUT=15000 '"$INSTDIR\RemoteDocker.exe" --shutdown'
@@ -214,6 +216,7 @@ Section "Uninstall"
   Delete "$INSTDIR\tools\probe.ps1"
   Delete "$INSTDIR\tools\provision.ps1"
   Delete "$INSTDIR\tools\provision-status.ps1"
+  Delete "$INSTDIR\tools\path-validation.ps1"
   Delete "$INSTDIR\tools\uninstall.ps1"
   Delete "$INSTDIR\tools\install-agent.ps1"
   Delete "$INSTDIR\Uninstall.exe"

@@ -8,6 +8,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'path-validation.ps1')
+
 function Assert-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -53,10 +55,7 @@ function Assert-NoReparseTree {
 }
 
 Assert-Administrator
-if (-not [System.IO.Path]::IsPathFullyQualified($ApplicationRoot)) {
-    throw 'Application root must be absolute.'
-}
-$ApplicationRoot = [System.IO.Path]::GetFullPath($ApplicationRoot)
+$ApplicationRoot = Assert-RemoteDockerCanonicalPath -Path $ApplicationRoot -Description 'Application root'
 $resolvedInstallRoot = (Resolve-Path -LiteralPath $ApplicationRoot -ErrorAction Stop).Path
 if (-not [string]::Equals($resolvedInstallRoot, $ApplicationRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw 'Resolved application root does not match the selected install path.'

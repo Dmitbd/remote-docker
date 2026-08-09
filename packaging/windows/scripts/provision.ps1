@@ -16,6 +16,7 @@ $managedMetadata = '{"schema_version":1,"managed_by":"remote-docker"}'
 $firewallRuleGroup = 'Remote Docker Managed Rules'
 
 . (Join-Path $PSScriptRoot 'provision-status.ps1')
+. (Join-Path $PSScriptRoot 'path-validation.ps1')
 
 function Assert-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -23,19 +24,6 @@ function Assert-Administrator {
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         throw 'Provisioning requires an elevated Administrator session.'
     }
-}
-
-function Assert-AbsolutePath {
-    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Description)
-
-    if (-not [System.IO.Path]::IsPathFullyQualified($Path)) {
-        throw "$Description must be an absolute path."
-    }
-    $canonical = [System.IO.Path]::GetFullPath($Path)
-    if (-not [string]::Equals($canonical.TrimEnd('\'), $Path.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "$Description must already be canonical."
-    }
-    $canonical
 }
 
 function Assert-ManagedDirectory {
@@ -120,10 +108,10 @@ try {
     }
 
     Assert-Administrator
-    $ApplicationRoot = Assert-AbsolutePath -Path $ApplicationRoot -Description 'Application root'
-    $DataRoot = Assert-AbsolutePath -Path $DataRoot -Description 'Data root'
-    $ProgressPath = Assert-AbsolutePath -Path $ProgressPath -Description 'Progress path'
-    $LogPath = Assert-AbsolutePath -Path $LogPath -Description 'Log path'
+    $ApplicationRoot = Assert-RemoteDockerCanonicalPath -Path $ApplicationRoot -Description 'Application root'
+    $DataRoot = Assert-RemoteDockerCanonicalPath -Path $DataRoot -Description 'Data root'
+    $ProgressPath = Assert-RemoteDockerCanonicalPath -Path $ProgressPath -Description 'Progress path'
+    $LogPath = Assert-RemoteDockerCanonicalPath -Path $LogPath -Description 'Log path'
     if ([string]::Equals($ApplicationRoot.TrimEnd('\'), $DataRoot.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) {
         throw 'Application and data roots must be different.'
     }
