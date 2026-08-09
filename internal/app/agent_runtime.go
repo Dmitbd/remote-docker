@@ -103,6 +103,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 		return nil, fmt.Errorf("prepare managed Docker environment: %w", err)
 	}
 	httpClient := &http.Client{Timeout: agentProbeTimeout}
+	syncHTTPClient := &http.Client{Timeout: defaultPreflightTimeout}
 	sshRuntime := &managedSSHRuntime{
 		store: store, secrets: secrets,
 		sshConfigPath: sshConfigPath, knownHostsPath: knownHostsPath,
@@ -194,7 +195,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 	var syncReadiness SyncReadiness
 	if runtime.GOOS != "windows" {
 		syncReadiness = productionSyncReadiness{
-			store: store, secrets: secrets, httpClient: httpClient,
+			store: store, secrets: secrets, httpClient: syncHTTPClient,
 			remote: sshRemoteSync{store: store, sshConfigPath: sshConfigPath},
 		}
 	}

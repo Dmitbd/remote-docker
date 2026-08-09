@@ -62,6 +62,10 @@ func TestProductionAgentRuntimeServesPersistedStateOverLocalSocket(t *testing.T)
 	if !ok || !prepared || preparer.sync == nil {
 		t.Fatal("production runtime did not wire the Docker preflight preparer")
 	}
+	readiness, ok := preparer.sync.(productionSyncReadiness)
+	if !ok || readiness.httpClient == nil || readiness.httpClient.Timeout != defaultPreflightTimeout {
+		t.Fatalf("Syncthing preflight client timeout = %#v, want %s", readiness.httpClient, defaultPreflightTimeout)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
