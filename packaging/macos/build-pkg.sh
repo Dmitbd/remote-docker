@@ -208,7 +208,7 @@ build_payload() {
     GOROOT="${go_root}/go" \
     PATH="${go_root}/go/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
     GOOS=darwin GOARCH="${target_arch}" CGO_ENABLED=1 \
-    "${go_root}/go/bin/go" -C "${repo_root}" build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \
+    "${go_root}/go/bin/go" -C "${repo_root}" build -trimpath -buildvcs=false -ldflags='-s -w' \
     -o "${agent_contents}/MacOS/remote-docker-agent" ./cmd/remote-docker-agent
   env \
     GOROOT="${go_root}/go" \
@@ -293,7 +293,7 @@ if [[ "${layout_only}" == "true" ]]; then
 fi
 
 [[ "$(uname -s)" == "Darwin" ]] || { printf 'macOS package builds require macOS\n' >&2; exit 1; }
-for tool in curl tar unzip shasum pkgbuild pkgutil lsbom xattr /usr/bin/ruby; do
+for tool in curl tar unzip shasum pkgbuild pkgutil lsbom xattr dwarfdump /usr/bin/ruby; do
   command -v "${tool}" >/dev/null || { printf 'required build tool is missing: %s\n' "${tool}" >&2; exit 1; }
 done
 

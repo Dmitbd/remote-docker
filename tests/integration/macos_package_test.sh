@@ -129,6 +129,7 @@ done
 grep -F 'verify-checksum.sh" "${checksums_file}" "${download_path}" "${filename}"' "${build_script}" >/dev/null || fail "downloads are not verified before use"
 grep -F 'xattr -crs "${payload}"' "${build_script}" >/dev/null || fail "payload xattrs are not cleared without following package symlinks"
 grep -F -- '--identifier io.github.dmitbd.remote-docker.agent "${agent_bundle}"' "${build_script}" >/dev/null || fail "free macOS package does not bind the helper app identity"
+grep -F 'dwarfdump --uuid "${agent_executable}"' "${package_inspector}" >/dev/null || fail "package inspection does not require a Local Network-compatible Mach-O UUID"
 grep -F -- "--filter '(^|/)\\._'" "${build_script}" >/dev/null || fail "pkgbuild does not exclude AppleDouble metadata"
 for extractor in 'tar -x' 'unzip -q'; do
   grep -F "${extractor}" "${build_script}" >/dev/null || fail "build script does not handle expected archive type"
