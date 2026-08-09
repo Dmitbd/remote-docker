@@ -145,7 +145,7 @@ func TestProductionAgentRuntimeServesPersistedStateOverLocalSocket(t *testing.T)
 
 func TestAgentRuntimeRunInvokesBoundedStartupRecoveryOnce(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	restorer := newInfrastructureRestorer(func() (portrelay.Reconciler, error) {
+	restorer := newInfrastructureRestorer(func(context.Context) (portrelay.Reconciler, error) {
 		return portrelay.Reconciler{}, nil
 	})
 	agent := NewAgent(nil, restorer, nil)
@@ -181,7 +181,7 @@ func TestAgentRuntimeRunInvokesBoundedStartupRecoveryOnce(t *testing.T) {
 }
 
 func TestAgentRuntimeStartAndStopOwnOneSessionLifecycle(t *testing.T) {
-	restorer := newInfrastructureRestorer(func() (portrelay.Reconciler, error) {
+	restorer := newInfrastructureRestorer(func(context.Context) (portrelay.Reconciler, error) {
 		return portrelay.Reconciler{}, nil
 	})
 	agent := NewAgent(nil, restorer, nil)
@@ -219,8 +219,123 @@ func TestAgentRuntimeStartAndStopOwnOneSessionLifecycle(t *testing.T) {
 	}
 }
 
+func TestDesktopControllerFailedPausedConnectJoinsStartupRecoveryBeforeForget(t *testing.T) {
+	root := t.TempDir()
+	store := config.Store{Path: filepath.Join(root, "config.json")}
+	if err := store.Save(config.Config{
+		SchemaVersion: config.CurrentSchemaVersion,
+		ActiveDevice:  "saved",
+		Devices: map[string]config.Device{
+			"saved": {Name: "Saved Windows", Address: "192.168.1.20", SSHPort: 49222},
+		},
+	}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	secrets := credentials.NewMemoryStore()
+	if err := secrets.Put("saved", sshtransport.SSHPrivateKeyCredential, []byte("private-key")); err != nil {
+		t.Fatalf("seed private key: %v", err)
+	}
+	recoveryBlocked := make(chan struct{})
+	recoveryCancelled := make(chan struct{})
+	releaseRecovery := make(chan struct{})
+	recoveryExited := make(chan struct{})
+	sshConfigPath := filepath.Join(root, "ssh_config")
+	sshRuntime := &managedSSHRuntime{
+		store: store, secrets: secrets,
+		sshConfigPath:   sshConfigPath,
+		knownHostsPath:  filepath.Join(root, "known_hosts"),
+		agentSocketPath: filepath.Join(root, "agent", "ssh-agent.sock"),
+		controlDir:      filepath.Join(root, "control"),
+		start: func(ctx context.Context, _ string, _ []byte) (managedSSHAgent, error) {
+			close(recoveryBlocked)
+			<-ctx.Done()
+			close(recoveryCancelled)
+			<-releaseRecovery
+			return nil, ctx.Err()
+		},
+	}
+	restorer := newInfrastructureRestorer(func(ctx context.Context) (portrelay.Reconciler, error) {
+		if err := sshRuntime.Ensure(ctx); err != nil {
+			return portrelay.Reconciler{}, err
+		}
+		return portrelay.Reconciler{}, nil
+	})
+	agent := NewAgent(nil, restorer, nil)
+	runtimeAgent := &AgentRuntime{
+		agent: agent, restorer: restorer, ssh: sshRuntime,
+		startupRecover: func(ctx context.Context) error {
+			defer close(recoveryExited)
+			return agent.Reconnect(ctx)
+		},
+	}
+	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "saved", Name: "Saved Windows"}))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	supervisor, _ := NewSupervisor(machine, runtimeAgent)
+	foregroundErr := errors.New("injected foreground reconnect failure")
+	cleanupCalls := 0
+	fallback := localapi.HandlerFunc(func(_ context.Context, method localapi.Method, _ json.RawMessage) (any, error) {
+		switch method {
+		case localapi.MethodConnect:
+			select {
+			case <-recoveryBlocked:
+				if got := machine.Snapshot(); got.State != lifecycle.StateConnecting || !got.ActionInProgress {
+					return nil, errors.New("startup recovery ran before lifecycle connection reservation")
+				}
+				return nil, foregroundErr
+			case <-time.After(time.Second):
+				return nil, errors.New("startup recovery did not reach the pre-write barrier")
+			}
+		case localapi.MethodUnpair:
+			cleanupCalls++
+			return nil, nil
+		default:
+			return nil, errors.New("unexpected fallback method")
+		}
+	})
+	controller, _ := NewDesktopController(supervisor, fallback)
+	connectDone := make(chan error, 1)
+	go func() {
+		_, err := controller.Handle(context.Background(), localapi.MethodConnect, nil)
+		connectDone <- err
+	}()
+	waitForTestSignal(t, recoveryCancelled, "startup recovery cancellation")
+	if got := machine.Snapshot(); got.State != lifecycle.StateStopping || !got.ActionInProgress {
+		t.Fatalf("snapshot while failed connect joins recovery = %#v", got)
+	}
+	if _, err := controller.Handle(context.Background(), localapi.MethodForgetDevice, json.RawMessage(`{"device_id":"saved","local_only":true}`)); err == nil {
+		t.Fatal("ForgetDevice while connection abort joins recovery error = nil")
+	}
+	if cleanupCalls != 0 {
+		t.Fatalf("forget cleanup ran before connection abort joined: calls=%d", cleanupCalls)
+	}
+	select {
+	case err := <-connectDone:
+		t.Fatalf("Connect returned before startup recovery joined: %v", err)
+	default:
+	}
+	close(releaseRecovery)
+	if err := waitForTestError(t, connectDone, "failed connect completion"); !errors.Is(err, foregroundErr) {
+		t.Fatalf("Connect error = %v, want foreground failure", err)
+	}
+	waitForTestSignal(t, recoveryExited, "startup recovery exit")
+	if got := machine.Snapshot(); got.State != lifecycle.StatePaused || got.ActionInProgress || !machine.Allowed(lifecycle.CommandForget) {
+		t.Fatalf("snapshot after failed connect abort = %#v", got)
+	}
+	if _, err := os.Stat(sshConfigPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("managed ssh_config after joined abort: %v", err)
+	}
+	if _, err := controller.Handle(context.Background(), localapi.MethodForgetDevice, json.RawMessage(`{"device_id":"saved","local_only":true}`)); err != nil {
+		t.Fatalf("ForgetDevice after joined connection abort error = %v", err)
+	}
+	if cleanupCalls != 1 {
+		t.Fatalf("forget cleanup calls after joined abort = %d, want one", cleanupCalls)
+	}
+}
+
 func TestAgentRuntimeStopCleansOnlyManagedWindowsRuntime(t *testing.T) {
-	restorer := newInfrastructureRestorer(func() (portrelay.Reconciler, error) {
+	restorer := newInfrastructureRestorer(func(context.Context) (portrelay.Reconciler, error) {
 		return portrelay.Reconciler{}, nil
 	})
 	stopper := &recordingWindowsRuntimeStopper{}
@@ -248,7 +363,7 @@ func (s *recordingWindowsRuntimeStopper) StopManagedRuntime(context.Context) (wi
 
 func TestAgentRuntimeRunsWindowsBridgeAlongsideRuntimeIdentityLifecycle(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	restorer := newInfrastructureRestorer(func() (portrelay.Reconciler, error) {
+	restorer := newInfrastructureRestorer(func(context.Context) (portrelay.Reconciler, error) {
 		return portrelay.Reconciler{}, nil
 	})
 	agent := NewAgent(nil, restorer, nil)
@@ -1040,7 +1155,7 @@ func testAuthorizedKey(t *testing.T) string {
 func TestInfrastructureRestorerReplacesLongRunningEventStreamAndReconcilesRelays(t *testing.T) {
 	source := &runtimeRelaySource{eventsStarted: make(chan struct{}, 4)}
 	sink := &runtimeRelaySink{}
-	restorer := newInfrastructureRestorer(func() (portrelay.Reconciler, error) {
+	restorer := newInfrastructureRestorer(func(context.Context) (portrelay.Reconciler, error) {
 		return portrelay.Reconciler{Source: source, Sink: sink, MinBackoff: time.Hour, MaxBackoff: time.Hour}, nil
 	})
 	lifecycle, stop := context.WithCancel(context.Background())
@@ -1069,6 +1184,61 @@ func TestInfrastructureRestorerReplacesLongRunningEventStreamAndReconcilesRelays
 	if sink.Calls() < 2 {
 		t.Fatalf("relay reconciles = %d, want at least 2", sink.Calls())
 	}
+}
+
+func TestInfrastructureRestorerStopJoinsEveryReplacedEventStream(t *testing.T) {
+	source := &joiningRelaySource{
+		started:   make(chan struct{}, 2),
+		cancelled: make(chan struct{}, 2),
+		release:   make(chan struct{}, 2),
+	}
+	restorer := newInfrastructureRestorer(func(context.Context) (portrelay.Reconciler, error) {
+		return portrelay.Reconciler{Source: source, Sink: &runtimeRelaySink{}, MinBackoff: time.Hour, MaxBackoff: time.Hour}, nil
+	})
+	restorer.Bind(context.Background())
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := restorer.RestoreEventStream(context.Background()); err != nil {
+			t.Fatalf("RestoreEventStream(%d) error = %v", attempt+1, err)
+		}
+		waitForTestSignal(t, source.started, "Docker event stream start")
+	}
+	stopDone := make(chan struct{})
+	go func() {
+		restorer.Stop()
+		close(stopDone)
+	}()
+	waitForTestSignal(t, source.cancelled, "first Docker event stream cancellation")
+	waitForTestSignal(t, source.cancelled, "second Docker event stream cancellation")
+	select {
+	case <-stopDone:
+		t.Fatal("restorer Stop returned before replaced event streams exited")
+	default:
+	}
+	source.release <- struct{}{}
+	source.release <- struct{}{}
+	waitForTestSignal(t, stopDone, "restorer event stream join")
+}
+
+type joiningRelaySource struct {
+	started   chan struct{}
+	cancelled chan struct{}
+	release   chan struct{}
+}
+
+func (*joiningRelaySource) RunningContainers(context.Context) ([]portrelay.Container, error) {
+	return []portrelay.Container{{ID: "running", Running: true}}, nil
+}
+
+func (s *joiningRelaySource) Events(ctx context.Context) (<-chan portrelay.Event, error) {
+	stream := make(chan portrelay.Event)
+	s.started <- struct{}{}
+	go func() {
+		<-ctx.Done()
+		s.cancelled <- struct{}{}
+		<-s.release
+		close(stream)
+	}()
+	return stream, nil
 }
 
 type runtimeRelaySource struct{ eventsStarted chan struct{} }

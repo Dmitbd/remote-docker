@@ -412,14 +412,20 @@ func TestDesktopControllerEnableWithTrustedPeerStartsConnectionBeforeForget(t *t
 	if err != nil {
 		t.Fatalf("NewMachine() error = %v", err)
 	}
-	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	runtime := newRecordingSessionRuntime()
+	runtime.onStart = func() {
+		if got := machine.Snapshot(); got.State != lifecycle.StateConnecting || !got.ActionInProgress {
+			t.Fatalf("snapshot at trusted runtime start = %#v", got)
+		}
+	}
+	supervisor, _ := NewSupervisor(machine, runtime)
 	fallback := &recordingLocalHandler{}
 	controller, _ := NewDesktopController(supervisor, fallback)
 
 	if _, err := controller.Handle(context.Background(), localapi.MethodEnable, nil); err != nil {
 		t.Fatalf("Enable error = %v", err)
 	}
-	if got := supervisor.Snapshot(); got.State != lifecycle.StateConnecting || got.TrustedPeers != 1 {
+	if got := supervisor.Snapshot(); got.State != lifecycle.StateConnecting || got.ActionInProgress || got.TrustedPeers != 1 {
 		t.Fatalf("snapshot after trusted Enable = %#v", got)
 	}
 	if _, err := controller.Handle(context.Background(), localapi.MethodForgetDevice, json.RawMessage(`{"device_id":"saved","local_only":true}`)); err == nil {
@@ -427,6 +433,37 @@ func TestDesktopControllerEnableWithTrustedPeerStartsConnectionBeforeForget(t *t
 	}
 	if len(fallback.methods) != 0 {
 		t.Fatalf("forget cleanup after trusted Enable = %v", fallback.methods)
+	}
+}
+
+func TestDesktopControllerTrustedEnableStartFailureStopsAndJoinsBeforeReturningPaused(t *testing.T) {
+	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "saved", Name: "Saved Windows"}))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	runtime := newRecordingSessionRuntime()
+	runtime.startErr = errors.New("injected runtime start failure")
+	runtime.onStart = func() {
+		if got := machine.Snapshot(); got.State != lifecycle.StateConnecting || !got.ActionInProgress {
+			t.Fatalf("snapshot at failed trusted runtime start = %#v", got)
+		}
+	}
+	runtime.onStop = func() {
+		if got := machine.Snapshot(); got.State != lifecycle.StateStopping || !got.ActionInProgress {
+			t.Fatalf("snapshot during trusted runtime cleanup = %#v", got)
+		}
+	}
+	supervisor, _ := NewSupervisor(machine, runtime)
+	controller, _ := NewDesktopController(supervisor, &recordingLocalHandler{})
+
+	if _, err := controller.Handle(context.Background(), localapi.MethodEnable, nil); err == nil {
+		t.Fatal("trusted Enable start failure error = nil")
+	}
+	if runtime.startCalls != 1 || runtime.stopCalls != 1 || runtime.reason != lifecycle.StopFailure {
+		t.Fatalf("runtime calls after failed trusted Enable: starts=%d stops=%d reason=%q", runtime.startCalls, runtime.stopCalls, runtime.reason)
+	}
+	if got := machine.Snapshot(); got.State != lifecycle.StatePaused || got.ActionInProgress || !machine.Allowed(lifecycle.CommandForget) {
+		t.Fatalf("snapshot after failed trusted Enable = %#v", got)
 	}
 }
 

@@ -192,7 +192,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 		dockerCLI: dockerCLI, dockerContext: defaultContextName, dockerEnv: dockerEnv,
 		secrets: secrets, httpClient: httpClient,
 	}
-	restorer := newInfrastructureRestorer(func() (portrelay.Reconciler, error) {
+	restorer := newInfrastructureRestorer(func(ctx context.Context) (portrelay.Reconciler, error) {
 		if runtime.GOOS == "windows" {
 			return portrelay.Reconciler{}, unavailable("port relay runtime is available on macOS")
 		}
@@ -207,7 +207,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 		if !ok {
 			return portrelay.Reconciler{}, needsAction("active paired device is missing")
 		}
-		if err := sshRuntime.Ensure(context.Background()); err != nil {
+		if err := sshRuntime.Ensure(ctx); err != nil {
 			return portrelay.Reconciler{}, unavailable("managed SSH runtime is unavailable")
 		}
 		alias := "remote-docker-device-" + cfg.ActiveDevice
@@ -425,12 +425,18 @@ func (r *AgentRuntime) Run(ctx context.Context, interval time.Duration) error {
 	lifecycleCtx, cancelLifecycle := context.WithCancel(ctx)
 	defer cancelLifecycle()
 	r.restorer.Bind(lifecycleCtx)
+	var pairHostDone chan error
 	if r.pairHost != nil {
-		go r.pairHost.Run(lifecycleCtx)
+		pairHostDone = make(chan error, 1)
+		go func() {
+			r.pairHost.Run(lifecycleCtx)
+			pairHostDone <- nil
+		}()
 	}
 	if r.ssh != nil {
 		defer r.ssh.Close()
 	}
+	defer r.restorer.Stop()
 	var localSyncDone chan error
 	if r.localSync != nil {
 		localSyncDone = make(chan error, 1)
@@ -454,7 +460,10 @@ func (r *AgentRuntime) Run(ctx context.Context, interval time.Duration) error {
 	_ = startupRecover(recoveryCtx)
 	cancel()
 	if localSyncDone == nil && windowsBridgeDone == nil && connectionDone == nil {
-		return r.agent.Run(lifecycleCtx, interval)
+		err := r.agent.Run(lifecycleCtx, interval)
+		cancelLifecycle()
+		waitLifecycle(pairHostDone)
+		return err
 	}
 	agentDone := make(chan error, 1)
 	go func() { agentDone <- r.agent.Run(lifecycleCtx, interval) }()
@@ -464,24 +473,28 @@ func (r *AgentRuntime) Run(ctx context.Context, interval time.Duration) error {
 		waitLifecycle(localSyncDone)
 		waitLifecycle(windowsBridgeDone)
 		waitLifecycle(connectionDone)
+		waitLifecycle(pairHostDone)
 		return err
 	case err := <-localSyncDone:
 		cancelLifecycle()
 		<-agentDone
 		waitLifecycle(windowsBridgeDone)
 		waitLifecycle(connectionDone)
+		waitLifecycle(pairHostDone)
 		return err
 	case err := <-windowsBridgeDone:
 		cancelLifecycle()
 		<-agentDone
 		waitLifecycle(localSyncDone)
 		waitLifecycle(connectionDone)
+		waitLifecycle(pairHostDone)
 		return err
 	case err := <-connectionDone:
 		cancelLifecycle()
 		<-agentDone
 		waitLifecycle(localSyncDone)
 		waitLifecycle(windowsBridgeDone)
+		waitLifecycle(pairHostDone)
 		return err
 	}
 }
@@ -968,7 +981,7 @@ func (i productionSyncInspector) Status(ctx context.Context, cfg config.Config) 
 	return result, nil
 }
 
-type infrastructureFactory func() (portrelay.Reconciler, error)
+type infrastructureFactory func(context.Context) (portrelay.Reconciler, error)
 
 type infrastructureRestorer struct {
 	factory infrastructureFactory
@@ -976,6 +989,7 @@ type infrastructureRestorer struct {
 	life    context.Context
 	cancel  context.CancelFunc
 	current *portrelay.Reconciler
+	runs    sync.WaitGroup
 }
 
 func newInfrastructureRestorer(factory infrastructureFactory) *infrastructureRestorer {
@@ -988,16 +1002,26 @@ func (r *infrastructureRestorer) Bind(ctx context.Context) {
 	r.mu.Unlock()
 }
 
-func (r *infrastructureRestorer) RestoreEventStream(context.Context) error {
+func (r *infrastructureRestorer) RestoreEventStream(ctx context.Context) error {
 	if r == nil || r.factory == nil {
 		return unavailable("Docker event reconciliation is unavailable")
 	}
-	reconciler, err := r.factory()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	reconciler, err := r.factory(ctx)
 	if err != nil {
 		return err
 	}
 	r.mu.Lock()
-	if r.life == nil {
+	if err := ctx.Err(); err != nil {
+		r.mu.Unlock()
+		return err
+	}
+	if r.life == nil || r.life.Err() != nil {
 		r.mu.Unlock()
 		return unavailable("background agent lifecycle is unavailable")
 	}
@@ -1007,9 +1031,29 @@ func (r *infrastructureRestorer) RestoreEventStream(context.Context) error {
 	runCtx, cancel := context.WithCancel(r.life)
 	r.cancel = cancel
 	r.current = &reconciler
+	r.runs.Add(1)
 	r.mu.Unlock()
-	go func() { _ = reconciler.Run(runCtx) }()
+	go func() {
+		defer r.runs.Done()
+		_ = reconciler.Run(runCtx)
+	}()
 	return nil
+}
+
+func (r *infrastructureRestorer) Stop() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	cancel := r.cancel
+	r.life = nil
+	r.cancel = nil
+	r.current = nil
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	r.runs.Wait()
 }
 
 func (r *infrastructureRestorer) RestoreRelays(ctx context.Context) error {
@@ -1271,7 +1315,13 @@ func (h *windowsPairingHost) serve(
 	go func() {
 		serveDone <- server.Serve(tls.NewListener(privatePeerListener{Listener: listener}, tlsConfig))
 	}()
-	defer server.Close()
+	serveFinished := false
+	defer func() {
+		_ = server.Close()
+		if !serveFinished {
+			<-serveDone
+		}
+	}()
 
 	backoff := minBackoff
 	for {
@@ -1285,6 +1335,7 @@ func (h *windowsPairingHost) serve(
 				stopTimer(timer)
 				return true
 			case <-serveDone:
+				serveFinished = true
 				stopTimer(timer)
 				return false
 			case <-timer.C:
@@ -1302,6 +1353,7 @@ func (h *windowsPairingHost) serve(
 			registration.Shutdown()
 			return true
 		case <-serveDone:
+			serveFinished = true
 			stopTimer(timer)
 			cancelPublish()
 			registration.Shutdown()

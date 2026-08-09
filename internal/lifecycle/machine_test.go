@@ -341,6 +341,49 @@ func TestForgetReservationCommitsTrustRemovalAtomically(t *testing.T) {
 	}
 }
 
+func TestConnectionStartReservationAbortsThroughStoppingBeforeReturningPaused(t *testing.T) {
+	machine, err := NewMachine(RoleMacClient, "MacBook", WithTrustedPeer(Peer{ID: "windows", Name: "Windows"}))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	reserved := mustApply(t, machine, Event{Type: EventConnectionStartReserved})
+	if reserved.State != StateConnecting || !reserved.ActionInProgress || machine.Allowed(CommandForget) {
+		t.Fatalf("reserved connection snapshot = %#v", reserved)
+	}
+	stopping := mustApply(t, machine, Event{Type: EventConnectionStartAbortRequested})
+	if stopping.State != StateStopping || !stopping.ActionInProgress || machine.Allowed(CommandForget) {
+		t.Fatalf("aborting connection snapshot = %#v", stopping)
+	}
+	if _, err := machine.Apply(Event{Type: EventTrustForgetStarted, Peer: &Peer{ID: "windows"}}); !errors.As(err, new(*TransitionError)) {
+		t.Fatalf("forget during connection abort error = %v, want TransitionError", err)
+	}
+	paused := mustApply(t, machine, Event{Type: EventStopCompleted})
+	if paused.State != StatePaused || paused.ActionInProgress || paused.TrustedPeers != 1 || paused.Peer == nil {
+		t.Fatalf("aborted connection snapshot = %#v", paused)
+	}
+	if !machine.Allowed(CommandForget) {
+		t.Fatal("completed connection abort did not restore paused forget action")
+	}
+}
+
+func TestConnectionStartReservationCommitsConnectingBeforeSideEffects(t *testing.T) {
+	machine, err := NewMachine(RoleMacClient, "MacBook", WithTrustedPeer(Peer{ID: "windows", Name: "Windows"}))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	reserved := mustApply(t, machine, Event{Type: EventConnectionStartReserved})
+	if reserved.State != StateConnecting || !reserved.ActionInProgress {
+		t.Fatalf("reserved connection snapshot = %#v", reserved)
+	}
+	committed := mustApply(t, machine, Event{Type: EventConnectionStartCommitted})
+	if committed.State != StateConnecting || committed.ActionInProgress || committed.TrustedPeers != 1 {
+		t.Fatalf("committed connection snapshot = %#v", committed)
+	}
+	if machine.Allowed(CommandForget) {
+		t.Fatal("connecting state allowed trusted-device forgetting")
+	}
+}
+
 func TestSnapshotAndSubscriptionReturnIndependentCopies(t *testing.T) {
 	machine := mustMachine(t, RoleMacClient)
 	updates, cancel := machine.Subscribe()

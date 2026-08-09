@@ -74,6 +74,7 @@ func (s *Supervisor) Start(ctx context.Context) error {
 	if s == nil {
 		return errors.New("desktop supervisor is unavailable")
 	}
+	reservedStart := false
 	s.mu.Lock()
 	if s.terminal {
 		s.mu.Unlock()
@@ -83,6 +84,8 @@ func (s *Supervisor) Start(ctx context.Context) error {
 		s.mu.Unlock()
 		return nil
 	}
+	snapshot := s.machine.Snapshot()
+	reservedStart = snapshot.State == lifecycle.StateConnecting && snapshot.ActionInProgress
 	s.mu.Unlock()
 
 	var sessionWatchdog CrashWatchdog
@@ -90,7 +93,9 @@ func (s *Supervisor) Start(ctx context.Context) error {
 		var err error
 		sessionWatchdog, err = s.watchdogFactory()
 		if err != nil {
-			s.publishRuntimeProblem("watchdog_start_failed")
+			if !reservedStart {
+				s.publishRuntimeProblem("watchdog_start_failed")
+			}
 			return err
 		}
 	}
@@ -101,14 +106,18 @@ func (s *Supervisor) Start(ctx context.Context) error {
 			_ = sessionWatchdog.CleanStop(cleanupCtx)
 			cancel()
 		}
-		s.publishRuntimeProblem("runtime_start_failed")
+		if !reservedStart {
+			s.publishRuntimeProblem("runtime_start_failed")
+		}
 		return err
 	}
-	if _, err := s.machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled}); err != nil {
-		stopCtx, cancel := context.WithTimeout(context.Background(), s.stopTimeout)
-		_ = s.runtime.Stop(stopCtx, lifecycle.StopFailure)
-		cancel()
-		return err
+	if !reservedStart {
+		if _, err := s.machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled}); err != nil {
+			stopCtx, cancel := context.WithTimeout(context.Background(), s.stopTimeout)
+			_ = s.runtime.Stop(stopCtx, lifecycle.StopFailure)
+			cancel()
+			return err
+		}
 	}
 	s.mu.Lock()
 	s.running = true
@@ -116,6 +125,41 @@ func (s *Supervisor) Start(ctx context.Context) error {
 	s.mu.Unlock()
 	go s.observeRuntime(s.runtime.Done())
 	return nil
+}
+
+// AbortConnectionStart keeps the lifecycle non-forgettable until every owned
+// startup worker has stopped and joined. It is intentionally independent of
+// the request context because a cancelled UI request must not release trust
+// cleanup while recovery work can still recreate managed artifacts.
+func (s *Supervisor) AbortConnectionStart() error {
+	if s == nil {
+		return errors.New("desktop supervisor is unavailable")
+	}
+	s.mu.Lock()
+	s.stopping = true
+	sessionWatchdog := s.watchdog
+	s.mu.Unlock()
+	if _, err := s.machine.Apply(lifecycle.Event{Type: lifecycle.EventConnectionStartAbortRequested}); err != nil {
+		s.mu.Lock()
+		s.stopping = false
+		s.mu.Unlock()
+		return err
+	}
+	stopErr := s.runtime.Stop(context.Background(), lifecycle.StopFailure)
+	var watchdogErr error
+	if sessionWatchdog != nil {
+		watchdogErr = sessionWatchdog.CleanStop(context.Background())
+	}
+	s.mu.Lock()
+	s.running = false
+	s.stopping = false
+	s.watchdog = nil
+	s.mu.Unlock()
+	if err := errors.Join(stopErr, watchdogErr); err != nil {
+		return err
+	}
+	_, err := s.machine.Apply(lifecycle.Event{Type: lifecycle.EventStopCompleted})
+	return err
 }
 
 func (s *Supervisor) Pause(ctx context.Context) error {

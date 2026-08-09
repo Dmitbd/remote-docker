@@ -39,6 +39,9 @@ const (
 	EventPairingExpired      EventType = "pairing_expired"
 	EventPairingCompleted    EventType = "pairing_completed"
 	EventConnectionStarted   EventType = "connection_started"
+	EventConnectionStartReserved EventType = "connection_start_reserved"
+	EventConnectionStartCommitted EventType = "connection_start_committed"
+	EventConnectionStartAbortRequested EventType = "connection_start_abort_requested"
 	EventConnected           EventType = "connected"
 	EventHeartbeat           EventType = "heartbeat"
 	EventDisconnectRequested EventType = "disconnect_requested"
@@ -109,6 +112,8 @@ type Machine struct {
 	now         func() time.Time
 	afterStop   State
 	forgetting  bool
+	connectionStarting bool
+	connectionStartFrom State
 	subscribers map[uint64]chan Snapshot
 	nextID      uint64
 }
@@ -150,7 +155,7 @@ func (m *Machine) Allowed(command Command) bool {
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if m.forgetting {
+	if m.forgetting || m.connectionStarting {
 		return false
 	}
 	return allowed(m.snapshot, command)
@@ -227,6 +232,14 @@ func (m *Machine) applyLocked(event Event) error {
 	if m.forgetting && event.Type != EventTrustForgotten && event.Type != EventTrustForgetCancelled {
 		return m.transitionError(event, "trusted-device cleanup is in progress")
 	}
+	if m.connectionStarting {
+		switch event.Type {
+		case EventConnectionStartCommitted, EventConnectionStartAbortRequested, EventConnected,
+			EventHeartbeat, EventNetworkLost, EventNetworkRestored, EventStopCompleted:
+		default:
+			return m.transitionError(event, "trusted connection startup is in progress")
+		}
+	}
 	switch event.Type {
 	case EventEnabled:
 		if snapshot.State != StatePaused {
@@ -295,6 +308,38 @@ func (m *Machine) applyLocked(event Event) error {
 		snapshot.State = StateConnecting
 		snapshot.Docker.State = ServiceStarting
 		snapshot.Sync.State = ServiceStarting
+	case EventConnectionStartReserved:
+		validStart := snapshot.TrustedPeers == 1 && snapshot.Peer != nil &&
+			(snapshot.State == StatePaused ||
+				snapshot.Role == RoleMacClient && (snapshot.State == StateClientReady || snapshot.State == StateSearching) ||
+				snapshot.Role == RoleWindowsHost && snapshot.State == StateHostWaiting)
+		if !validStart || m.connectionStarting {
+			return m.transitionError(event, "trusted connection cannot start in the current state")
+		}
+		m.connectionStarting = true
+		m.connectionStartFrom = snapshot.State
+		snapshot.State = StateConnecting
+		snapshot.ActionInProgress = true
+		snapshot.Docker.State = ServiceStarting
+		snapshot.Sync.State = ServiceStarting
+	case EventConnectionStartCommitted:
+		if !m.connectionStarting ||
+			(snapshot.State != StateConnecting && snapshot.State != StateConnected && snapshot.State != StateReconnecting) {
+			return m.transitionError(event, "trusted connection startup is not reserved")
+		}
+		m.connectionStarting = false
+		m.connectionStartFrom = ""
+		snapshot.ActionInProgress = false
+	case EventConnectionStartAbortRequested:
+		if !m.connectionStarting ||
+			(snapshot.State != StateConnecting && snapshot.State != StateConnected && snapshot.State != StateReconnecting) {
+			return m.transitionError(event, "trusted connection startup is not reserved")
+		}
+		target := m.idleState()
+		if m.connectionStartFrom == StatePaused {
+			target = StatePaused
+		}
+		m.beginStop(&Disconnect{Initiator: InitiatorSystem, Reason: ReasonRuntimeFailure}, target)
 	case EventConnected:
 		if snapshot.State != StateConnecting || snapshot.TrustedPeers != 1 || snapshot.Peer == nil {
 			return m.transitionError(event, "trusted connection is not being established")
@@ -356,6 +401,8 @@ func (m *Machine) applyLocked(event Event) error {
 		snapshot.Latency = 0
 		snapshot.Docker = DockerStatus{State: ServiceStopped}
 		snapshot.Sync = SyncStatus{State: ServiceStopped}
+		m.connectionStarting = false
+		m.connectionStartFrom = ""
 	case EventTrustForgetStarted:
 		if !allowed(*snapshot, CommandForget) {
 			return m.transitionError(event, "trusted device cannot be forgotten in the current state")

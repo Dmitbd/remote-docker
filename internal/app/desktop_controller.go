@@ -38,11 +38,14 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 	case localapi.MethodEnable:
 		c.operations.Lock()
 		defer c.operations.Unlock()
+		if snapshot := c.supervisor.Snapshot(); snapshot.TrustedPeers == 1 && snapshot.Peer != nil {
+			if _, err := c.startTrustedConnection(ctx, nil); err != nil {
+				return nil, err
+			}
+			return c.actionResult(), nil
+		}
 		if err := c.supervisor.Start(ctx); err != nil {
 			return nil, unavailable("Remote Docker could not be enabled")
-		}
-		if err := c.markTrustedConnectionStarting(); err != nil {
-			return nil, unavailable("trusted device connection could not be started")
 		}
 		return c.actionResult(), nil
 	case localapi.MethodPause:
@@ -79,23 +82,10 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 	case localapi.MethodConnect:
 		c.operations.Lock()
 		defer c.operations.Unlock()
-		snapshot := c.supervisor.Snapshot()
-		if snapshot.TrustedPeers < 1 || snapshot.Peer == nil {
+		if snapshot := c.supervisor.Snapshot(); snapshot.TrustedPeers < 1 || snapshot.Peer == nil {
 			return nil, needsAction("trusted device was not found")
 		}
-		if snapshot.State == lifecycle.StatePaused {
-			if err := c.supervisor.Start(ctx); err != nil {
-				return nil, unavailable("Remote Docker could not be enabled")
-			}
-		}
-		result, err := c.delegate(ctx, method, raw)
-		if err != nil {
-			return nil, err
-		}
-		if err := c.markTrustedConnectionStarting(); err != nil {
-			return nil, needsAction("trusted device connection could not be started")
-		}
-		return result, nil
+		return c.startTrustedConnection(ctx, func() (any, error) { return c.delegate(ctx, method, raw) })
 	case localapi.MethodPairStatus, localapi.MethodPairApprove, localapi.MethodPairReject, localapi.MethodPairCancel:
 		result, err := c.delegate(ctx, method, raw)
 		if err != nil {
@@ -120,7 +110,9 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 		}
 		return c.actionResult(), nil
 	case localapi.MethodForgetDevice:
-		c.operations.Lock()
+		if !c.operations.TryLock() {
+			return nil, needsAction("wait for the active connection operation to finish")
+		}
 		defer c.operations.Unlock()
 		var params localapi.ForgetDeviceParams
 		if err := decodeOptionalControlParams(raw, &params); err != nil {
@@ -185,20 +177,31 @@ func connectionLimitOccupied(snapshot lifecycle.Snapshot) bool {
 	return snapshot.TrustedPeers >= limit
 }
 
-func (c *DesktopController) markTrustedConnectionStarting() error {
-	snapshot := c.supervisor.Snapshot()
-	if snapshot.TrustedPeers == 0 || snapshot.Peer == nil {
-		return nil
+func (c *DesktopController) startTrustedConnection(ctx context.Context, foreground func() (any, error)) (any, error) {
+	if _, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventConnectionStartReserved}); err != nil {
+		return nil, needsAction("trusted device connection cannot start in the current state")
 	}
-	switch snapshot.State {
-	case lifecycle.StateClientReady, lifecycle.StateSearching, lifecycle.StateHostWaiting:
-		_, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventConnectionStarted})
-		return err
-	case lifecycle.StateConnecting, lifecycle.StateConnected, lifecycle.StateReconnecting:
-		return nil
-	default:
-		return errors.New("trusted device is not ready to connect")
+	abort := func(cause error) (any, error) {
+		if err := c.supervisor.AbortConnectionStart(); err != nil {
+			return nil, unavailable("failed connection startup could not be stopped safely")
+		}
+		return nil, cause
 	}
+	if err := c.supervisor.Start(ctx); err != nil {
+		return abort(unavailable("Remote Docker could not be enabled"))
+	}
+	var result any
+	if foreground != nil {
+		var err error
+		result, err = foreground()
+		if err != nil {
+			return abort(err)
+		}
+	}
+	if _, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventConnectionStartCommitted}); err != nil {
+		return abort(unavailable("trusted device connection could not be committed"))
+	}
+	return result, nil
 }
 
 func (c *DesktopController) startPairing(started localapi.PairStartResult) error {

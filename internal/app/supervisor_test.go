@@ -181,7 +181,9 @@ type recordingSessionRuntime struct {
 	role       lifecycle.Role
 	reason     lifecycle.StopReason
 	done       chan error
+	onStart    func()
 	onStop     func()
+	startErr   error
 	stop       func(context.Context) error
 }
 
@@ -198,10 +200,15 @@ func newRecordingSessionRuntime() *recordingSessionRuntime {
 
 func (r *recordingSessionRuntime) Start(_ context.Context, role lifecycle.Role) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.startCalls++
 	r.role = role
-	return nil
+	onStart := r.onStart
+	startErr := r.startErr
+	r.mu.Unlock()
+	if onStart != nil {
+		onStart()
+	}
+	return startErr
 }
 
 func (r *recordingSessionRuntime) Stop(ctx context.Context, reason lifecycle.StopReason) error {
