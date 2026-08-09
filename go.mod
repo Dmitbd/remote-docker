@@ -3,7 +3,7 @@ module github.com/Dmitbd/remote-docker
 go 1.26.0
 
 require (
-	fyne.io/systray v1.11.0
+	fyne.io/fyne/v2 v2.8.0
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/grandcat/zeroconf v1.0.0
 	github.com/zalando/go-keyring v0.2.8

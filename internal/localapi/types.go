@@ -12,6 +12,7 @@ type Method string
 
 const (
 	MethodStatus          Method = "Status"
+	MethodShowWindow      Method = "ShowWindow"
 	MethodEnable          Method = "Enable"
 	MethodPause           Method = "Pause"
 	MethodSearchStart     Method = "SearchStart"
@@ -42,7 +43,7 @@ const (
 
 func (m Method) valid() bool {
 	switch m {
-	case MethodStatus, MethodEnable, MethodPause, MethodSearchStart, MethodSearchStop,
+	case MethodStatus, MethodShowWindow, MethodEnable, MethodPause, MethodSearchStart, MethodSearchStop,
 		MethodListDevices, MethodPairCandidates, MethodPairStart, MethodPairStatus,
 		MethodPairApprove, MethodPairReject, MethodPairCancel,
 		MethodDisconnect, MethodForgetDevice,

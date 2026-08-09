@@ -63,6 +63,7 @@ func TestAgentLocalAPIUsesPerUserLocalTransport(t *testing.T) {
 func TestAgentLocalAPIDispatchesEveryControlMethod(t *testing.T) {
 	methods := []Method{
 		MethodStatus,
+		MethodShowWindow,
 		MethodEnable,
 		MethodPause,
 		MethodSearchStart,
