@@ -240,17 +240,104 @@ func TestPauseAndQuitHaveDifferentTerminalIntent(t *testing.T) {
 	}
 }
 
-func TestForgetClearsTrustOnlyWhileDisconnected(t *testing.T) {
-	machine := connectedMachine(t, RoleMacClient)
-	_, err := machine.Apply(Event{Type: EventTrustForgotten})
-	if !errors.As(err, new(*TransitionError)) {
-		t.Fatalf("forget while connected error = %v, want TransitionError", err)
+func TestForgetReservationRejectsActiveConnectionAndPairingStates(t *testing.T) {
+	tests := []struct {
+		name    string
+		machine func(*testing.T) *Machine
+	}{
+		{
+			name: "connecting",
+			machine: func(t *testing.T) *Machine {
+				machine, err := NewMachine(RoleMacClient, "MacBook", WithTrustedPeer(Peer{ID: "windows", Name: "Windows"}))
+				if err != nil {
+					t.Fatalf("NewMachine() error = %v", err)
+				}
+				mustApply(t, machine, Event{Type: EventEnabled})
+				mustApply(t, machine, Event{Type: EventConnectionStarted})
+				return machine
+			},
+		},
+		{name: "connected", machine: func(t *testing.T) *Machine { return connectedMachine(t, RoleMacClient) }},
+		{
+			name: "reconnecting",
+			machine: func(t *testing.T) *Machine {
+				machine := connectedMachine(t, RoleMacClient)
+				mustApply(t, machine, Event{Type: EventNetworkLost})
+				return machine
+			},
+		},
+		{
+			name: "pairing",
+			machine: func(t *testing.T) *Machine {
+				machine := mustMachine(t, RoleMacClient)
+				mustApply(t, machine, Event{Type: EventEnabled})
+				mustApply(t, machine, Event{Type: EventSearchStarted})
+				mustApply(t, machine, Event{Type: EventPairingStarted, Pairing: &Pairing{
+					SessionID: "session", Peer: Peer{ID: "windows", Name: "Windows"}, Code: "123456",
+				}})
+				return machine
+			},
+		},
 	}
-	mustApply(t, machine, Event{Type: EventDisconnectRequested, Disconnect: &Disconnect{Initiator: InitiatorLocal, Reason: ReasonUserDisconnect}})
-	mustApply(t, machine, Event{Type: EventStopCompleted})
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			machine := tt.machine(t)
+			peerID := "windows"
+			if snapshot := machine.Snapshot(); snapshot.Peer != nil {
+				peerID = snapshot.Peer.ID
+			}
+			_, err := machine.Apply(Event{Type: EventTrustForgetStarted, Peer: &Peer{ID: peerID}})
+			if !errors.As(err, new(*TransitionError)) {
+				t.Fatalf("forget reservation error = %v, want TransitionError", err)
+			}
+			if machine.Snapshot().ActionInProgress {
+				t.Fatalf("rejected reservation changed snapshot = %#v", machine.Snapshot())
+			}
+		})
+	}
+}
+
+func TestForgetReservationBlocksTransitionsUntilCancelled(t *testing.T) {
+	machine, err := NewMachine(RoleMacClient, "MacBook", WithTrustedPeer(Peer{ID: "windows", Name: "Windows"}))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	mustApply(t, machine, Event{Type: EventEnabled})
+	reserved := mustApply(t, machine, Event{Type: EventTrustForgetStarted, Peer: &Peer{ID: "windows"}})
+	if !reserved.ActionInProgress || reserved.TrustedPeers != 1 || reserved.Peer == nil {
+		t.Fatalf("reserved snapshot = %#v", reserved)
+	}
+	if machine.Allowed(CommandConnect) || machine.Allowed(CommandForget) {
+		t.Fatal("reservation left a conflicting command enabled")
+	}
+	if _, err := machine.Apply(Event{Type: EventConnectionStarted}); !errors.As(err, new(*TransitionError)) {
+		t.Fatalf("connection during forget error = %v, want TransitionError", err)
+	}
+	rolledBack := mustApply(t, machine, Event{Type: EventTrustForgetCancelled})
+	if rolledBack.ActionInProgress || rolledBack.TrustedPeers != 1 || rolledBack.Peer == nil || rolledBack.Peer.ID != "windows" {
+		t.Fatalf("rolled-back snapshot = %#v", rolledBack)
+	}
+	if !machine.Allowed(CommandConnect) || !machine.Allowed(CommandForget) {
+		t.Fatal("cancelled reservation did not restore trusted actions")
+	}
+}
+
+func TestForgetReservationCommitsTrustRemovalAtomically(t *testing.T) {
+	machine, err := NewMachine(RoleMacClient, "MacBook", WithTrustedPeer(Peer{ID: "windows", Name: "Windows"}))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	reserved := mustApply(t, machine, Event{Type: EventTrustForgetStarted, Peer: &Peer{ID: "windows"}})
+	if reserved.TrustedPeers != 1 || reserved.Peer == nil {
+		t.Fatalf("reservation cleared trust early: %#v", reserved)
+	}
 	forgotten := mustApply(t, machine, Event{Type: EventTrustForgotten})
-	if forgotten.TrustedPeers != 0 || forgotten.Peer != nil {
+	if forgotten.ActionInProgress || forgotten.TrustedPeers != 0 || forgotten.Peer != nil {
 		t.Fatalf("forgotten snapshot = %#v", forgotten)
+	}
+	if _, err := machine.Apply(Event{Type: EventTrustForgotten}); !errors.As(err, new(*TransitionError)) {
+		t.Fatalf("second forget commit error = %v, want TransitionError", err)
 	}
 }
 

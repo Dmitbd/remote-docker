@@ -61,10 +61,14 @@ type macPairingOptions struct {
 	DockerCLI       string
 	DockerContext   string
 	SSHConfigPath   string
+	ManagedSSHRoot  sshtransport.ManagedRoot
 	KnownHostsPath  string
 	AgentSocketPath string
 	ControlDir      string
 	ClientDeviceID  func(context.Context) (string, error)
+	RemovePinnedHost func(string, string) error
+	RemoveSSHConfig  func(sshtransport.ManagedRoot, string) error
+	SaveConfig       func(config.Config) error
 }
 
 type pendingPairing struct {
@@ -84,6 +88,17 @@ type macPairingCoordinator struct {
 }
 
 func newMacPairingCoordinator(options macPairingOptions) *macPairingCoordinator {
+	if options.RemovePinnedHost == nil {
+		options.RemovePinnedHost = sshtransport.RemovePinnedHost
+	}
+	if options.RemoveSSHConfig == nil {
+		options.RemoveSSHConfig = func(root sshtransport.ManagedRoot, path string) error {
+			return root.RemoveConfig(path)
+		}
+	}
+	if options.SaveConfig == nil {
+		options.SaveConfig = options.Store.Save
+	}
 	return &macPairingCoordinator{options: options}
 }
 
@@ -435,20 +450,27 @@ func (c *macPairingCoordinator) forgetLocal(deviceID string) error {
 		return needsAction("paired device was not found")
 	}
 	alias := "remote-docker-device-" + deviceID
-	if err := sshtransport.RemovePinnedHost(c.options.KnownHostsPath, alias); err != nil {
+	if err := c.options.RemovePinnedHost(c.options.KnownHostsPath, alias); err != nil {
 		return unavailable("cannot remove pinned SSH identity")
 	}
-	if err := sshtransport.RemoveConfig(c.options.SSHConfigPath); err != nil {
+	if err := c.options.RemoveSSHConfig(c.options.ManagedSSHRoot, c.options.SSHConfigPath); err != nil {
 		return unavailable("cannot remove managed SSH configuration")
 	}
 	if err := c.options.Secrets.Delete(deviceID, sshtransport.SSHPrivateKeyCredential); err != nil && !errors.Is(err, credentials.ErrNotFound) {
 		return unavailable("cannot delete paired SSH identity")
 	}
+	cfg, err = loadAgentConfig(c.options.Store)
+	if err != nil {
+		return unavailable("cannot refresh paired device configuration")
+	}
+	if _, exists := cfg.Devices[deviceID]; !exists {
+		return nil
+	}
 	delete(cfg.Devices, deviceID)
 	if cfg.ActiveDevice == deviceID {
 		cfg.ActiveDevice = ""
 	}
-	if err := c.options.Store.Save(cfg); err != nil {
+	if err := c.options.SaveConfig(cfg); err != nil {
 		return unavailable("cannot save pairing removal")
 	}
 	return nil

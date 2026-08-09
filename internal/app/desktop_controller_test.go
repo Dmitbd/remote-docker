@@ -269,15 +269,102 @@ func TestDesktopControllerKeepsTrustWhenLocalCleanupFails(t *testing.T) {
 	}
 	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
 	cleanupErr := errors.New("managed SSH cleanup failed")
-	controller, _ := NewDesktopController(supervisor, &recordingLocalHandler{err: cleanupErr})
+	fallback := &recordingLocalHandler{err: cleanupErr}
+	controller, _ := NewDesktopController(supervisor, fallback)
 
 	_, err = controller.Handle(context.Background(), localapi.MethodForgetDevice, json.RawMessage(`{"device_id":"saved","local_only":true}`))
 	if !errors.Is(err, cleanupErr) {
 		t.Fatalf("ForgetDevice error = %v, want cleanup error", err)
 	}
-	if got := supervisor.Snapshot(); got.TrustedPeers != 1 || got.Peer == nil || got.Peer.ID != "saved" {
+	if got := supervisor.Snapshot(); got.ActionInProgress || got.TrustedPeers != 1 || got.Peer == nil || got.Peer.ID != "saved" {
 		t.Fatalf("trusted snapshot changed after cleanup failure = %#v", got)
 	}
+	fallback.err = nil
+	if _, err := controller.Handle(context.Background(), localapi.MethodForgetDevice, json.RawMessage(`{"device_id":"saved","local_only":true}`)); err != nil {
+		t.Fatalf("ForgetDevice retry error = %v", err)
+	}
+	if got := supervisor.Snapshot(); got.ActionInProgress || got.TrustedPeers != 0 || got.Peer != nil {
+		t.Fatalf("trusted snapshot after retry = %#v", got)
+	}
+}
+
+func TestDesktopControllerRejectsForgetWhileConnectingBeforeCleanup(t *testing.T) {
+	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "saved", Name: "Saved Windows"}))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled})
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventConnectionStarted})
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := &recordingLocalHandler{}
+	controller, _ := NewDesktopController(supervisor, fallback)
+
+	_, err = controller.Handle(context.Background(), localapi.MethodForgetDevice, json.RawMessage(`{"device_id":"saved","local_only":true}`))
+	var public *localapi.PublicError
+	if !errors.As(err, &public) || public.Code != localapi.ErrorNeedsAction {
+		t.Fatalf("ForgetDevice error = %v, want needs_action", err)
+	}
+	if len(fallback.methods) != 0 {
+		t.Fatalf("cleanup methods = %v, want none", fallback.methods)
+	}
+	if got := supervisor.Snapshot(); got.State != lifecycle.StateConnecting || got.TrustedPeers != 1 || got.Peer == nil {
+		t.Fatalf("connecting snapshot changed = %#v", got)
+	}
+}
+
+func TestDesktopControllerForgetReservationBlocksConcurrentForgetAndConnect(t *testing.T) {
+	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "saved", Name: "Saved Windows"}))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled})
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := &blockingLocalHandler{started: make(chan struct{}), release: make(chan struct{})}
+	controller, _ := NewDesktopController(supervisor, fallback)
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := controller.Handle(context.Background(), localapi.MethodForgetDevice, json.RawMessage(`{"device_id":"saved","local_only":true}`))
+		firstDone <- err
+	}()
+	<-fallback.started
+
+	if got := supervisor.Snapshot(); !got.ActionInProgress || got.TrustedPeers != 1 || got.Peer == nil {
+		t.Fatalf("reserved snapshot = %#v", got)
+	}
+	for _, request := range []struct {
+		method localapi.Method
+		raw    json.RawMessage
+	}{
+		{method: localapi.MethodForgetDevice, raw: json.RawMessage(`{"device_id":"saved","local_only":true}`)},
+		{method: localapi.MethodConnect},
+	} {
+		if _, err := controller.Handle(context.Background(), request.method, request.raw); err == nil {
+			t.Fatalf("%s during forget error = nil", request.method)
+		}
+	}
+	if fallback.calls != 1 {
+		t.Fatalf("cleanup calls = %d, want one", fallback.calls)
+	}
+	close(fallback.release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first ForgetDevice error = %v", err)
+	}
+	if got := supervisor.Snapshot(); got.ActionInProgress || got.TrustedPeers != 0 || got.Peer != nil {
+		t.Fatalf("committed snapshot = %#v", got)
+	}
+}
+
+type blockingLocalHandler struct {
+	started chan struct{}
+	release chan struct{}
+	calls   int
+}
+
+func (h *blockingLocalHandler) Handle(context.Context, localapi.Method, json.RawMessage) (any, error) {
+	h.calls++
+	close(h.started)
+	<-h.release
+	return nil, nil
 }
 
 type recordingLocalHandler struct {

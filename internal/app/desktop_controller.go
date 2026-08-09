@@ -71,7 +71,7 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 		return started, nil
 	case localapi.MethodConnect:
 		snapshot := c.supervisor.Snapshot()
-		if snapshot.TrustedPeers < 1 || snapshot.Peer == nil {
+		if snapshot.TrustedPeers < 1 || snapshot.Peer == nil || c.supervisor.machine.TrustForgetInProgress() {
 			return nil, needsAction("trusted device was not found")
 		}
 		return c.delegate(ctx, method, raw)
@@ -107,18 +107,28 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 		if snapshot.Peer == nil || strings.TrimSpace(params.DeviceID) != "" && params.DeviceID != snapshot.Peer.ID {
 			return nil, needsAction("trusted device was not found")
 		}
-		if !c.supervisor.machine.Allowed(lifecycle.CommandForget) {
-			return nil, needsAction("disconnect before forgetting the trusted device")
-		}
 		if c.fallback == nil {
 			return nil, unavailable("paired device cleanup is unavailable")
 		}
-		unpairRaw, _ := json.Marshal(localapi.UnpairParams{DeviceID: snapshot.Peer.ID, LocalOnly: params.LocalOnly})
+		reserved, err := c.supervisor.machine.Apply(lifecycle.Event{
+			Type: lifecycle.EventTrustForgetStarted,
+			Peer: &lifecycle.Peer{ID: snapshot.Peer.ID},
+		})
+		if err != nil || reserved.Peer == nil {
+			return nil, needsAction("disconnect before forgetting the trusted device")
+		}
+		rollback := func(cause error) (any, error) {
+			if _, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventTrustForgetCancelled}); err != nil {
+				return nil, unavailable("trusted-device cleanup reservation could not be released")
+			}
+			return nil, cause
+		}
+		unpairRaw, _ := json.Marshal(localapi.UnpairParams{DeviceID: reserved.Peer.ID, LocalOnly: params.LocalOnly})
 		if _, err := c.fallback.Handle(ctx, localapi.MethodUnpair, unpairRaw); err != nil {
-			return nil, err
+			return rollback(err)
 		}
 		if _, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventTrustForgotten}); err != nil {
-			return nil, needsAction("disconnect before forgetting the trusted device")
+			return rollback(unavailable("trusted-device cleanup could not be committed"))
 		}
 		return c.actionResult(), nil
 	case localapi.MethodShutdown:

@@ -112,7 +112,12 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 			return nil, fmt.Errorf("find background agent executable: %w", err)
 		}
 	}
-	sshConfigPath, knownHostsPath, agentSocketPath, controlDir := defaultRuntimePaths(configPath)
+	managedSSHRoot, err := sshtransport.NewManagedRoot(filepath.Dir(configPath))
+	if err != nil {
+		return nil, fmt.Errorf("prepare managed SSH root: %w", err)
+	}
+	_, knownHostsPath, agentSocketPath, controlDir := defaultRuntimePaths(configPath)
+	sshConfigPath := managedSSHRoot.SSHConfigPath()
 	store := config.Store{Path: configPath}
 	secrets := credentials.NewKeyringStore()
 	dockerCLI := realDockerCLIPath(executablePath)
@@ -172,6 +177,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 			},
 			Docker: dockercli.Runner{}, DockerCLI: dockerCLI, DockerContext: defaultContextName,
 			SSHConfigPath: sshConfigPath, KnownHostsPath: knownHostsPath,
+			ManagedSSHRoot: managedSSHRoot,
 			AgentSocketPath: agentSocketPath, ControlDir: controlDir,
 			ClientDeviceID: macSync.DeviceID,
 		})

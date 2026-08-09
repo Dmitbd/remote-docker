@@ -142,32 +142,40 @@ func TestRemovePinnedHostRemovesOnlyExactManagedAlias(t *testing.T) {
 	}
 }
 
-func TestRemoveConfigDeletesOnlyAbsoluteManagedPath(t *testing.T) {
+func TestManagedRootRemoveConfigDeletesOnlyExactManagedChild(t *testing.T) {
 	root := t.TempDir()
-	managedPath := filepath.Join(root, "ssh_config")
-	unmanagedPath := filepath.Join(root, "user_config")
-	for _, path := range []string{managedPath, unmanagedPath} {
+	managedRootPath := filepath.Join(root, "managed")
+	unrelatedRootPath := filepath.Join(root, "unrelated")
+	for _, directory := range []string{managedRootPath, unrelatedRootPath} {
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatalf("create %s: %v", directory, err)
+		}
+	}
+	managedRoot, err := NewManagedRoot(managedRootPath)
+	if err != nil {
+		t.Fatalf("NewManagedRoot() error = %v", err)
+	}
+	managedPath := managedRoot.SSHConfigPath()
+	unrelatedPath := filepath.Join(unrelatedRootPath, "ssh_config")
+	for _, path := range []string{managedPath, unrelatedPath} {
 		if err := os.WriteFile(path, []byte("config\n"), 0o600); err != nil {
 			t.Fatalf("seed %s: %v", path, err)
 		}
 	}
 
-	if err := RemoveConfig("ssh_config"); err == nil {
-		t.Fatal("RemoveConfig(relative path) error = nil")
+	if err := managedRoot.RemoveConfig(unrelatedPath); err == nil {
+		t.Fatal("RemoveConfig(unrelated absolute ssh_config) error = nil")
 	}
-	if err := RemoveConfig(unmanagedPath); err == nil {
-		t.Fatal("RemoveConfig(unmanaged path) error = nil")
+	if _, err := os.Stat(unrelatedPath); err != nil {
+		t.Fatalf("unrelated config changed: %v", err)
 	}
-	if _, err := os.Stat(unmanagedPath); err != nil {
-		t.Fatalf("unmanaged config changed: %v", err)
-	}
-	if err := RemoveConfig(managedPath); err != nil {
+	if err := managedRoot.RemoveConfig(managedPath); err != nil {
 		t.Fatalf("RemoveConfig(managed path) error = %v", err)
 	}
 	if _, err := os.Stat(managedPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("managed config after removal error = %v", err)
 	}
-	if err := RemoveConfig(managedPath); err != nil {
+	if err := managedRoot.RemoveConfig(managedPath); err != nil {
 		t.Fatalf("RemoveConfig(missing managed path) error = %v", err)
 	}
 }

@@ -20,6 +20,28 @@ type Config struct {
 	ControlDir     string
 }
 
+// ManagedRoot is an explicit capability for files owned by Remote Docker's
+// isolated SSH runtime. It is established before any cleanup target is chosen.
+type ManagedRoot struct {
+	root          string
+	sshConfigPath string
+}
+
+func NewManagedRoot(path string) (ManagedRoot, error) {
+	if !filepath.IsAbs(path) {
+		return ManagedRoot{}, errors.New("managed SSH root must be absolute")
+	}
+	root := filepath.Clean(path)
+	if root == filepath.VolumeName(root)+string(filepath.Separator) {
+		return ManagedRoot{}, errors.New("managed SSH root cannot be a filesystem root")
+	}
+	return ManagedRoot{root: root, sshConfigPath: filepath.Join(root, "ssh_config")}, nil
+}
+
+func (r ManagedRoot) SSHConfigPath() string {
+	return r.sshConfigPath
+}
+
 // RenderConfig renders a strict SSH configuration without password fallbacks.
 func RenderConfig(config Config) (string, error) {
 	alias, err := hostAlias(config.DeviceID)
@@ -72,10 +94,14 @@ func WriteConfig(path string, config Config) error {
 	return writePrivateFile(path, []byte(content))
 }
 
-// RemoveConfig deletes only the absolute app-managed SSH configuration file.
-func RemoveConfig(path string) error {
-	if !filepath.IsAbs(path) || filepath.Base(filepath.Clean(path)) != "ssh_config" {
-		return errors.New("managed SSH config path must be an absolute ssh_config path")
+// RemoveConfig deletes only the exact SSH config child authorized when the
+// managed-root capability was created.
+func (r ManagedRoot) RemoveConfig(path string) error {
+	if r.root == "" || r.sshConfigPath == "" {
+		return errors.New("managed SSH root capability is unavailable")
+	}
+	if !filepath.IsAbs(path) || filepath.Clean(path) != r.sshConfigPath {
+		return errors.New("SSH config path is outside the managed SSH root")
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove managed SSH config: %w", err)

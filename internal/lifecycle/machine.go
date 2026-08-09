@@ -48,7 +48,9 @@ const (
 	EventPauseRequested      EventType = "pause_requested"
 	EventQuitRequested       EventType = "quit_requested"
 	EventStopCompleted       EventType = "stop_completed"
+	EventTrustForgetStarted  EventType = "trust_forget_started"
 	EventTrustForgotten      EventType = "trust_forgotten"
+	EventTrustForgetCancelled EventType = "trust_forget_cancelled"
 	EventProblemDetected     EventType = "problem_detected"
 	EventProblemCleared      EventType = "problem_cleared"
 )
@@ -106,6 +108,7 @@ type Machine struct {
 	snapshot    Snapshot
 	now         func() time.Time
 	afterStop   State
+	forgetting  bool
 	subscribers map[uint64]chan Snapshot
 	nextID      uint64
 }
@@ -147,7 +150,19 @@ func (m *Machine) Allowed(command Command) bool {
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	if m.forgetting {
+		return false
+	}
 	return allowed(m.snapshot, command)
+}
+
+func (m *Machine) TrustForgetInProgress() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.forgetting
 }
 
 func allowed(snapshot Snapshot, command Command) bool {
@@ -174,8 +189,9 @@ func allowed(snapshot Snapshot, command Command) bool {
 	case CommandPause:
 		return snapshot.State != StatePaused
 	case CommandForget:
-		return snapshot.TrustedPeers == 1 && snapshot.State != StateConnected &&
-			snapshot.State != StateReconnecting && snapshot.State != StatePairing
+		return snapshot.TrustedPeers == 1 && snapshot.Peer != nil &&
+			(snapshot.State == StatePaused || snapshot.State == StateClientReady || snapshot.State == StateSearching ||
+				snapshot.State == StateHostWaiting || snapshot.State == StateNeedsAction)
 	case CommandQuit:
 		return true
 	default:
@@ -217,6 +233,9 @@ func (m *Machine) Apply(event Event) (Snapshot, error) {
 
 func (m *Machine) applyLocked(event Event) error {
 	snapshot := &m.snapshot
+	if m.forgetting && event.Type != EventTrustForgotten && event.Type != EventTrustForgetCancelled {
+		return m.transitionError(event, "trusted-device cleanup is in progress")
+	}
 	switch event.Type {
 	case EventEnabled:
 		if snapshot.State != StatePaused {
@@ -346,12 +365,29 @@ func (m *Machine) applyLocked(event Event) error {
 		snapshot.Latency = 0
 		snapshot.Docker = DockerStatus{State: ServiceStopped}
 		snapshot.Sync = SyncStatus{State: ServiceStopped}
-	case EventTrustForgotten:
+	case EventTrustForgetStarted:
 		if !allowed(*snapshot, CommandForget) {
 			return m.transitionError(event, "trusted device cannot be forgotten in the current state")
 		}
+		if event.Peer == nil || snapshot.Peer == nil || strings.TrimSpace(event.Peer.ID) == "" || event.Peer.ID != snapshot.Peer.ID {
+			return m.transitionError(event, "trusted device changed before cleanup started")
+		}
+		m.forgetting = true
+		snapshot.ActionInProgress = true
+	case EventTrustForgotten:
+		if !m.forgetting {
+			return m.transitionError(event, "trusted-device cleanup is not reserved")
+		}
 		snapshot.Peer = nil
 		snapshot.TrustedPeers = 0
+		snapshot.ActionInProgress = false
+		m.forgetting = false
+	case EventTrustForgetCancelled:
+		if !m.forgetting {
+			return m.transitionError(event, "trusted-device cleanup is not reserved")
+		}
+		snapshot.ActionInProgress = false
+		m.forgetting = false
 	case EventProblemDetected:
 		if event.Problem == nil || event.Problem.Code == "" {
 			return m.transitionError(event, "problem metadata is incomplete")
