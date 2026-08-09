@@ -408,26 +408,25 @@ func TestMacPairingCoordinatorPersistsPinnedDeviceAndRevokesBeforeLocalRemoval(t
 	if started.SessionID == "" || len(started.Code) != 6 {
 		t.Fatalf("pair start = %#v", started)
 	}
-	confirmed, err := coordinator.Confirm(context.Background(), localapi.PairConfirmParams{
-		SessionID: started.SessionID, Code: started.Code,
-	})
+	status, err := coordinator.Status(context.Background(), started.SessionID)
 	if err != nil {
-		t.Fatalf("Confirm() error = %v", err)
+		t.Fatalf("Status() error = %v", err)
 	}
-	if confirmed.Device.ID == "" || confirmed.Device.Address != "192.168.1.20" {
-		t.Fatalf("confirmed = %#v", confirmed)
+	if status.Status != string(pairing.SessionCompleted) || status.Device == nil || status.Device.ID == "" || status.Device.Address != "192.168.1.20" {
+		t.Fatalf("pairing status = %#v", status)
 	}
+	confirmed := *status.Device
 	cfg, err := store.Load()
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	device := cfg.Devices[confirmed.Device.ID]
-	if cfg.ActiveDevice != confirmed.Device.ID || device.SSHHostPublicKey != transport.hostKey ||
+	device := cfg.Devices[confirmed.ID]
+	if cfg.ActiveDevice != confirmed.ID || device.SSHHostPublicKey != transport.hostKey ||
 		device.SyncthingDeviceID != "WINDOWS-SYNC" || device.ClientDeviceID != "LOCAL-SYNC" ||
 		device.SSHPort != 49222 || device.SyncPort != 49220 {
 		t.Fatalf("persisted device = %#v config=%#v", device, cfg)
 	}
-	privateKey, err := secrets.Get(confirmed.Device.ID, sshtransport.SSHPrivateKeyCredential)
+	privateKey, err := secrets.Get(confirmed.ID, sshtransport.SSHPrivateKeyCredential)
 	if err != nil || len(privateKey) == 0 {
 		t.Fatalf("stored private key length=%d error=%v", len(privateKey), err)
 	}
@@ -439,7 +438,7 @@ func TestMacPairingCoordinatorPersistsPinnedDeviceAndRevokesBeforeLocalRemoval(t
 		t.Fatalf("Docker context calls = %#v", docker.calls)
 	}
 
-	if err := coordinator.Unpair(context.Background(), confirmed.Device.ID); err != nil {
+	if err := coordinator.Unpair(context.Background(), confirmed.ID); err != nil {
 		t.Fatalf("Unpair() error = %v", err)
 	}
 	if transport.revoked != device.ClientDeviceID {
@@ -449,8 +448,36 @@ func TestMacPairingCoordinatorPersistsPinnedDeviceAndRevokesBeforeLocalRemoval(t
 	if cfg.ActiveDevice != "" || len(cfg.Devices) != 0 {
 		t.Fatalf("config after unpair = %#v", cfg)
 	}
-	if _, err := secrets.Get(confirmed.Device.ID, sshtransport.SSHPrivateKeyCredential); !errors.Is(err, credentials.ErrNotFound) {
+	if _, err := secrets.Get(confirmed.ID, sshtransport.SSHPrivateKeyCredential); !errors.Is(err, credentials.ErrNotFound) {
 		t.Fatalf("private key after unpair error = %v", err)
+	}
+}
+
+func TestMacPairingCoordinatorCancelsWithoutManualCodeAndClearsPendingSecret(t *testing.T) {
+	root := t.TempDir()
+	transport := &runtimePairingTransport{hostKey: testAuthorizedKey(t), status: pairing.SessionPending}
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Store: config.Store{Path: filepath.Join(root, "config.json")}, Secrets: credentials.NewMemoryStore(),
+		Transport: transport, Docker: &runtimeDockerExecutor{}, DockerCLI: "docker-real", DockerContext: "remote-docker",
+		ClientDeviceID: func(context.Context) (string, error) { return "LOCAL-SYNC", nil },
+		SSHConfigPath: filepath.Join(root, "ssh_config"), KnownHostsPath: filepath.Join(root, "known_hosts"),
+		AgentSocketPath: filepath.Join(root, "ssh-agent.sock"), ControlDir: filepath.Join(root, "control"),
+	})
+	started, err := coordinator.Start(context.Background(), "windows-peer")
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if _, err := coordinator.Cancel(context.Background(), started.SessionID); err != nil {
+		t.Fatalf("Cancel() error = %v", err)
+	}
+	if transport.cancelled != started.SessionID {
+		t.Fatalf("cancelled session = %q, want %q", transport.cancelled, started.SessionID)
+	}
+	coordinator.mu.Lock()
+	pending := coordinator.pending
+	coordinator.mu.Unlock()
+	if pending != nil {
+		t.Fatalf("pending pairing survived cancellation: %#v", pending)
 	}
 }
 
@@ -458,6 +485,8 @@ type runtimePairingTransport struct {
 	hostKey string
 	private ed25519.PrivateKey
 	revoked string
+	status pairing.SessionState
+	cancelled string
 }
 
 func (*runtimePairingTransport) Candidates(context.Context) ([]pairingTarget, error) {
@@ -485,6 +514,19 @@ func (t *runtimePairingTransport) Confirm(_ context.Context, _ pairingTarget, de
 		SSHHostPublicKey: t.hostKey, SyncthingDeviceID: "WINDOWS-SYNC",
 		SSHPort: 49222, SyncthingPort: 49220,
 	}, nil
+}
+
+func (t *runtimePairingTransport) Status(_ context.Context, _ pairingTarget, descriptor pairing.SessionDescriptor) (pairing.SessionStatus, error) {
+	state := t.status
+	if state == "" {
+		state = pairing.SessionApproved
+	}
+	return pairing.SessionStatus{SessionID: descriptor.ID, State: state, ExpiresAt: descriptor.ExpiresAt}, nil
+}
+
+func (t *runtimePairingTransport) Cancel(_ context.Context, _ pairingTarget, descriptor pairing.SessionDescriptor) error {
+	t.cancelled = descriptor.ID
+	return nil
 }
 
 func (t *runtimePairingTransport) Revoke(_ context.Context, _ config.Device, clientDeviceID string) error {

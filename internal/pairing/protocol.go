@@ -22,7 +22,29 @@ const (
 var (
 	ErrSessionActive  = errors.New("a pairing session is already active")
 	ErrInvalidSession = errors.New("invalid pairing session")
+	ErrSessionState   = errors.New("pairing session is in a different state")
 )
+
+// SessionState is the user-visible phase of the two-device approval flow.
+type SessionState string
+
+const (
+	SessionPending   SessionState = "pending"
+	SessionApproved  SessionState = "approved"
+	SessionRejected  SessionState = "rejected"
+	SessionCancelled SessionState = "cancelled"
+	SessionCompleted SessionState = "completed"
+	SessionExpired   SessionState = "expired"
+)
+
+// SessionStatus contains no secret material and can be polled only by a
+// client that already knows the unguessable session ID and pinned TLS key.
+type SessionStatus struct {
+	SessionID string       `json:"session_id"`
+	State     SessionState `json:"state"`
+	ExpiresAt time.Time    `json:"expires_at"`
+	DeviceID  string       `json:"device_id,omitempty"`
+}
 
 // ServerIdentity is an ephemeral Ed25519 identity used for pairing and TLS.
 type ServerIdentity struct {

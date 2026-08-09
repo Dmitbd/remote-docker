@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
 	"github.com/Dmitbd/remote-docker/internal/localapi"
@@ -109,13 +110,100 @@ func TestDesktopControllerShutdownWaitsForOwnedRuntime(t *testing.T) {
 	}
 }
 
+func TestDesktopControllerStartsDisplayOnlyPairingFromMacSearch(t *testing.T) {
+	machine := newLifecycleMachine(t, lifecycle.RoleMacClient)
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := &recordingLocalHandler{result: localapi.PairStartResult{
+		SessionID: "session-1", Code: "123456", ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano),
+		Peer: localapi.LifecyclePeer{ID: "windows", Name: "Windows PC", OS: "windows"},
+	}}
+	controller, _ := NewDesktopController(supervisor, fallback)
+	_, _ = controller.Handle(context.Background(), localapi.MethodEnable, nil)
+	_, _ = controller.Handle(context.Background(), localapi.MethodSearchStart, nil)
+
+	if _, err := controller.Handle(context.Background(), localapi.MethodPairStart, json.RawMessage(`{"device":"windows"}`)); err != nil {
+		t.Fatalf("PairStart error = %v", err)
+	}
+	snapshot := supervisor.Snapshot()
+	if snapshot.State != lifecycle.StatePairing || snapshot.Pairing == nil || snapshot.Pairing.Code != "123456" ||
+		snapshot.Pairing.Peer.Name != "Windows PC" {
+		t.Fatalf("pairing snapshot = %#v", snapshot)
+	}
+}
+
+func TestDesktopControllerRequiresWindowsApprovalBeforeCompletingPairing(t *testing.T) {
+	machine := newLifecycleMachine(t, lifecycle.RoleWindowsHost)
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := &recordingLocalHandler{results: map[localapi.Method]any{
+		localapi.MethodPairStatus: localapi.PairingStatusResult{
+			SessionID: "session-1", Code: "654321", Status: "pending",
+			ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano),
+			Peer: localapi.LifecyclePeer{ID: "mac", Name: "Mac", OS: "macos"},
+		},
+		localapi.MethodPairApprove: localapi.PairingStatusResult{
+			SessionID: "session-1", Code: "654321", Status: "approved",
+			ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano),
+			Peer: localapi.LifecyclePeer{ID: "mac", Name: "Mac", OS: "macos"},
+		},
+	}}
+	controller, _ := NewDesktopController(supervisor, fallback)
+	_, _ = controller.Handle(context.Background(), localapi.MethodEnable, nil)
+
+	params := json.RawMessage(`{"session_id":"session-1"}`)
+	if _, err := controller.Handle(context.Background(), localapi.MethodPairStatus, params); err != nil {
+		t.Fatalf("PairStatus error = %v", err)
+	}
+	if got := supervisor.Snapshot(); got.State != lifecycle.StatePairing || got.Pairing == nil || got.Pairing.Status != lifecycle.PairingPending {
+		t.Fatalf("pending snapshot = %#v", got)
+	}
+	if _, err := controller.Handle(context.Background(), localapi.MethodPairApprove, params); err != nil {
+		t.Fatalf("PairApprove error = %v", err)
+	}
+	if got := supervisor.Snapshot(); got.Pairing == nil || got.Pairing.Status != lifecycle.PairingApproved {
+		t.Fatalf("approved snapshot = %#v", got)
+	}
+}
+
+func TestDesktopControllerCompletesMacPairingAfterRemoteApproval(t *testing.T) {
+	machine := newLifecycleMachine(t, lifecycle.RoleMacClient)
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	expires := time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano)
+	fallback := &recordingLocalHandler{results: map[localapi.Method]any{
+		localapi.MethodPairStart: localapi.PairStartResult{
+			SessionID: "session-1", Code: "123456", ExpiresAt: expires,
+			Peer: localapi.LifecyclePeer{ID: "temporary-windows", Name: "Windows PC", OS: "windows"},
+		},
+		localapi.MethodPairStatus: localapi.PairingStatusResult{
+			SessionID: "session-1", Code: "123456", Status: "completed", ExpiresAt: expires,
+			Peer: localapi.LifecyclePeer{ID: "temporary-windows", Name: "Windows PC", OS: "windows"},
+			Device: &localapi.Device{ID: "trusted-windows", Name: "Windows PC", Address: "192.168.1.20"},
+		},
+	}}
+	controller, _ := NewDesktopController(supervisor, fallback)
+	_, _ = controller.Handle(context.Background(), localapi.MethodEnable, nil)
+	_, _ = controller.Handle(context.Background(), localapi.MethodSearchStart, nil)
+	_, _ = controller.Handle(context.Background(), localapi.MethodPairStart, json.RawMessage(`{"device":"temporary-windows"}`))
+
+	if _, err := controller.Handle(context.Background(), localapi.MethodPairStatus, json.RawMessage(`{"session_id":"session-1"}`)); err != nil {
+		t.Fatalf("PairStatus error = %v", err)
+	}
+	got := supervisor.Snapshot()
+	if got.State != lifecycle.StateConnecting || got.TrustedPeers != 1 || got.Peer == nil || got.Peer.ID != "trusted-windows" {
+		t.Fatalf("completed snapshot = %#v", got)
+	}
+}
+
 type recordingLocalHandler struct {
 	methods []localapi.Method
 	result  any
+	results map[localapi.Method]any
 	err     error
 }
 
 func (h *recordingLocalHandler) Handle(_ context.Context, method localapi.Method, _ json.RawMessage) (any, error) {
 	h.methods = append(h.methods, method)
+	if result, ok := h.results[method]; ok {
+		return result, h.err
+	}
 	return h.result, h.err
 }

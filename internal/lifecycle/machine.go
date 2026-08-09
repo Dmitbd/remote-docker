@@ -36,6 +36,7 @@ const (
 	EventPairingApproved     EventType = "pairing_approved"
 	EventPairingRejected     EventType = "pairing_rejected"
 	EventPairingCancelled    EventType = "pairing_cancelled"
+	EventPairingExpired      EventType = "pairing_expired"
 	EventPairingCompleted    EventType = "pairing_completed"
 	EventConnectionStarted   EventType = "connection_started"
 	EventConnected           EventType = "connected"
@@ -243,15 +244,9 @@ func (m *Machine) applyLocked(event Event) error {
 		pairing := *snapshot.Pairing
 		pairing.Status = PairingApproved
 		snapshot.Pairing = &pairing
-	case EventPairingRejected, EventPairingCancelled:
+	case EventPairingRejected, EventPairingCancelled, EventPairingExpired:
 		if snapshot.State != StatePairing || snapshot.Pairing == nil {
 			return m.transitionError(event, "no pairing request exists")
-		}
-		if event.Type == EventPairingRejected && snapshot.Role != RoleWindowsHost {
-			return m.transitionError(event, "only the Windows host can reject a request")
-		}
-		if event.Type == EventPairingCancelled && snapshot.Role != RoleMacClient {
-			return m.transitionError(event, "only the Mac client can cancel its request")
 		}
 		snapshot.Pairing = nil
 		snapshot.State = m.idleState()

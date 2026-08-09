@@ -117,6 +117,34 @@ func TestPairingAndConnectionEnforceOneTrustedPeer(t *testing.T) {
 	}
 }
 
+func TestPairingTerminalDecisionIsObservedOnEitherDevice(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		role  Role
+		event EventType
+		want  State
+	}{
+		{name: "Mac observes Windows rejection", role: RoleMacClient, event: EventPairingRejected, want: StateClientReady},
+		{name: "Windows observes Mac cancellation", role: RoleWindowsHost, event: EventPairingCancelled, want: StateHostWaiting},
+		{name: "Mac observes expiry", role: RoleMacClient, event: EventPairingExpired, want: StateClientReady},
+		{name: "Windows observes expiry", role: RoleWindowsHost, event: EventPairingExpired, want: StateHostWaiting},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			machine := mustMachine(t, tt.role)
+			mustApply(t, machine, Event{Type: EventEnabled})
+			if tt.role == RoleMacClient {
+				mustApply(t, machine, Event{Type: EventSearchStarted})
+			}
+			pairing := Pairing{SessionID: "session", Peer: Peer{ID: "peer", Name: "Peer"}, Code: "123456"}
+			mustApply(t, machine, Event{Type: EventPairingStarted, Pairing: &pairing})
+			got := mustApply(t, machine, Event{Type: tt.event})
+			if got.State != tt.want || got.Pairing != nil {
+				t.Fatalf("terminal pairing snapshot = %#v", got)
+			}
+		})
+	}
+}
+
 func TestExplicitDisconnectStopsBeforeReturningToRoleIdleState(t *testing.T) {
 	tests := []struct {
 		name string

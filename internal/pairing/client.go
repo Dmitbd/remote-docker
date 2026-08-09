@@ -25,6 +25,11 @@ type confirmRequest struct {
 	AuthorizedKey   string `json:"authorized_key"`
 }
 
+type sessionControlRequest struct {
+	SessionID       string            `json:"session_id"`
+	ClientPublicKey ed25519.PublicKey `json:"client_public_key"`
+}
+
 // Client confirms a descriptor after the user compares its visual code.
 type Client struct {
 	HTTPClient    *http.Client
@@ -180,6 +185,64 @@ func (c *Client) Code() (string, error) {
 	return Code(c.Session)
 }
 
+// Status polls the Windows decision over the TLS identity pinned during
+// discovery. The visible comparison code is never submitted by the user.
+func (c *Client) Status(ctx context.Context) (SessionStatus, error) {
+	baseURL, err := url.Parse(c.BaseURL)
+	if err != nil || baseURL.Scheme != "https" || baseURL.Host == "" || !validSessionID(c.Session.ID) {
+		return SessionStatus{}, ErrInvalidSession
+	}
+	endpoint := strings.TrimRight(c.BaseURL, "/") + pairSessionStatusPath + "?id=" + url.QueryEscape(c.Session.ID)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return SessionStatus{}, fmt.Errorf("create pairing status request: %w", err)
+	}
+	response, raw, err := c.doPinned(request, 16<<10)
+	if err != nil {
+		return SessionStatus{}, err
+	}
+	if response.StatusCode != http.StatusOK {
+		return SessionStatus{}, decodeHTTPError(response.StatusCode, raw)
+	}
+	var status SessionStatus
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&status); err != nil || status.SessionID != c.Session.ID {
+		return SessionStatus{}, ErrInvalidSession
+	}
+	return status, nil
+}
+
+// Cancel lets the initiating Mac close its own pending request. The public
+// client key binds the operation to the descriptor already pinned by TLS.
+func (c *Client) Cancel(ctx context.Context) error {
+	baseURL, err := url.Parse(c.BaseURL)
+	if err != nil || baseURL.Scheme != "https" || baseURL.Host == "" || !validSessionID(c.Session.ID) {
+		return ErrInvalidSession
+	}
+	payload, err := json.Marshal(sessionControlRequest{
+		SessionID: c.Session.ID, ClientPublicKey: append(ed25519.PublicKey(nil), c.Session.ClientPublicKey...),
+	})
+	if err != nil {
+		return fmt.Errorf("encode pairing cancellation: %w", err)
+	}
+	request, err := http.NewRequestWithContext(
+		ctx, http.MethodPost, strings.TrimRight(c.BaseURL, "/")+pairSessionCancelPath, bytes.NewReader(payload),
+	)
+	if err != nil {
+		return fmt.Errorf("create pairing cancellation request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, raw, err := c.doPinned(request, 16<<10)
+	if err != nil {
+		return err
+	}
+	if response.StatusCode != http.StatusOK {
+		return decodeHTTPError(response.StatusCode, raw)
+	}
+	return nil
+}
+
 // Confirm submits the public Mac identity and returns the public device record.
 func (c *Client) Confirm(ctx context.Context, code string) (DeviceRecord, []byte, error) {
 	baseURL, err := url.Parse(c.BaseURL)
@@ -234,6 +297,34 @@ func (c *Client) Confirm(ctx context.Context, code string) (DeviceRecord, []byte
 		return DeviceRecord{}, raw, fmt.Errorf("decode pairing response: %w", err)
 	}
 	return record, raw, nil
+}
+
+func (c *Client) doPinned(request *http.Request, limit int64) (*http.Response, []byte, error) {
+	httpClient := c.HTTPClient
+	if httpClient == nil {
+		httpClient = pinnedHTTPClient(c.Session.ServerPublicKey)
+	}
+	response, err := httpClient.Do(request)
+	if err != nil {
+		return nil, nil, fmt.Errorf("send pairing session request: %w", err)
+	}
+	defer response.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
+	if err != nil {
+		return nil, nil, fmt.Errorf("read pairing session response: %w", err)
+	}
+	if int64(len(raw)) > limit {
+		return nil, nil, errors.New("pairing session response exceeds size limit")
+	}
+	return response, raw, nil
+}
+
+func decodeHTTPError(statusCode int, raw []byte) error {
+	var body struct {
+		Error string `json:"error"`
+	}
+	_ = json.Unmarshal(raw, &body)
+	return &HTTPError{StatusCode: statusCode, Message: body.Error}
 }
 
 func errorsNewSecureURL() error {

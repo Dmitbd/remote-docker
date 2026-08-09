@@ -23,9 +23,11 @@ import (
 )
 
 const (
-	pairPath        = "/v1/pair"
-	pairSessionPath = "/v1/pair/session"
-	pairInfoPath    = "/v1/pair/info"
+	pairPath              = "/v1/pair"
+	pairSessionPath       = "/v1/pair/session"
+	pairSessionStatusPath = "/v1/pair/session/status"
+	pairSessionCancelPath = "/v1/pair/session/cancel"
+	pairInfoPath          = "/v1/pair/info"
 )
 
 // Installer applies or revokes the one managed Mac authorization on Windows.
@@ -36,7 +38,13 @@ type Installer interface {
 
 type sessionState struct {
 	descriptor SessionDescriptor
+	state      SessionState
 	attempts   int
+}
+
+type terminalSession struct {
+	status     SessionStatus
+	httpStatus int
 }
 
 // Server owns one short-lived pairing session.
@@ -49,7 +57,7 @@ type Server struct {
 	now         func() time.Time
 	random      io.Reader
 	active      *sessionState
-	terminal    map[string]int
+	terminal    map[string]terminalSession
 }
 
 // ServerOption changes a server dependency.
@@ -98,7 +106,7 @@ func NewServer(identity ServerIdentity, options ...ServerOption) (*Server, error
 		identity: identity,
 		now:      time.Now,
 		random:   rand.Reader,
-		terminal: make(map[string]int),
+		terminal: make(map[string]terminalSession),
 	}
 	for _, option := range options {
 		option(server)
@@ -130,8 +138,7 @@ func (s *Server) StartSession(clientPublicKey ed25519.PublicKey, ttl time.Durati
 		if now.Before(s.active.descriptor.ExpiresAt) {
 			return SessionDescriptor{}, ErrSessionActive
 		}
-		s.terminal[s.active.descriptor.ID] = http.StatusGone
-		s.active = nil
+		s.finishLocked(SessionExpired, http.StatusGone, "")
 	}
 
 	nonce := make([]byte, 32)
@@ -149,7 +156,7 @@ func (s *Server) StartSession(clientPublicKey ed25519.PublicKey, ttl time.Durati
 		ClientPublicKey: append(ed25519.PublicKey(nil), clientPublicKey...),
 		ExpiresAt:       now.Add(ttl),
 	}
-	s.active = &sessionState{descriptor: descriptor}
+	s.active = &sessionState{descriptor: descriptor, state: SessionPending}
 	return cloneDescriptor(descriptor), nil
 }
 
@@ -157,7 +164,8 @@ func (s *Server) StartSession(clientPublicKey ed25519.PublicKey, ttl time.Durati
 func (s *Server) ActiveSession() (SessionDescriptor, string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.active == nil || !s.now().Before(s.active.descriptor.ExpiresAt) {
+	s.expireLocked()
+	if s.active == nil {
 		return SessionDescriptor{}, "", false
 	}
 	descriptor := cloneDescriptor(s.active.descriptor)
@@ -168,11 +176,65 @@ func (s *Server) ActiveSession() (SessionDescriptor, string, bool) {
 	return descriptor, code, true
 }
 
+// SessionStatus returns only the state of a known, unguessable session.
+func (s *Server) SessionStatus(sessionID string) (SessionStatus, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireLocked()
+	if s.active != nil && sessionID == s.active.descriptor.ID {
+		return s.activeStatusLocked(), true
+	}
+	terminal, ok := s.terminal[sessionID]
+	return terminal.status, ok
+}
+
+// Approve records the explicit Windows-side user decision. It does not install
+// credentials; installation happens only when the pinned Mac client completes.
+func (s *Server) Approve(sessionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireLocked()
+	if s.active == nil || s.active.descriptor.ID != sessionID {
+		return ErrInvalidSession
+	}
+	if s.active.state == SessionApproved {
+		return nil
+	}
+	if s.active.state != SessionPending {
+		return ErrSessionState
+	}
+	s.active.state = SessionApproved
+	return nil
+}
+
+// Reject closes the request after an explicit Windows-side rejection.
+func (s *Server) Reject(sessionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireLocked()
+	if s.active == nil || s.active.descriptor.ID != sessionID {
+		return ErrInvalidSession
+	}
+	if s.active.state != SessionPending {
+		return ErrSessionState
+	}
+	s.finishLocked(SessionRejected, http.StatusForbidden, "")
+	return nil
+}
+
 // ServeHTTP accepts the one confirmation request that completes pairing.
 func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Content-Type", "application/json")
 	if request.URL.Path == pairInfoPath {
 		s.serveInfo(response, request)
+		return
+	}
+	if request.URL.Path == pairSessionStatusPath {
+		s.serveSessionStatus(response, request)
+		return
+	}
+	if request.URL.Path == pairSessionCancelPath {
+		s.serveSessionCancel(response, request)
 		return
 	}
 	if request.Method == http.MethodPost && request.URL.Path == pairSessionPath {
@@ -224,6 +286,59 @@ func (s *Server) serveInfo(response http.ResponseWriter, request *http.Request) 
 	})
 }
 
+func (s *Server) serveSessionStatus(response http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet || request.ContentLength > 0 || len(request.TransferEncoding) > 0 {
+		writeError(response, http.StatusBadRequest, "invalid pairing status request")
+		return
+	}
+	query := request.URL.Query()
+	if len(query) != 1 || len(query["id"]) != 1 || !validSessionID(query.Get("id")) {
+		writeError(response, http.StatusBadRequest, "invalid pairing status request")
+		return
+	}
+	status, ok := s.SessionStatus(query.Get("id"))
+	if !ok {
+		writeError(response, http.StatusNotFound, "pairing session not found")
+		return
+	}
+	response.Header().Set("Cache-Control", "no-store")
+	response.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(response).Encode(status)
+}
+
+func (s *Server) serveSessionCancel(response http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost || request.URL.RawQuery != "" {
+		writeError(response, http.StatusBadRequest, "invalid pairing cancellation request")
+		return
+	}
+	request.Body = http.MaxBytesReader(response, request.Body, 8<<10)
+	var input sessionControlRequest
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		writeError(response, http.StatusBadRequest, "invalid pairing cancellation request")
+		return
+	}
+
+	s.mu.Lock()
+	s.expireLocked()
+	if s.active == nil || input.SessionID != s.active.descriptor.ID ||
+		subtle.ConstantTimeCompare(input.ClientPublicKey, s.active.descriptor.ClientPublicKey) != 1 {
+		s.mu.Unlock()
+		writeError(response, http.StatusForbidden, "invalid pairing session")
+		return
+	}
+	if s.active.state != SessionPending && s.active.state != SessionApproved {
+		s.mu.Unlock()
+		writeError(response, http.StatusConflict, "pairing session cannot be cancelled")
+		return
+	}
+	s.finishLocked(SessionCancelled, http.StatusConflict, "")
+	s.mu.Unlock()
+	response.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(response).Encode(map[string]bool{"cancelled": true})
+}
+
 func (s *Server) serveStartSession(response http.ResponseWriter, request *http.Request) {
 	request.Body = http.MaxBytesReader(response, request.Body, 8<<10)
 	var input struct {
@@ -251,19 +366,18 @@ func (s *Server) serveStartSession(response http.ResponseWriter, request *http.R
 func (s *Server) confirm(ctx context.Context, request confirmRequest) (DeviceRecord, int, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.expireLocked()
 
 	if s.active == nil || request.SessionID != s.active.descriptor.ID {
-		if status, ok := s.terminal[request.SessionID]; ok {
-			return DeviceRecord{}, status, http.StatusText(status)
+		if terminal, ok := s.terminal[request.SessionID]; ok {
+			return DeviceRecord{}, terminal.httpStatus, http.StatusText(terminal.httpStatus)
 		}
 		return DeviceRecord{}, http.StatusForbidden, "invalid pairing session"
 	}
 
 	session := s.active
-	if !s.now().Before(session.descriptor.ExpiresAt) {
-		s.terminal[request.SessionID] = http.StatusGone
-		s.active = nil
-		return DeviceRecord{}, http.StatusGone, "pairing session expired"
+	if session.state != SessionApproved {
+		return DeviceRecord{}, http.StatusConflict, "waiting for Windows approval"
 	}
 	if session.attempts >= maxAttempts {
 		return DeviceRecord{}, http.StatusTooManyRequests, "pairing attempt limit reached"
@@ -278,8 +392,7 @@ func (s *Server) confirm(ctx context.Context, request confirmRequest) (DeviceRec
 	if !valid {
 		session.attempts++
 		if session.attempts == maxAttempts {
-			s.terminal[request.SessionID] = http.StatusTooManyRequests
-			s.active = nil
+			s.finishLocked(SessionRejected, http.StatusTooManyRequests, "")
 		}
 		return DeviceRecord{}, http.StatusForbidden, "pairing code or device identity is invalid"
 	}
@@ -301,9 +414,44 @@ func (s *Server) confirm(ctx context.Context, request confirmRequest) (DeviceRec
 		SSHPort:           device.SSHPort,
 		SyncthingPort:     device.SyncthingPort,
 	}
-	s.terminal[request.SessionID] = http.StatusConflict
-	s.active = nil
+	s.finishLocked(SessionCompleted, http.StatusConflict, request.DeviceID)
 	return record, http.StatusOK, ""
+}
+
+func (s *Server) activeStatusLocked() SessionStatus {
+	return SessionStatus{
+		SessionID: s.active.descriptor.ID,
+		State:     s.active.state,
+		ExpiresAt: s.active.descriptor.ExpiresAt,
+	}
+}
+
+func (s *Server) expireLocked() {
+	if s.active != nil && !s.now().Before(s.active.descriptor.ExpiresAt) {
+		s.finishLocked(SessionExpired, http.StatusGone, "")
+	}
+	retentionDeadline := s.now().Add(-MaxSessionTTL)
+	for id, terminal := range s.terminal {
+		if terminal.status.ExpiresAt.Before(retentionDeadline) {
+			delete(s.terminal, id)
+		}
+	}
+}
+
+func (s *Server) finishLocked(state SessionState, httpStatus int, deviceID string) {
+	if s.active == nil {
+		return
+	}
+	s.terminal[s.active.descriptor.ID] = terminalSession{
+		status: SessionStatus{
+			SessionID: s.active.descriptor.ID,
+			State:     state,
+			ExpiresAt: s.active.descriptor.ExpiresAt,
+			DeviceID:  deviceID,
+		},
+		httpStatus: httpStatus,
+	}
+	s.active = nil
 }
 
 func (s *Server) TLSConfig() (*tls.Config, error) {
@@ -372,6 +520,14 @@ func ListenPrivate(network, address string) (net.Listener, error) {
 
 func validDeviceID(deviceID string) bool {
 	return deviceID != "" && len(deviceID) <= 128 && strings.TrimSpace(deviceID) == deviceID
+}
+
+func validSessionID(sessionID string) bool {
+	if len(sessionID) != 32 {
+		return false
+	}
+	decoded, err := hex.DecodeString(sessionID)
+	return err == nil && len(decoded) == 16
 }
 
 func validAuthorizedKey(key string) bool {

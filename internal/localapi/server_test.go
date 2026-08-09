@@ -74,7 +74,6 @@ func TestAgentLocalAPIDispatchesEveryControlMethod(t *testing.T) {
 		MethodPairApprove,
 		MethodPairReject,
 		MethodPairCancel,
-		MethodPairConfirm,
 		MethodDisconnect,
 		MethodForgetDevice,
 		MethodUnpair,

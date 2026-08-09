@@ -108,8 +108,17 @@ func parseControlCommand(args []string) (localapi.Method, any, bool) {
 			}
 			return localapi.MethodPairStart, params, true
 		}
-		if args[1] == "confirm" && len(args) == 4 {
-			return localapi.MethodPairConfirm, localapi.PairConfirmParams{SessionID: args[2], Code: args[3]}, true
+		if args[1] == "status" && len(args) == 3 {
+			return localapi.MethodPairStatus, localapi.PairSessionParams{SessionID: args[2]}, true
+		}
+		if args[1] == "approve" && len(args) == 3 {
+			return localapi.MethodPairApprove, localapi.PairSessionParams{SessionID: args[2]}, true
+		}
+		if args[1] == "reject" && len(args) == 3 {
+			return localapi.MethodPairReject, localapi.PairSessionParams{SessionID: args[2]}, true
+		}
+		if args[1] == "cancel" && len(args) == 3 {
+			return localapi.MethodPairCancel, localapi.PairSessionParams{SessionID: args[2]}, true
 		}
 	case "unpair":
 		if len(args) <= 2 {

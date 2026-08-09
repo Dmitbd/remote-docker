@@ -23,6 +23,8 @@ const (
 	MethodPairApprove     Method = "PairApprove"
 	MethodPairReject      Method = "PairReject"
 	MethodPairCancel      Method = "PairCancel"
+	// MethodPairConfirm is retained only while the legacy tray package is
+	// removed. Schema v4 does not accept it from clients.
 	MethodPairConfirm     Method = "PairConfirm"
 	MethodDisconnect      Method = "Disconnect"
 	MethodForgetDevice    Method = "ForgetDevice"
@@ -42,7 +44,7 @@ func (m Method) valid() bool {
 	switch m {
 	case MethodStatus, MethodEnable, MethodPause, MethodSearchStart, MethodSearchStop,
 		MethodListDevices, MethodPairCandidates, MethodPairStart, MethodPairStatus,
-		MethodPairApprove, MethodPairReject, MethodPairCancel, MethodPairConfirm,
+		MethodPairApprove, MethodPairReject, MethodPairCancel,
 		MethodDisconnect, MethodForgetDevice,
 		MethodUnpair, MethodWorkspaceAdd, MethodWorkspaceList,
 		MethodWorkspaceRemove, MethodSyncStatus, MethodPrepareDocker, MethodDoctor, MethodRecover,
@@ -133,6 +135,7 @@ type PairingStatusResult struct {
 	Code      string        `json:"code"`
 	Status    string        `json:"status"`
 	ExpiresAt string        `json:"expires_at"`
+	Device    *Device       `json:"device,omitempty"`
 }
 
 type ServiceStatus struct {
@@ -194,15 +197,22 @@ type PairStartParams struct {
 type PairStartResult struct {
 	SessionID string `json:"session_id"`
 	Code      string `json:"code,omitempty"`
+	Peer      LifecyclePeer `json:"peer"`
+	ExpiresAt string `json:"expires_at"`
 }
 
+type PairSessionParams struct {
+	SessionID string `json:"session_id"`
+}
+
+// Deprecated compatibility shapes for the legacy tray package.
 type PairConfirmParams struct {
 	SessionID string `json:"session_id"`
 	Code      string `json:"code"`
 }
 
-type PairSessionParams struct {
-	SessionID string `json:"session_id"`
+type PairConfirmResult struct {
+	Device Device `json:"device"`
 }
 
 type DisconnectParams struct {
@@ -211,10 +221,6 @@ type DisconnectParams struct {
 
 type ForgetDeviceParams struct {
 	DeviceID string `json:"device_id,omitempty"`
-}
-
-type PairConfirmResult struct {
-	Device Device `json:"device"`
 }
 
 type UnpairParams struct {

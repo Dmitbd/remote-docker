@@ -32,6 +32,12 @@ func TestPairingEndToEnd(t *testing.T) {
 		t.Fatalf("pairing codes server=%q client=%q, want identical six-digit values", serverCode, clientCode)
 	}
 
+	_, _, err = fixture.client.Confirm(context.Background(), clientCode)
+	assertHTTPStatus(t, err, http.StatusConflict)
+	if err := fixture.server.Approve(fixture.descriptor.ID); err != nil {
+		t.Fatalf("Approve() error = %v", err)
+	}
+
 	record, raw, err := fixture.client.Confirm(context.Background(), clientCode)
 	if err != nil {
 		t.Fatalf("Confirm() error = %v", err)
@@ -200,6 +206,9 @@ func TestPairingConfirmInstallsOnlyManagedClientKeyAndReturnsInstallerMetadata(t
 		DeviceID: "mac-device", AuthorizedKey: "ssh-ed25519 MANAGED-MAC-KEY",
 	}
 	code, _ := client.Code()
+	if err := server.Approve(descriptor.ID); err != nil {
+		t.Fatalf("Approve() error = %v", err)
+	}
 	record, raw, err := client.Confirm(context.Background(), code)
 	if err != nil {
 		t.Fatalf("Confirm() error = %v", err)
@@ -243,6 +252,9 @@ func (i *recordingPairInstaller) Revoke(_ context.Context, deviceID string) erro
 func TestPairingRejectsWrongAndExpiredCodes(t *testing.T) {
 	t.Run("wrong code", func(t *testing.T) {
 		fixture := newPairingFixture(t)
+		if err := fixture.server.Approve(fixture.descriptor.ID); err != nil {
+			t.Fatalf("Approve() error = %v", err)
+		}
 		_, _, err := fixture.client.Confirm(context.Background(), wrongCode(t, fixture.client))
 		assertHTTPStatus(t, err, http.StatusForbidden)
 	})
@@ -266,6 +278,9 @@ func TestPairingLimitsAbuse(t *testing.T) {
 	if _, err := fixture.server.StartSession(fixture.clientPublicKey, 120*time.Second); !errors.Is(err, ErrSessionActive) {
 		t.Fatalf("StartSession() error = %v, want ErrSessionActive", err)
 	}
+	if err := fixture.server.Approve(fixture.descriptor.ID); err != nil {
+		t.Fatalf("Approve() error = %v", err)
+	}
 
 	for attempt := 1; attempt <= 5; attempt++ {
 		_, _, err := fixture.client.Confirm(context.Background(), wrongCode(t, fixture.client))
@@ -273,6 +288,87 @@ func TestPairingLimitsAbuse(t *testing.T) {
 	}
 	_, _, err := fixture.client.Confirm(context.Background(), wrongCode(t, fixture.client))
 	assertHTTPStatus(t, err, http.StatusTooManyRequests)
+}
+
+func TestPairingSessionRequiresWindowsApprovalAndPublishesState(t *testing.T) {
+	fixture := newPairingFixture(t)
+
+	status, err := fixture.client.Status(context.Background())
+	if err != nil || status.State != SessionPending || status.SessionID != fixture.descriptor.ID {
+		t.Fatalf("Status() = %#v, %v, want pending", status, err)
+	}
+	if err := fixture.server.Approve(fixture.descriptor.ID); err != nil {
+		t.Fatalf("Approve() error = %v", err)
+	}
+	status, err = fixture.client.Status(context.Background())
+	if err != nil || status.State != SessionApproved {
+		t.Fatalf("Status() = %#v, %v, want approved", status, err)
+	}
+	code, _ := fixture.client.Code()
+	if _, _, err := fixture.client.Confirm(context.Background(), code); err != nil {
+		t.Fatalf("Confirm() error = %v", err)
+	}
+	status, err = fixture.client.Status(context.Background())
+	if err != nil || status.State != SessionCompleted || status.DeviceID != "mac-studio" {
+		t.Fatalf("Status() = %#v, %v, want completed mac-studio", status, err)
+	}
+}
+
+func TestPairingSessionRejectCancelAndExpiryAreObservable(t *testing.T) {
+	t.Run("Windows rejects", func(t *testing.T) {
+		fixture := newPairingFixture(t)
+		if err := fixture.server.Reject(fixture.descriptor.ID); err != nil {
+			t.Fatalf("Reject() error = %v", err)
+		}
+		status, err := fixture.client.Status(context.Background())
+		if err != nil || status.State != SessionRejected {
+			t.Fatalf("Status() = %#v, %v, want rejected", status, err)
+		}
+	})
+
+	t.Run("Mac cancels", func(t *testing.T) {
+		fixture := newPairingFixture(t)
+		if err := fixture.client.Cancel(context.Background()); err != nil {
+			t.Fatalf("Cancel() error = %v", err)
+		}
+		status, ok := fixture.server.SessionStatus(fixture.descriptor.ID)
+		if !ok || status.State != SessionCancelled {
+			t.Fatalf("SessionStatus() = %#v, %t, want cancelled", status, ok)
+		}
+	})
+
+	t.Run("session expires", func(t *testing.T) {
+		fixture := newPairingFixture(t)
+		fixture.clock.Advance(MaxSessionTTL + time.Second)
+		status, err := fixture.client.Status(context.Background())
+		if err != nil || status.State != SessionExpired {
+			t.Fatalf("Status() = %#v, %v, want expired", status, err)
+		}
+	})
+}
+
+func TestPairingSessionControlRejectsUnknownOrWrongClient(t *testing.T) {
+	fixture := newPairingFixture(t)
+	unknown := fixture.client.Session
+	unknown.ID = strings.Repeat("f", 32)
+	unknownClient := *fixture.client
+	unknownClient.Session = unknown
+	_, err := unknownClient.Status(context.Background())
+	assertHTTPStatus(t, err, http.StatusNotFound)
+
+	otherPublicKey, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	wrongClient := *fixture.client
+	wrongClient.Session.ClientPublicKey = otherPublicKey
+	if err := wrongClient.Cancel(context.Background()); err == nil {
+		t.Fatal("Cancel() succeeded for a different client key")
+	}
+	status, ok := fixture.server.SessionStatus(fixture.descriptor.ID)
+	if !ok || status.State != SessionPending {
+		t.Fatalf("SessionStatus() = %#v, %t, want pending", status, ok)
+	}
 }
 
 func TestTLSConfigUsesEphemeralEd25519IdentityAndTLS13(t *testing.T) {

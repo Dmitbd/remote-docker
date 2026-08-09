@@ -426,7 +426,10 @@ func selectStartupRecovery(
 type runtimePairingCoordinator interface {
 	Candidates(context.Context) (localapi.PairCandidatesResult, error)
 	Start(context.Context, string) (localapi.PairStartResult, error)
-	Confirm(context.Context, localapi.PairConfirmParams) (localapi.PairConfirmResult, error)
+	Status(context.Context, string) (localapi.PairingStatusResult, error)
+	Approve(context.Context, string) (localapi.PairingStatusResult, error)
+	Reject(context.Context, string) (localapi.PairingStatusResult, error)
+	Cancel(context.Context, string) (localapi.PairingStatusResult, error)
 	Unpair(context.Context, string) error
 }
 
@@ -510,16 +513,29 @@ func (c *productionAgentController) Handle(ctx context.Context, method localapi.
 			return nil, err
 		}
 		return c.pairing.Start(ctx, params.Device)
-	case localapi.MethodPairConfirm:
-		var params localapi.PairConfirmParams
+	case localapi.MethodPairStatus:
+		var params localapi.PairSessionParams
 		if err := decodeControlParams(raw, &params); err != nil {
 			return nil, err
 		}
-		result, err := c.pairing.Confirm(ctx, params)
-		if err == nil && c.afterPair != nil {
+		result, err := c.pairing.Status(ctx, params.SessionID)
+		if err == nil && result.Status == string(pairing.SessionCompleted) && c.afterPair != nil {
 			go c.afterPair(context.Background())
 		}
 		return result, err
+	case localapi.MethodPairApprove, localapi.MethodPairReject, localapi.MethodPairCancel:
+		var params localapi.PairSessionParams
+		if err := decodeControlParams(raw, &params); err != nil {
+			return nil, err
+		}
+		switch method {
+		case localapi.MethodPairApprove:
+			return c.pairing.Approve(ctx, params.SessionID)
+		case localapi.MethodPairReject:
+			return c.pairing.Reject(ctx, params.SessionID)
+		default:
+			return c.pairing.Cancel(ctx, params.SessionID)
+		}
 	case localapi.MethodUnpair:
 		var params localapi.UnpairParams
 		if err := decodeControlParams(raw, &params); err != nil {
@@ -1220,11 +1236,60 @@ func (c windowsPairingCoordinator) Start(context.Context, string) (localapi.Pair
 	if !ok {
 		return localapi.PairStartResult{}, needsAction("waiting for a Mac pairing request on the private network")
 	}
-	return localapi.PairStartResult{SessionID: descriptor.ID, Code: code}, nil
+	return localapi.PairStartResult{
+		SessionID: descriptor.ID, Code: code, Peer: windowsPairingPeer(descriptor),
+		ExpiresAt: descriptor.ExpiresAt.UTC().Format(time.RFC3339Nano),
+	}, nil
 }
 
-func (windowsPairingCoordinator) Confirm(context.Context, localapi.PairConfirmParams) (localapi.PairConfirmResult, error) {
-	return localapi.PairConfirmResult{}, needsAction("confirm pairing from the Mac after comparing both codes")
+func (c windowsPairingCoordinator) Status(_ context.Context, sessionID string) (localapi.PairingStatusResult, error) {
+	descriptor, code, active := c.server.ActiveSession()
+	if sessionID == "" && active {
+		sessionID = descriptor.ID
+	}
+	status, ok := c.server.SessionStatus(sessionID)
+	if !ok {
+		return localapi.PairingStatusResult{}, needsAction("pairing session is not active")
+	}
+	result := localapi.PairingStatusResult{
+		SessionID: status.SessionID, Status: string(status.State), ExpiresAt: status.ExpiresAt.UTC().Format(time.RFC3339Nano),
+	}
+	if active && descriptor.ID == sessionID {
+		result.Peer = windowsPairingPeer(descriptor)
+		result.Code = code
+	} else if status.DeviceID != "" {
+		result.Peer = localapi.LifecyclePeer{ID: status.DeviceID, Name: "Mac", OS: "macos"}
+		result.Device = &localapi.Device{ID: status.DeviceID, Name: "Mac"}
+	}
+	return result, nil
+}
+
+func (c windowsPairingCoordinator) Approve(ctx context.Context, sessionID string) (localapi.PairingStatusResult, error) {
+	if err := c.server.Approve(sessionID); err != nil {
+		return localapi.PairingStatusResult{}, needsAction("pairing request is no longer waiting for approval")
+	}
+	return c.Status(ctx, sessionID)
+}
+
+func (c windowsPairingCoordinator) Reject(ctx context.Context, sessionID string) (localapi.PairingStatusResult, error) {
+	descriptor, code, active := c.server.ActiveSession()
+	if !active || descriptor.ID != sessionID {
+		return localapi.PairingStatusResult{}, needsAction("pairing request is no longer waiting for approval")
+	}
+	peer := windowsPairingPeer(descriptor)
+	if err := c.server.Reject(sessionID); err != nil {
+		return localapi.PairingStatusResult{}, needsAction("pairing request is no longer waiting for approval")
+	}
+	result, err := c.Status(ctx, sessionID)
+	if err == nil {
+		result.Peer = peer
+		result.Code = code
+	}
+	return result, err
+}
+
+func (windowsPairingCoordinator) Cancel(context.Context, string) (localapi.PairingStatusResult, error) {
+	return localapi.PairingStatusResult{}, needsAction("only the Mac client can cancel its pairing request")
 }
 
 func (c windowsPairingCoordinator) Unpair(ctx context.Context, deviceID string) error {
@@ -1235,4 +1300,10 @@ func (c windowsPairingCoordinator) Unpair(ctx context.Context, deviceID string) 
 		return unavailable("managed pairing revocation failed")
 	}
 	return nil
+}
+
+func windowsPairingPeer(descriptor pairing.SessionDescriptor) localapi.LifecyclePeer {
+	return localapi.LifecyclePeer{
+		ID: pairing.InstanceIDFromPublicKey(descriptor.ClientPublicKey), Name: "Mac", OS: "macos",
+	}
 }

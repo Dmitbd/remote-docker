@@ -46,6 +46,8 @@ type pairingTarget struct {
 type pairingTransport interface {
 	Candidates(context.Context) ([]pairingTarget, error)
 	Bootstrap(context.Context, string, ed25519.PublicKey) (pairingTarget, pairing.SessionDescriptor, error)
+	Status(context.Context, pairingTarget, pairing.SessionDescriptor) (pairing.SessionStatus, error)
+	Cancel(context.Context, pairingTarget, pairing.SessionDescriptor) error
 	Confirm(context.Context, pairingTarget, pairing.SessionDescriptor, string, string, string) (pairing.DeviceRecord, error)
 	Revoke(context.Context, config.Device, string) error
 }
@@ -70,6 +72,8 @@ type pendingPairing struct {
 	clientDeviceID string
 	authorizedKey  string
 	privateKeyPEM  []byte
+	completing     bool
+	record         *pairing.DeviceRecord
 }
 
 type macPairingCoordinator struct {
@@ -165,65 +169,132 @@ func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (loc
 	c.mu.Lock()
 	c.pending = pending
 	c.mu.Unlock()
-	return localapi.PairStartResult{SessionID: descriptor.ID, Code: code}, nil
+	return localapi.PairStartResult{
+		SessionID: descriptor.ID, Code: code,
+		Peer: localapi.LifecyclePeer{ID: target.InstanceID, Name: target.Name, OS: "windows", Address: target.Address},
+		ExpiresAt: descriptor.ExpiresAt.UTC().Format(time.RFC3339Nano),
+	}, nil
 }
 
-func (c *macPairingCoordinator) Confirm(ctx context.Context, params localapi.PairConfirmParams) (localapi.PairConfirmResult, error) {
+func (c *macPairingCoordinator) Status(ctx context.Context, sessionID string) (localapi.PairingStatusResult, error) {
 	if c == nil {
-		return localapi.PairConfirmResult{}, unavailable("pairing infrastructure is unavailable")
+		return localapi.PairingStatusResult{}, unavailable("pairing infrastructure is unavailable")
 	}
 	c.mu.Lock()
-	if c.pending == nil || c.pending.descriptor.ID != params.SessionID {
+	if sessionID == "" && c.pending != nil {
+		sessionID = c.pending.descriptor.ID
+	}
+	if c.pending == nil || c.pending.descriptor.ID != sessionID {
 		c.mu.Unlock()
-		return localapi.PairConfirmResult{}, needsAction("pairing session is not active")
+		return localapi.PairingStatusResult{}, needsAction("pairing session is not active")
 	}
 	pending := *c.pending
 	pending.privateKeyPEM = append([]byte(nil), c.pending.privateKeyPEM...)
-	c.mu.Unlock()
-	wantCode, err := pairing.Code(pending.descriptor)
-	if err != nil || subtle.ConstantTimeCompare([]byte(params.Code), []byte(wantCode)) != 1 {
-		clearSecret(pending.privateKeyPEM)
-		return localapi.PairConfirmResult{}, needsAction("pairing code does not match")
+	if c.pending.record != nil {
+		record := *c.pending.record
+		record.AuthorizedKeys = append([]string(nil), c.pending.record.AuthorizedKeys...)
+		pending.record = &record
 	}
-	record, err := c.options.Transport.Confirm(
-		ctx, pending.target, pending.descriptor, pending.clientDeviceID, pending.authorizedKey, params.Code,
-	)
+	c.mu.Unlock()
+	status, err := c.options.Transport.Status(ctx, pending.target, pending.descriptor)
 	if err != nil {
 		clearSecret(pending.privateKeyPEM)
-		return localapi.PairConfirmResult{}, unavailable("pairing confirmation failed")
+		return localapi.PairingStatusResult{}, unavailable("cannot read the Windows pairing decision")
+	}
+	result := pairingStatusResult(pending, status)
+	if status.State == pairing.SessionRejected || status.State == pairing.SessionCancelled || status.State == pairing.SessionExpired {
+		c.clearPending(sessionID)
+		clearSecret(pending.privateKeyPEM)
+		return result, nil
+	}
+	if status.State != pairing.SessionApproved && !(status.State == pairing.SessionCompleted && pending.record != nil) {
+		clearSecret(pending.privateKeyPEM)
+		return result, nil
+	}
+	c.mu.Lock()
+	if c.pending == nil || c.pending.descriptor.ID != sessionID {
+		c.mu.Unlock()
+		clearSecret(pending.privateKeyPEM)
+		return localapi.PairingStatusResult{}, needsAction("pairing session is not active")
+	}
+	if c.pending.completing {
+		c.mu.Unlock()
+		clearSecret(pending.privateKeyPEM)
+		return result, nil
+	}
+	c.pending.completing = true
+	c.mu.Unlock()
+	device, err := c.complete(ctx, sessionID, pending)
+	if err != nil {
+		c.mu.Lock()
+		if c.pending != nil && c.pending.descriptor.ID == sessionID {
+			c.pending.completing = false
+		}
+		c.mu.Unlock()
+		clearSecret(pending.privateKeyPEM)
+		return localapi.PairingStatusResult{}, err
+	}
+	result.Status = string(pairing.SessionCompleted)
+	result.Device = &device
+	return result, nil
+}
+
+func (c *macPairingCoordinator) complete(ctx context.Context, sessionID string, pending pendingPairing) (localapi.Device, error) {
+	var record pairing.DeviceRecord
+	if pending.record == nil {
+		wantCode, err := pairing.Code(pending.descriptor)
+		if err != nil {
+			return localapi.Device{}, unavailable("pairing session is invalid")
+		}
+		record, err = c.options.Transport.Confirm(
+			ctx, pending.target, pending.descriptor, pending.clientDeviceID, pending.authorizedKey, wantCode,
+		)
+		if err != nil {
+			return localapi.Device{}, unavailable("pairing confirmation failed")
+		}
+		c.mu.Lock()
+		if c.pending != nil && c.pending.descriptor.ID == sessionID {
+			stored := record
+			stored.AuthorizedKeys = append([]string(nil), record.AuthorizedKeys...)
+			c.pending.record = &stored
+		}
+		c.mu.Unlock()
+	} else {
+		record = *pending.record
+		record.AuthorizedKeys = append([]string(nil), pending.record.AuthorizedKeys...)
 	}
 	remoteDeviceID, err := pairedRemoteDeviceID(record.SSHHostPublicKey)
 	if err != nil || strings.TrimSpace(record.SyncthingDeviceID) == "" ||
 		record.SSHPort < 1 || record.SSHPort > 65535 || record.SyncthingPort < 1 || record.SyncthingPort > 65535 {
 		clearSecret(pending.privateKeyPEM)
-		return localapi.PairConfirmResult{}, unavailable("paired device returned invalid public metadata")
+		return localapi.Device{}, unavailable("paired device returned invalid public metadata")
 	}
 	alias := "remote-docker-device-" + remoteDeviceID
 	if err := sshtransport.PinKnownHost(c.options.KnownHostsPath, alias, record.SSHHostPublicKey); err != nil {
 		clearSecret(pending.privateKeyPEM)
-		return localapi.PairConfirmResult{}, unavailable("cannot pin paired SSH identity")
+		return localapi.Device{}, unavailable("cannot pin paired SSH identity")
 	}
 	if err := sshtransport.WriteConfig(c.options.SSHConfigPath, sshtransport.Config{
 		DeviceID: remoteDeviceID, HostName: pending.target.Address, Port: record.SSHPort,
 		AgentSocket: c.options.AgentSocketPath, KnownHostsFile: c.options.KnownHostsPath, ControlDir: c.options.ControlDir,
 	}); err != nil {
 		clearSecret(pending.privateKeyPEM)
-		return localapi.PairConfirmResult{}, unavailable("cannot write managed SSH configuration")
+		return localapi.Device{}, unavailable("cannot write managed SSH configuration")
 	}
 	if err := dockercli.EnsureContext(ctx, c.options.Docker, c.options.DockerCLI, c.options.DockerContext, "ssh://"+alias); err != nil {
 		clearSecret(pending.privateKeyPEM)
-		return localapi.PairConfirmResult{}, unavailable("cannot create managed Docker context")
+		return localapi.Device{}, unavailable("cannot create managed Docker context")
 	}
 	if err := c.options.Secrets.Put(remoteDeviceID, sshtransport.SSHPrivateKeyCredential, pending.privateKeyPEM); err != nil {
 		clearSecret(pending.privateKeyPEM)
-		return localapi.PairConfirmResult{}, unavailable("cannot store paired SSH identity")
+		return localapi.Device{}, unavailable("cannot store paired SSH identity")
 	}
 	clearSecret(pending.privateKeyPEM)
 
 	cfg, err := loadAgentConfig(c.options.Store)
 	if err != nil {
 		_ = c.options.Secrets.Delete(remoteDeviceID, sshtransport.SSHPrivateKeyCredential)
-		return localapi.PairConfirmResult{}, unavailable("cannot read paired device configuration")
+		return localapi.Device{}, unavailable("cannot read paired device configuration")
 	}
 	if cfg.Devices == nil {
 		cfg.Devices = make(map[string]config.Device)
@@ -239,7 +310,7 @@ func (c *macPairingCoordinator) Confirm(ctx context.Context, params localapi.Pai
 	cfg.Devices[remoteDeviceID] = device
 	if err := c.options.Store.Save(cfg); err != nil {
 		_ = c.options.Secrets.Delete(remoteDeviceID, sshtransport.SSHPrivateKeyCredential)
-		return localapi.PairConfirmResult{}, unavailable("cannot save paired device configuration")
+		return localapi.Device{}, unavailable("cannot save paired device configuration")
 	}
 	c.mu.Lock()
 	if c.pending != nil {
@@ -247,9 +318,57 @@ func (c *macPairingCoordinator) Confirm(ctx context.Context, params localapi.Pai
 	}
 	c.pending = nil
 	c.mu.Unlock()
-	return localapi.PairConfirmResult{Device: localapi.Device{
-		ID: remoteDeviceID, Name: device.Name, Address: device.Address,
-	}}, nil
+	return localapi.Device{ID: remoteDeviceID, Name: device.Name, Address: device.Address}, nil
+}
+
+func (c *macPairingCoordinator) Approve(context.Context, string) (localapi.PairingStatusResult, error) {
+	return localapi.PairingStatusResult{}, needsAction("only the Windows host can approve pairing")
+}
+
+func (c *macPairingCoordinator) Reject(context.Context, string) (localapi.PairingStatusResult, error) {
+	return localapi.PairingStatusResult{}, needsAction("only the Windows host can reject pairing")
+}
+
+func (c *macPairingCoordinator) Cancel(ctx context.Context, sessionID string) (localapi.PairingStatusResult, error) {
+	c.mu.Lock()
+	if c.pending == nil || c.pending.descriptor.ID != sessionID {
+		c.mu.Unlock()
+		return localapi.PairingStatusResult{}, needsAction("pairing session is not active")
+	}
+	if c.pending.completing {
+		c.mu.Unlock()
+		return localapi.PairingStatusResult{}, needsAction("pairing approval is being completed")
+	}
+	pending := *c.pending
+	pending.privateKeyPEM = append([]byte(nil), c.pending.privateKeyPEM...)
+	c.mu.Unlock()
+	if err := c.options.Transport.Cancel(ctx, pending.target, pending.descriptor); err != nil {
+		clearSecret(pending.privateKeyPEM)
+		return localapi.PairingStatusResult{}, unavailable("cannot cancel the pairing request")
+	}
+	c.clearPending(sessionID)
+	clearSecret(pending.privateKeyPEM)
+	return pairingStatusResult(pending, pairing.SessionStatus{
+		SessionID: sessionID, State: pairing.SessionCancelled, ExpiresAt: pending.descriptor.ExpiresAt,
+	}), nil
+}
+
+func (c *macPairingCoordinator) clearPending(sessionID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.pending != nil && c.pending.descriptor.ID == sessionID {
+		clearSecret(c.pending.privateKeyPEM)
+		c.pending = nil
+	}
+}
+
+func pairingStatusResult(pending pendingPairing, status pairing.SessionStatus) localapi.PairingStatusResult {
+	code, _ := pairing.Code(pending.descriptor)
+	return localapi.PairingStatusResult{
+		SessionID: status.SessionID,
+		Peer: localapi.LifecyclePeer{ID: pending.target.InstanceID, Name: pending.target.Name, OS: "windows", Address: pending.target.Address},
+		Code: code, Status: string(status.State), ExpiresAt: status.ExpiresAt.UTC().Format(time.RFC3339Nano),
+	}
 }
 
 func (c *macPairingCoordinator) Unpair(ctx context.Context, deviceID string) error {
@@ -389,6 +508,22 @@ func (t discoveryPairingTransport) Confirm(ctx context.Context, target pairingTa
 	}
 	record, _, err := client.Confirm(ctx, code)
 	return record, err
+}
+
+func (t discoveryPairingTransport) Status(ctx context.Context, target pairingTarget, descriptor pairing.SessionDescriptor) (pairing.SessionStatus, error) {
+	client := pairing.Client{
+		BaseURL: pairingEndpoint(target), Session: descriptor,
+		HTTPClient: pairing.NewPinnedHTTPClient(descriptor.ServerPublicKey, t.DialContext),
+	}
+	return client.Status(ctx)
+}
+
+func (t discoveryPairingTransport) Cancel(ctx context.Context, target pairingTarget, descriptor pairing.SessionDescriptor) error {
+	client := pairing.Client{
+		BaseURL: pairingEndpoint(target), Session: descriptor,
+		HTTPClient: pairing.NewPinnedHTTPClient(descriptor.ServerPublicKey, t.DialContext),
+	}
+	return client.Cancel(ctx)
 }
 
 func (t discoveryPairingTransport) Revoke(ctx context.Context, device config.Device, clientDeviceID string) error {
