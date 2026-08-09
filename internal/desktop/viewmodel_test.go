@@ -71,6 +71,16 @@ func TestBuildViewModelShowsRolesConnectionLimitAndRecoveryCountdown(t *testing.
 	}
 }
 
+func TestBuildViewModelExplainsWhoEndedTheConnection(t *testing.T) {
+	model := BuildViewModel(lifecycle.Snapshot{
+		Role: lifecycle.RoleWindowsHost, State: lifecycle.StateHostWaiting,
+		LastDisconnect: &lifecycle.Disconnect{Initiator: lifecycle.InitiatorPeer, Reason: lifecycle.ReasonPeerQuit},
+	}, SectionConnection, time.Now())
+	if model.Notice != "Mac завершил соединение" {
+		t.Fatalf("disconnect notice = %q", model.Notice)
+	}
+}
+
 func hasViewAction(actions []Action, id ActionID) bool {
 	for _, action := range actions {
 		if action.ID == id {

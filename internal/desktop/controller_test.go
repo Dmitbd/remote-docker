@@ -46,13 +46,41 @@ func TestControllerAddsOnlySelectedWorkspacePath(t *testing.T) {
 	}
 }
 
+func TestControllerReadsCandidatesAndPollsPairingWithoutManualCode(t *testing.T) {
+	handler := &recordingHandler{results: map[localapi.Method]any{
+		localapi.MethodPairCandidates: localapi.PairCandidatesResult{Candidates: []localapi.PairingCandidate{{ID: "pc", Name: "Windows PC"}}},
+		localapi.MethodPairStatus: localapi.PairingStatusResult{SessionID: "session", Code: "123456", Status: "pending"},
+	}}
+	controller := NewController(handler, func() lifecycle.Snapshot {
+		return lifecycle.Snapshot{Pairing: &lifecycle.Pairing{SessionID: "session", Code: "123456"}}
+	})
+	candidates, err := controller.Candidates(context.Background())
+	if err != nil || len(candidates) != 1 || candidates[0].ID != "pc" {
+		t.Fatalf("Candidates() = %#v, %v", candidates, err)
+	}
+	status, err := controller.PollPairing(context.Background())
+	if err != nil || status.SessionID != "session" || status.Status != "pending" {
+		t.Fatalf("PollPairing() = %#v, %v", status, err)
+	}
+	if _, ok := handler.lastPairParams.(localapi.PairSessionParams); !ok {
+		t.Fatalf("pair status params = %#v", handler.lastPairParams)
+	}
+}
+
 type recordingHandler struct {
 	method localapi.Method
 	params json.RawMessage
+	results map[localapi.Method]any
+	lastPairParams any
 }
 
 func (h *recordingHandler) Handle(_ context.Context, method localapi.Method, params json.RawMessage) (any, error) {
 	h.method = method
 	h.params = append(json.RawMessage(nil), params...)
-	return nil, nil
+	if method == localapi.MethodPairStatus {
+		var decoded localapi.PairSessionParams
+		_ = json.Unmarshal(params, &decoded)
+		h.lastPairParams = decoded
+	}
+	return h.results[method], nil
 }

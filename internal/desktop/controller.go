@@ -37,6 +37,41 @@ func (c *Controller) Perform(ctx context.Context, action ActionID, value string)
 	return err
 }
 
+func (c *Controller) Candidates(ctx context.Context) ([]localapi.PairingCandidate, error) {
+	if c == nil || c.handler == nil {
+		return nil, errors.New("desktop controller is unavailable")
+	}
+	result, err := c.handler.Handle(ctx, localapi.MethodPairCandidates, nil)
+	if err != nil {
+		return nil, err
+	}
+	candidates, ok := result.(localapi.PairCandidatesResult)
+	if !ok {
+		return nil, errors.New("device search returned an invalid response")
+	}
+	return append([]localapi.PairingCandidate(nil), candidates.Candidates...), nil
+}
+
+func (c *Controller) PollPairing(ctx context.Context) (localapi.PairingStatusResult, error) {
+	if c == nil || c.handler == nil || c.snapshot == nil {
+		return localapi.PairingStatusResult{}, errors.New("desktop controller is unavailable")
+	}
+	params := localapi.PairSessionParams{}
+	if pairing := c.snapshot().Pairing; pairing != nil {
+		params.SessionID = pairing.SessionID
+	}
+	raw, _ := json.Marshal(params)
+	result, err := c.handler.Handle(ctx, localapi.MethodPairStatus, raw)
+	if err != nil {
+		return localapi.PairingStatusResult{}, err
+	}
+	status, ok := result.(localapi.PairingStatusResult)
+	if !ok {
+		return localapi.PairingStatusResult{}, errors.New("pairing status returned an invalid response")
+	}
+	return status, nil
+}
+
 func (c *Controller) resolve(action ActionID, value string) (localapi.Method, any, bool) {
 	switch action {
 	case ActionEnableClient, ActionEnableHost:

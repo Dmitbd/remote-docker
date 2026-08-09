@@ -14,6 +14,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
+	"github.com/Dmitbd/remote-docker/internal/localapi"
 )
 
 const applicationID = "io.github.dmitbd.remote-docker"
@@ -42,6 +43,7 @@ type Application struct {
 	status   *widget.Label
 	role     *widget.Label
 	lastPairNotification string
+	candidates []localapi.PairingCandidate
 }
 
 func NewApplication(options ApplicationOptions) (*Application, error) {
@@ -74,8 +76,46 @@ func (a *Application) Run(ctx context.Context) {
 		ctx = context.Background()
 	}
 	go a.observe(ctx)
+	go a.poll(ctx)
 	a.window.Show()
 	a.app.Run()
+}
+
+func (a *Application) poll(ctx context.Context) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		a.pollOnce(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (a *Application) pollOnce(ctx context.Context) {
+	snapshot := a.snapshot()
+	switch snapshot.State {
+	case lifecycle.StateSearching:
+		pollCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+		candidates, err := a.controller.Candidates(pollCtx)
+		cancel()
+		if err == nil {
+			a.mu.Lock()
+			a.candidates = append([]localapi.PairingCandidate(nil), candidates...)
+			a.mu.Unlock()
+			fyne.Do(func() { a.render(a.snapshot()) })
+		}
+	case lifecycle.StateHostWaiting, lifecycle.StatePairing:
+		pollCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+		_, _ = a.controller.PollPairing(pollCtx)
+		cancel()
+	default:
+		a.mu.Lock()
+		a.candidates = nil
+		a.mu.Unlock()
+	}
 }
 
 func (a *Application) Show() {
@@ -147,6 +187,11 @@ func (a *Application) render(snapshot lifecycle.Snapshot) {
 	detail := widget.NewLabel(model.Detail)
 	detail.Wrapping = fyne.TextWrapWord
 	body := container.NewVBox(headline, detail)
+	if model.Notice != "" {
+		notice := widget.NewLabel(model.Notice)
+		notice.TextStyle = fyne.TextStyle{Bold: true}
+		body.Add(notice)
+	}
 	if model.PeerName != "" {
 		body.Add(widget.NewLabel("Устройство: " + model.PeerName))
 	}
@@ -154,6 +199,19 @@ func (a *Application) render(snapshot lifecycle.Snapshot) {
 		code := widget.NewLabel(model.PairCode)
 		code.TextStyle = fyne.TextStyle{Bold: true, Monospace: true}
 		body.Add(code)
+	}
+	if snapshot.State == lifecycle.StateSearching {
+		if len(a.candidates) == 0 {
+			body.Add(widget.NewLabel("Пока ничего не найдено"))
+		}
+		for _, candidate := range a.candidates {
+			candidate := candidate
+			name := widget.NewLabel(candidate.Name)
+			name.TextStyle = fyne.TextStyle{Bold: true}
+			connect := widget.NewButton("Подключиться", func() { a.perform(ActionConnect, candidate.ID) })
+			connect.Importance = widget.HighImportance
+			body.Add(container.NewBorder(nil, nil, name, connect))
+		}
 	}
 	if model.Countdown != "" {
 		body.Add(widget.NewLabel("До безопасной остановки: " + model.Countdown))

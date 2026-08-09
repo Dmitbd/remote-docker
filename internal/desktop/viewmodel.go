@@ -58,6 +58,7 @@ type ViewModel struct {
 	Docker          string
 	Sync            string
 	Countdown       string
+	Notice          string
 	Selected        Section
 	Sections        []Section
 	Actions         []Action
@@ -79,6 +80,9 @@ func BuildViewModel(snapshot lifecycle.Snapshot, selected Section, now time.Time
 	}
 	if snapshot.Peer != nil {
 		model.PeerName = snapshot.Peer.Name
+	}
+	if snapshot.LastDisconnect != nil {
+		model.Notice = disconnectNotice(snapshot.Role, *snapshot.LastDisconnect)
 	}
 
 	switch snapshot.State {
@@ -218,4 +222,25 @@ func nonEmpty(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func disconnectNotice(role lifecycle.Role, disconnect lifecycle.Disconnect) string {
+	device := "Другое устройство"
+	if disconnect.Initiator == lifecycle.InitiatorLocal {
+		device = "Это устройство"
+	} else if role == lifecycle.RoleWindowsHost {
+		device = "Mac"
+	} else {
+		device = "Windows-компьютер"
+	}
+	switch disconnect.Reason {
+	case lifecycle.ReasonNetworkTimeout:
+		return "Связь не восстановилась, удалённые процессы остановлены"
+	case lifecycle.ReasonPeerQuit:
+		return device + " завершил соединение"
+	case lifecycle.ReasonUserPause:
+		return device + " поставил Remote Docker на паузу"
+	default:
+		return device + " отключил соединение"
+	}
 }
