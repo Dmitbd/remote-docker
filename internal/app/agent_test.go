@@ -137,6 +137,13 @@ func TestAgentCLIControlCommandsAndJSONOutput(t *testing.T) {
 		method localapi.Method
 	}{
 		{name: "status", args: []string{"status"}, method: localapi.MethodStatus},
+		{name: "enable", args: []string{"enable"}, method: localapi.MethodEnable},
+		{name: "pause", args: []string{"pause"}, method: localapi.MethodPause},
+		{name: "search start", args: []string{"search", "start"}, method: localapi.MethodSearchStart},
+		{name: "search stop", args: []string{"search", "stop"}, method: localapi.MethodSearchStop},
+		{name: "disconnect", args: []string{"disconnect"}, method: localapi.MethodDisconnect},
+		{name: "forget", args: []string{"forget", "device"}, method: localapi.MethodForgetDevice},
+		{name: "quit", args: []string{"quit"}, method: localapi.MethodShutdown},
 		{name: "pair candidates", args: []string{"pair", "candidates"}, method: localapi.MethodPairCandidates},
 		{name: "pair start", args: []string{"pair", "start", "host"}, method: localapi.MethodPairStart},
 		{name: "pair confirm", args: []string{"pair", "confirm", "session", "123456"}, method: localapi.MethodPairConfirm},

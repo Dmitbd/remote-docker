@@ -34,7 +34,8 @@ func RunRuntime(ctx context.Context, runtime Runtime, args []string, stdout, std
 	case "version":
 		fmt.Fprintf(stdout, "remote-docker %s\n", version)
 		return 0
-	case "status", "pair", "unpair", "workspace", "sync", "doctor", "recover":
+	case "status", "enable", "pause", "search", "disconnect", "forget", "quit",
+		"pair", "unpair", "workspace", "sync", "doctor", "recover":
 		return runControlCommand(ctx, runtime, args, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command: %s\n", args[0])
@@ -45,5 +46,5 @@ func RunRuntime(ctx context.Context, runtime Runtime, args []string, stdout, std
 
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage: remote-docker <command>")
-	fmt.Fprintln(w, "commands: status, pair, unpair, workspace, sync status, doctor, recover, docker")
+	fmt.Fprintln(w, "commands: status, enable, pause, search, disconnect, forget, quit, pair, unpair, workspace, sync status, doctor, recover, docker")
 }

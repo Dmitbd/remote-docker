@@ -6,16 +6,26 @@ import (
 	"fmt"
 )
 
-const CurrentSchemaVersion = 3
+const CurrentSchemaVersion = 4
 
 type Method string
 
 const (
 	MethodStatus          Method = "Status"
+	MethodEnable          Method = "Enable"
+	MethodPause           Method = "Pause"
+	MethodSearchStart     Method = "SearchStart"
+	MethodSearchStop      Method = "SearchStop"
 	MethodListDevices     Method = "ListDevices"
 	MethodPairCandidates  Method = "PairCandidates"
 	MethodPairStart       Method = "PairStart"
+	MethodPairStatus      Method = "PairStatus"
+	MethodPairApprove     Method = "PairApprove"
+	MethodPairReject      Method = "PairReject"
+	MethodPairCancel      Method = "PairCancel"
 	MethodPairConfirm     Method = "PairConfirm"
+	MethodDisconnect      Method = "Disconnect"
+	MethodForgetDevice    Method = "ForgetDevice"
 	MethodUnpair          Method = "Unpair"
 	MethodWorkspaceAdd    Method = "WorkspaceAdd"
 	MethodWorkspaceList   Method = "WorkspaceList"
@@ -24,13 +34,19 @@ const (
 	MethodPrepareDocker   Method = "PrepareDocker"
 	MethodDoctor          Method = "Doctor"
 	MethodRecover         Method = "Recover"
+	MethodShutdown        Method = "Shutdown"
+	MethodResourceStatus  Method = "ResourceStatus"
 )
 
 func (m Method) valid() bool {
 	switch m {
-	case MethodStatus, MethodListDevices, MethodPairCandidates, MethodPairStart, MethodPairConfirm,
+	case MethodStatus, MethodEnable, MethodPause, MethodSearchStart, MethodSearchStop,
+		MethodListDevices, MethodPairCandidates, MethodPairStart, MethodPairStatus,
+		MethodPairApprove, MethodPairReject, MethodPairCancel, MethodPairConfirm,
+		MethodDisconnect, MethodForgetDevice,
 		MethodUnpair, MethodWorkspaceAdd, MethodWorkspaceList,
-		MethodWorkspaceRemove, MethodSyncStatus, MethodPrepareDocker, MethodDoctor, MethodRecover:
+		MethodWorkspaceRemove, MethodSyncStatus, MethodPrepareDocker, MethodDoctor, MethodRecover,
+		MethodShutdown, MethodResourceStatus:
 		return true
 	default:
 		return false
@@ -83,9 +99,72 @@ func (f HandlerFunc) Handle(ctx context.Context, method Method, params json.RawM
 }
 
 type StatusResult struct {
-	State   string `json:"state"`
-	Paired  bool   `json:"paired"`
-	Message string `json:"message,omitempty"`
+	Revision         uint64              `json:"revision,omitempty"`
+	Role             string              `json:"role,omitempty"`
+	State            string              `json:"state"`
+	LocalName        string              `json:"local_name,omitempty"`
+	Paired           bool                `json:"paired"`
+	Message          string              `json:"message,omitempty"`
+	Peer             *LifecyclePeer      `json:"peer,omitempty"`
+	TrustedPeers     int                 `json:"trusted_peers"`
+	ConnectionLimit  int                 `json:"connection_limit,omitempty"`
+	Pairing          *PairingStatusResult `json:"pairing,omitempty"`
+	Docker           ServiceStatus       `json:"docker"`
+	Sync             ServiceStatus       `json:"sync"`
+	LatencyMS        int64               `json:"latency_ms,omitempty"`
+	Recovery         *RecoveryStatus     `json:"recovery,omitempty"`
+	LastDisconnect   *DisconnectStatus   `json:"last_disconnect,omitempty"`
+	ActionInProgress bool                `json:"action_in_progress,omitempty"`
+	Problem          *ProblemStatus      `json:"problem,omitempty"`
+	Terminal         bool                `json:"terminal,omitempty"`
+}
+
+type LifecyclePeer struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	OS      string `json:"os,omitempty"`
+	Version string `json:"version,omitempty"`
+	Address string `json:"address,omitempty"`
+}
+
+type PairingStatusResult struct {
+	SessionID string        `json:"session_id"`
+	Peer      LifecyclePeer `json:"peer"`
+	Code      string        `json:"code"`
+	Status    string        `json:"status"`
+	ExpiresAt string        `json:"expires_at"`
+}
+
+type ServiceStatus struct {
+	State       string `json:"state"`
+	Message     string `json:"message,omitempty"`
+	Pending     int64  `json:"pending_bytes,omitempty"`
+	LastSuccess string `json:"last_success,omitempty"`
+}
+
+type RecoveryStatus struct {
+	Deadline string `json:"deadline"`
+}
+
+type DisconnectStatus struct {
+	Initiator string `json:"initiator"`
+	Reason    string `json:"reason"`
+	At        string `json:"at"`
+}
+
+type ProblemStatus struct {
+	Code    string `json:"code"`
+	Device  string `json:"device"`
+	Message string `json:"message"`
+	Action  string `json:"action"`
+}
+
+type LifecycleActionResult struct {
+	Status StatusResult `json:"status"`
+}
+
+type ShutdownResult struct {
+	Stopped bool `json:"stopped"`
 }
 
 type Device struct {
@@ -120,6 +199,18 @@ type PairStartResult struct {
 type PairConfirmParams struct {
 	SessionID string `json:"session_id"`
 	Code      string `json:"code"`
+}
+
+type PairSessionParams struct {
+	SessionID string `json:"session_id"`
+}
+
+type DisconnectParams struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+type ForgetDeviceParams struct {
+	DeviceID string `json:"device_id,omitempty"`
 }
 
 type PairConfirmResult struct {

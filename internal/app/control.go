@@ -71,6 +71,29 @@ func parseControlCommand(args []string) (localapi.Method, any, bool) {
 	switch args[0] {
 	case "status":
 		return localapi.MethodStatus, nil, len(args) == 1
+	case "enable":
+		return localapi.MethodEnable, nil, len(args) == 1
+	case "pause":
+		return localapi.MethodPause, nil, len(args) == 1
+	case "search":
+		if len(args) == 2 && args[1] == "start" {
+			return localapi.MethodSearchStart, nil, true
+		}
+		if len(args) == 2 && args[1] == "stop" {
+			return localapi.MethodSearchStop, nil, true
+		}
+	case "disconnect":
+		return localapi.MethodDisconnect, localapi.DisconnectParams{}, len(args) == 1
+	case "forget":
+		if len(args) <= 2 {
+			params := localapi.ForgetDeviceParams{}
+			if len(args) == 2 {
+				params.DeviceID = args[1]
+			}
+			return localapi.MethodForgetDevice, params, true
+		}
+	case "quit":
+		return localapi.MethodShutdown, nil, len(args) == 1
 	case "pair":
 		if len(args) == 1 {
 			return localapi.MethodPairStart, localapi.PairStartParams{}, true

@@ -63,10 +63,20 @@ func TestAgentLocalAPIUsesPerUserLocalTransport(t *testing.T) {
 func TestAgentLocalAPIDispatchesEveryControlMethod(t *testing.T) {
 	methods := []Method{
 		MethodStatus,
+		MethodEnable,
+		MethodPause,
+		MethodSearchStart,
+		MethodSearchStop,
 		MethodListDevices,
 		MethodPairCandidates,
 		MethodPairStart,
+		MethodPairStatus,
+		MethodPairApprove,
+		MethodPairReject,
+		MethodPairCancel,
 		MethodPairConfirm,
+		MethodDisconnect,
+		MethodForgetDevice,
 		MethodUnpair,
 		MethodWorkspaceAdd,
 		MethodWorkspaceList,
@@ -75,6 +85,8 @@ func TestAgentLocalAPIDispatchesEveryControlMethod(t *testing.T) {
 		MethodPrepareDocker,
 		MethodDoctor,
 		MethodRecover,
+		MethodShutdown,
+		MethodResourceStatus,
 	}
 
 	for _, method := range methods {
@@ -183,9 +195,9 @@ func TestAgentLocalAPIRejectsSchemaMismatchBeforeDispatch(t *testing.T) {
 	}
 }
 
-func TestPrepareDockerShipsInSchemaVersionThree(t *testing.T) {
-	if CurrentSchemaVersion != 3 {
-		t.Fatalf("CurrentSchemaVersion = %d, want 3 for prepare-docker contract", CurrentSchemaVersion)
+func TestDesktopLifecycleShipsInSchemaVersionFour(t *testing.T) {
+	if CurrentSchemaVersion != 4 {
+		t.Fatalf("CurrentSchemaVersion = %d, want 4 for desktop lifecycle contract", CurrentSchemaVersion)
 	}
 }
 
