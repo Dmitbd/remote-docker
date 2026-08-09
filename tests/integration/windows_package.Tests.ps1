@@ -3,14 +3,14 @@ BeforeAll {
 
     $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
     $windowsPackaging = Join-Path $repoRoot 'packaging\windows'
-    $wixSource = Join-Path $windowsPackaging 'RemoteDocker.wxs'
-    $buildScript = Join-Path $windowsPackaging 'build-msi.ps1'
+    $installerSource = Join-Path $windowsPackaging 'installer\RemoteDocker.nsi'
+    $pagesSource = Join-Path $windowsPackaging 'installer\pages.nsh'
+    $stringsSource = Join-Path $windowsPackaging 'installer\strings.nsh'
+    $buildScript = Join-Path $windowsPackaging 'build-installer.ps1'
     $updateScript = Join-Path $windowsPackaging 'install-agent.ps1'
-    $nugetConfig = Join-Path $windowsPackaging 'nuget.config'
     $provisionScript = Join-Path $windowsPackaging 'scripts\provision.ps1'
+    $statusScript = Join-Path $windowsPackaging 'scripts\provision-status.ps1'
     $uninstallScript = Join-Path $windowsPackaging 'scripts\uninstall.ps1'
-    $ciWorkflow = Join-Path $repoRoot '.github\workflows\ci.yml'
-    $releaseWorkflow = Join-Path $repoRoot '.github\workflows\release.yml'
     $testScript = Join-Path $PSScriptRoot 'windows_package.Tests.ps1'
 
     function Read-RepositoryFile {
@@ -20,232 +20,161 @@ BeforeAll {
     }
 }
 
-Describe 'Windows package contract' {
-    It 'contains every public package contract file' {
+Describe 'Windows Setup EXE contract' {
+    It 'contains one NSIS wizard and no legacy MSI sources' {
         @(
-            $wixSource,
+            $installerSource,
+            $pagesSource,
+            $stringsSource,
             $buildScript,
             $updateScript,
-            $nugetConfig,
             $provisionScript,
-            $uninstallScript,
-            $ciWorkflow,
-            $releaseWorkflow
-        ) | ForEach-Object {
-            $_ | Should -Exist
-        }
+            $statusScript,
+            $uninstallScript
+        ) | ForEach-Object { $_ | Should -Exist }
+
+        (Join-Path $windowsPackaging 'RemoteDocker.wxs') | Should -Not -Exist
+        (Join-Path $windowsPackaging 'build-msi.ps1') | Should -Not -Exist
+        (Join-Path $windowsPackaging 'nuget.config') | Should -Not -Exist
     }
 
-    It 'defines a per-machine MSI containing only owned package inputs' {
-        $wix = Read-RepositoryFile $wixSource
+    It 'shows an explicit manual installation flow' {
+        $installer = Read-RepositoryFile $installerSource
+        $pages = Read-RepositoryFile $pagesSource
+        $strings = Read-RepositoryFile $stringsSource
 
-        $wix | Should -Match '<Package\s[^>]*Scope="perMachine"'
-        $wix | Should -Match '<StandardDirectory\s+Id="ProgramFiles64Folder"'
-        $wix | Should -Match '\$\(var\.AgentSource\)'
-        $wix | Should -Match '\$\(var\.TraySource\)'
-        $wix | Should -Match '\$\(var\.RootfsSource\)'
-        $wix | Should -Match '\$\(var\.RuntimeSource\)'
-        $wix | Should -Match '\$\(var\.RuntimeChecksumSource\)'
-        $wix | Should -Match 'Name="remote-docker-remote-linux-amd64"'
-        $wix | Should -Match 'Name="remote-docker-remote-linux-amd64\.sha256"'
-        $wix | Should -Match '\$\(var\.ProbeScriptSource\)'
-        $wix | Should -Match '\$\(var\.ProvisionScriptSource\)'
-        $wix | Should -Match '\$\(var\.UninstallScriptSource\)'
-        $wix | Should -Match '\$\(var\.UpdateScriptSource\)'
-        $wix | Should -Not -Match 'RemoveFolderEx|wsl\.exe|--unregister|ProgramData\\RemoteDocker|\.docker|workspace|pairing'
+        $installer | Should -Match 'MUI_PAGE_WELCOME'
+        $installer | Should -Match 'Page custom PreflightPageCreate'
+        $installer | Should -Match 'MUI_PAGE_COMPONENTS'
+        $installer | Should -Match 'MUI_PAGE_DIRECTORY'
+        $installer | Should -Match 'Page custom DataPageCreate DataPageLeave'
+        $installer | Should -Match 'MUI_PAGE_INSTFILES'
+        $installer | Should -Match 'MUI_FINISHPAGE_RUN_NOTCHECKED'
+        $installer | Should -Match 'CreateShortCut "\$SMPROGRAMS\\Remote Docker\\Remote Docker\.lnk"'
+        $installer | Should -Match 'Section /o .*DesktopShortcut'
+        $installer | Should -Match 'CreateShortCut "\$DESKTOP\\Remote Docker\.lnk"'
+        $installer | Should -Match 'RemoteDocker\.exe'
+        $installer | Should -Match 'remote-docker\.ico'
+        $pages | Should -Match 'SelectDataDirectory'
+        $pages | Should -Match 'VirtualizationPreflight'
+        $strings | Should -Match 'InstallingFiles'
+        $strings | Should -Match 'ProvisioningWSL'
+        $strings | Should -Match 'ConfiguringDocker'
+        $strings | Should -Match 'ConfiguringFirewall'
+        $strings | Should -Match 'InstallRetry'
+        $strings | Should -Match 'InstallLogPath'
     }
 
-    It 'registers separate exact-path Agent and Tray startup values for interactive users' {
-        $wix = Read-RepositoryFile $wixSource
+    It 'never registers the application for automatic startup' {
+        $publicInstallerFiles = @($installerSource, $pagesSource, $stringsSource)
+        $combined = ($publicInstallerFiles | ForEach-Object { Read-RepositoryFile $_ }) -join "`n"
 
-        $wix | Should -Match 'Root="HKLM"[^>]+Key="Software\\Microsoft\\Windows\\CurrentVersion\\Run"[^>]+Name="RemoteDockerAgent"[^>]+Value="&quot;\[INSTALLFOLDER\]RemoteDockerAgent\.exe&quot;"'
-        $wix | Should -Match 'Root="HKLM"[^>]+Key="Software\\Microsoft\\Windows\\CurrentVersion\\Run"[^>]+Name="RemoteDockerTray"[^>]+Value="&quot;\[INSTALLFOLDER\]RemoteDockerTray\.exe&quot;"'
-        $wix | Should -Not -Match 'ServiceInstall|LocalSystem|RunAs|powershell(?:\.exe)?[^<]*(?:RemoteDockerAgent|RemoteDockerTray)'
-        ([regex]::Matches($wix, 'Software\\Microsoft\\Windows\\CurrentVersion\\Run')).Count | Should -Be 2
+        $combined | Should -Not -Match 'CurrentVersion\\Run(?:Once)?'
+        $combined | Should -Not -Match 'Startup\\|StartupFolder'
+        $combined | Should -Not -Match 'CreateService|ServiceInstall|Register-ScheduledTask|New-ScheduledTask|schtasks'
+        $combined | Should -Not -Match 'RemoteDockerAgent|RemoteDockerTray'
+        $combined | Should -Not -Match 'автозапуск|при входе в Windows'
     }
 
-    It 'keeps provisioning machine-scoped and firewall access Private-only and program-scoped' {
+    It 'pins and verifies NSIS and the Fyne compiler toolchain' {
+        $script = Read-RepositoryFile $buildScript
+
+        $script | Should -Match '\$GoVersion\s*=\s*''1\.26\.5'''
+        $script | Should -Match '\$NsisVersion\s*=\s*''3\.12'''
+        $script | Should -Match '\$NsisSha256\s*=\s*''[a-f0-9]{64}'''
+        $script | Should -Match '\$LlvmMingwVersion\s*=\s*''20260616'''
+        $script | Should -Match '\$LlvmMingwSha256\s*=\s*''[a-f0-9]{64}'''
+        $script | Should -Match 'Get-FileHash'
+        $script | Should -Match 'CGO_ENABLED\s*=\s*''1'''
+        $script | Should -Match 'x86_64-w64-mingw32-gcc\.exe'
+        $script | Should -Match '-H=windowsgui'
+        $script | Should -Match 'cmd/remote-docker-desktop'
+        $script | Should -Match 'cmd/remote-docker-remote'
+        $script | Should -Match 'Remote-Docker-\$Version-x64-Setup\.exe'
+        $script | Should -Not -Match 'cmd/remote-docker-agent|cmd/remote-docker-tray|\.msi'
+    }
+
+    It 'provisions validated application and data roots without starting the app' {
         $script = Read-RepositoryFile $provisionScript
-        $distroPathCheck = $script.IndexOf('Assert-NoReparseDirectory -Path $distroRoot')
+        $rootCheck = $script.IndexOf('Assert-ManagedDirectory -Path $DataRoot')
         $import = $script.IndexOf("'--import'")
 
-        $script | Should -Match 'GetFolderPath\(\[Environment\+SpecialFolder\]::CommonApplicationData\)'
-        $script | Should -Match 'GetFolderPath\(\[Environment\+SpecialFolder\]::ProgramFiles\)'
-        $script | Should -Match 'Join-Path \$programData ''RemoteDocker'''
-        $script | Should -Match 'Join-Path \$programFiles ''Remote Docker\\RemoteDockerAgent\.exe'''
-        $script | Should -Match 'Invoke-External\s+-FilePath\s+\$agentExecutable\s+-ArgumentList\s+@\(''--prepare-wsl''\)'
+        $script | Should -Match '\[string\]\$ApplicationRoot'
+        $script | Should -Match '\[string\]\$DataRoot'
+        $script | Should -Match '\[string\]\$ProgressPath'
+        $script | Should -Match '\[string\]\$LogPath'
+        $script | Should -Match 'IsPathFullyQualified'
+        $script | Should -Match 'FileAttributes\]::ReparsePoint'
+        $script | Should -Match 'Join-Path \$ApplicationRoot ''RemoteDocker\.exe'''
+        $script | Should -Match 'Join-Path \$DataRoot ''wsl'''
+        $script | Should -Match 'Write-ProvisionStatus'
+        $script | Should -Match '--prepare-wsl'
         $script | Should -Match '''/usr/local/bin/remote-docker-remote'',\s*''runtime-status'''
-        $script | Should -Match 'Get-Process\s+-Name\s+''RemoteDockerAgent'''
-        $script | Should -Match '\[System\.IO\.Path\]::GetFullPath\(\$_\.Path\)'
-        $script | Should -Match 'Start-Process\s+`\s+-FilePath\s+\$agentExecutable'
-        $script | Should -Match '-WindowStyle\s+Hidden'
-        $script | Should -Match '\$startedAgent\.HasExited'
-        $script | Should -Not -Match 'syncthing generate --home=/var/lib/remote-docker|ssh-keygen'
-        $script | Should -Match 'Join-Path \$PSScriptRoot ''\.\.\\assets\\remote-docker-rootfs\.tar\.zst'''
         $script | Should -Match '-Profile\s+Private'
-        $script | Should -Match '-Program\s+\$agentExecutable'
-        $script | Should -Match '-Protocol\s+TCP'
+        $script | Should -Match '-Program\s+\$desktopExecutable'
         $script | Should -Match '-RemoteAddress\s+LocalSubnet'
-        $script | Should -Match "Name\s*=\s*'RemoteDocker\.Managed\.SSH'"
-        $script | Should -Match "Name\s*=\s*'RemoteDocker\.Managed\.Syncthing'"
-        $script | Should -Match '-Group\s+\$firewallRuleGroup'
-        $script | Should -Not -Match 'Remove-NetFirewallRule\s+-DisplayName'
-        $script | Should -Match 'function\s+Assert-NoReparseDirectory'
-        $distroPathCheck | Should -BeGreaterThan -1
-        $import | Should -BeGreaterThan $distroPathCheck
-        $script | Should -Not -Match '\[string\]\$(?:RootfsPath|RootfsSha256|InstallRoot|AgentExecutable)'
-        $script | Should -Not -Match '-Profile\s+(?:Public|Domain|Any)|New-ScheduledTask|Register-ScheduledTask|RunLevel\s+Highest'
+        $script | Should -Match "(?s)Invoke-External.*'wsl\.exe'.*'--terminate'"
+        $rootCheck | Should -BeGreaterThan -1
+        $import | Should -BeGreaterThan $rootCheck
+        $script | Should -Not -Match 'Start-Process[^\n]+RemoteDocker|Get-Process\s+-Name\s+''RemoteDocker'
+        $script | Should -Not -Match 'RemoteDockerAgent|RemoteDockerTray|ScheduledTask|CurrentVersion\\Run'
     }
 
-    It 'preserves data by default and requires an exact high-friction deletion phrase' {
+    It 'uses hidden installer execution and finite reboot state' {
+        $installer = Read-RepositoryFile $installerSource
+        $status = Read-RepositoryFile $statusScript
+
+        $installer | Should -Match 'nsExec::ExecToStack'
+        $installer | Should -Match '-WindowStyle Hidden'
+        $installer | Should -Match 'installer-reboot\.pending'
+        $installer | Should -Match 'Delete .*installer-reboot\.pending'
+        $installer | Should -Match 'SetRebootFlag true'
+        $installer | Should -Not -Match 'Exec(?:Wait)?\s+''?"?\$INSTDIR\\RemoteDocker\.exe'
+        $status | Should -Match 'ConvertTo-Json'
+        $status | Should -Match 'Add-Content\s+-LiteralPath\s+\$ProgressPath'
+    }
+
+    It 'preserves managed WSL data by default and deletes only with exact confirmation' {
         $script = Read-RepositoryFile $uninstallScript
         $normalExit = $script.IndexOf('if (-not $DeleteData)')
         $unregister = $script.IndexOf('--unregister')
-        $treeCheck = $script.IndexOf('Assert-NoReparseTree -Path $installRoot')
-        $recursiveDelete = $script.IndexOf('Remove-Item -LiteralPath $installRoot -Recurse -Force')
+        $treeCheck = $script.IndexOf('Assert-NoReparseTree -Path $distroRoot')
+        $recursiveDelete = $script.IndexOf('Remove-Item -LiteralPath $distroRoot -Recurse -Force')
 
-        $script | Should -Match 'GetFolderPath\(\[Environment\+SpecialFolder\]::CommonApplicationData\)'
-        $script | Should -Match 'Join-Path \$programData ''RemoteDocker'''
-        $script | Should -Match 'RemoteDockerAgent\.exe'
+        $script | Should -Match '\[string\]\$ApplicationRoot'
+        $script | Should -Match '\[string\]\$DataRoot'
+        $script | Should -Match 'RemoteDocker\.exe'
+        $script | Should -Match '--shutdown'
         $script | Should -Match '--delete-wsl-credential'
         $script | Should -Match 'ValidateSet\(''DELETE-REMOTE-DOCKER-DATA''\)'
-        $script | Should -Match '\$DataRemovalConfirmation\s+-ne\s+''DELETE-REMOTE-DOCKER-DATA'''
-        $script | Should -Not -Match '\[string\]\$InstallRoot'
         $script | Should -Match 'remote-docker-managed-v1'
-        $script | Should -Match "'RemoteDocker\.Managed\.SSH'"
-        $script | Should -Match "'RemoteDocker\.Managed\.Syncthing'"
-        $script | Should -Match 'Get-NetFirewallRule\s+-Name\s+\$ruleName'
-        $script | Should -Not -Match 'Remove-NetFirewallRule\s+-DisplayName'
-        $script | Should -Match 'Resolve-Path\s+-LiteralPath\s+\$installRoot'
         $script | Should -Match 'FileAttributes\]::ReparsePoint'
-        $script | Should -Match 'function\s+Assert-NoReparseTree'
-        $script | Should -Match 'function\s+Invoke-Wsl'
-        $script | Should -Match '\$previousErrorActionPreference\s*=\s*\$ErrorActionPreference'
-        $script | Should -Match '\$ErrorActionPreference\s*=\s*''Continue'''
-        $script | Should -Match '\$exitCode\s*=\s*\$LASTEXITCODE'
-        $script | Should -Match '\$ErrorActionPreference\s*=\s*\$previousErrorActionPreference'
-        $script | Should -Match 'Invoke-Wsl\s+-ArgumentList\s+@\(''--distribution'',\s*\$managedDistroName,\s*''--user'',\s*''root'',\s*''--exec'',\s*''cat'',\s*''/etc/remote-docker-release''\)'
-        $script | Should -Match 'Invoke-Wsl\s+-ArgumentList\s+@\(''--unregister'',\s*\$managedDistroName\)'
-        ([regex]::Matches($script, '&\s*wsl\.exe')).Count | Should -Be 1
-        $script | Should -Match 'StringComparison\]::OrdinalIgnoreCase'
         $normalExit | Should -BeGreaterThan -1
         $unregister | Should -BeGreaterThan $normalExit
         $treeCheck | Should -BeGreaterThan $normalExit
         $recursiveDelete | Should -BeGreaterThan $treeCheck
-        $script | Should -Not -Match 'ScheduledTask'
+        $script | Should -Not -Match 'ScheduledTask|CurrentVersion\\Run'
         $script | Should -Not -Match 'Remove-Item[^\n]*(?:\$HOME|\$env:USERPROFILE|\\Users\\|\*|\?)'
     }
 
-    It 'verifies hash and Authenticode before an atomic same-volume replacement' {
+    It 'updates only the unified desktop executable after verification' {
         $script = Read-RepositoryFile $updateScript
         $hashCheck = $script.IndexOf('Get-FileHash')
         $signatureCheck = $script.IndexOf('Get-AuthenticodeSignature')
-        $signerCheck = $script.IndexOf('SignerCertificate.Thumbprint')
         $replace = $script.IndexOf('[System.IO.File]::Replace')
-        $stagingTreeCheck = $script.IndexOf('Assert-NoReparseTree -Path $stagingRoot')
-        $stagingDelete = $script.IndexOf('Remove-Item -LiteralPath $stagingRoot -Recurse -Force')
 
-        $script | Should -Match 'ValidateSet\(''RemoteDockerAgent\.exe'', ''RemoteDockerTray\.exe''\)'
-        $script | Should -Match 'ValidatePattern\(''\^\[A-Fa-f0-9\]\{64\}\$''\)'
-        $script | Should -Match 'ValidatePattern\(''\^\[A-Fa-f0-9\]\{40\}\$''\)'
-        $script | Should -Match '(?m)^[^\n]*\[string\]\$ExpectedSha256' -Because 'the expected digest must be caller supplied'
-        $script | Should -Match '(?m)^[^\n]*\[string\]\$ExpectedSignerThumbprint' -Because 'the expected signer identity must be caller supplied'
-        $script | Should -Match 'Status\s+-ne\s+\[System\.Management\.Automation\.SignatureStatus\]::Valid'
-        $script | Should -Match 'SignerCertificate\.Thumbprint\.Replace\(''\s'',\s*''''\)\.ToUpperInvariant\(\)'
-        $script | Should -Match 'Get-AuthenticodeSignature\s+-LiteralPath\s+\$activePath'
-        $script | Should -Match '\$activeThumbprint\s+-ne\s+\$ExpectedSignerThumbprint\.Replace'
-        $script | Should -Match 'GetFolderPath\(\[Environment\+SpecialFolder\]::ProgramFiles\)'
-        $script | Should -Match 'Join-Path\s+\$programFiles\s+''Remote Docker'''
-        $script | Should -Match 'Join-Path\s+\$installRoot\s+''\.updates'''
-        $script | Should -Not -Match '\[string\]\$InstallRoot'
-        $script | Should -Match 'FileAttributes\]::ReparsePoint'
-        $script | Should -Match 'function\s+Assert-NoReparseTree'
-        $script | Should -Match 'GetPathRoot'
-        $script | Should -Match '(?s)finally\s*\{.*Remove-Item\s+-LiteralPath\s+\$stagingRoot\s+-Recurse\s+-Force'
+        $script | Should -Match 'RemoteDocker\.exe'
+        $script | Should -Match '--shutdown'
+        $script | Should -Not -Match 'RemoteDockerAgent|RemoteDockerTray|Start-Process'
         $hashCheck | Should -BeGreaterThan -1
         $signatureCheck | Should -BeGreaterThan $hashCheck
-        $signerCheck | Should -BeGreaterThan $signatureCheck
-        $replace | Should -BeGreaterThan $signerCheck
-        $stagingTreeCheck | Should -BeGreaterThan -1
-        $stagingDelete | Should -BeGreaterThan $stagingTreeCheck
-        $script | Should -Not -Match 'Write-(?:Host|Output|Verbose|Debug)[^\n]*(?:token|secret|password|private.?key|certificate)'
+        $replace | Should -BeGreaterThan $signatureCheck
     }
 
-    It 'pins package tools and emits unsigned development artifacts by default' {
-        $script = Read-RepositoryFile $buildScript
-
-        $script | Should -Match '\$GoVersion\s*=\s*''1\.26\.5'''
-        $script | Should -Match '\$WixVersion\s*=\s*''6\.0\.2'''
-        $script | Should -Match '''tool'',\s*''install''[\s\S]+''--version'',\s*\$WixVersion'
-        $script | Should -Match '''--configfile'',\s*\$nugetConfig'
-        $script | Should -Match '\$env:GOOS\s*=\s*''windows'''
-        $script | Should -Match '\$env:GOOS\s*=\s*''linux'''
-        $script | Should -Match '\$env:GOARCH\s*=\s*''amd64'''
-        $script | Should -Match '''-C'',\s*\$repoRoot,\s*''build'''
-        $script | Should -Match 'cmd/remote-docker-agent'
-        $script | Should -Match 'cmd/remote-docker-tray'
-        $script | Should -Match 'cmd/remote-docker-remote'
-        $script | Should -Match 'Get-FileHash[^\n]+remote-docker-remote-linux-amd64'
-        $script | Should -Match 'RuntimeSource=\$runtimeSource'
-        $script | Should -Match 'RuntimeChecksumSource=\$runtimeChecksumSource'
-        $script | Should -Not -Match 'SignTool|certificate|password|token|secret'
-        $nuget = Read-RepositoryFile $nugetConfig
-        $nuget | Should -Match '<add key="signatureValidationMode" value="require"'
-        $nuget | Should -Match 'fingerprint="D95336DD2022934D80E3F3A4F938DD66EC7076BBBA680F76C11F2B54B346D61D"'
-    }
-
-    It 'keeps pull-request CI targeted and its artifacts unsigned' {
-        $workflow = Read-RepositoryFile $ciWorkflow
-
-        $workflow | Should -Match '(?m)^\s*pull_request:'
-        $workflow | Should -Match 'windows-latest'
-        $workflow | Should -Match 'tests/integration/windows_package\.Tests\.ps1'
-        $workflow | Should -Match 'packaging/windows/build-msi\.ps1'
-        $workflow | Should -Match 'Install-Module\s+Pester\s+-RequiredVersion\s+6\.0\.0'
-        $workflow | Should -Match 'actions/checkout@v7'
-        $workflow | Should -Match 'actions/setup-go@v7'
-        $workflow | Should -Match 'actions/upload-artifact@v7'
-        $workflow | Should -Match 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
-        $workflow | Should -Match 'actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e'
-        $workflow | Should -Match 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'
-        $workflow | Should -Match 'actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131'
-        $workflow | Should -Not -Match 'SignTool|WINDOWS_SIGNING|notary|release\s+create'
-    }
-
-    It 'publishes free unsigned tag artifacts with provenance checksums and SBOMs' {
-        $workflow = Read-RepositoryFile $releaseWorkflow
-
-        $workflow | Should -Match '(?m)^\s*tags:\s*\n\s*-\s*''v\*'''
-        $workflow | Should -Match "github\.repository\s*==\s*'Dmitbd/remote-docker'"
-        $workflow | Should -Match 'refs/tags/v'
-        $workflow | Should -Match 'git\s+cat-file\s+-t'
-        $workflow | Should -Match 'Get-AuthenticodeSignature'
-        $workflow | Should -Match "Status\s+-ne\s+'NotSigned'"
-        $workflow | Should -Match 'Get-FileHash[^\n]+SHA256'
-        $workflow | Should -Match 'syft@v1\.50\.0'
-        $workflow | Should -Match 'source_commit\s*=\s*\$env:GITHUB_SHA'
-        $workflow | Should -Match 'remote-docker-windows-x64'
-        $workflow | Should -Match 'remote-docker-macos-arm64'
-        $workflow | Should -Match 'Remote-Docker-Windows-x64-manifest\.json'
-        $workflow | Should -Match 'Remote-Docker-macOS-arm64-manifest\.json'
-        $workflow | Should -Match 'needs:\s*\[windows-release, macos-release\]'
-        $workflow | Should -Match 'gh\s+release\s+create'
-        $workflow | Should -Match '(?s)Get-AuthenticodeSignature.*Get-FileHash.*syft@v1\.50\.0.*gh\s+release\s+create'
-        $workflow | Should -Not -Match 'WINDOWS_SIGNING|MACOS_SIGNING|REMOTE_DOCKER_(?:APP|INSTALLER)_SIGN_IDENTITY|APPLE_NOTARY|verification\.verified|notarytool|stapler'
-        $workflow | Should -Not -Match '(?m)^\s*(?:echo|Write-Host).*(?:WINDOWS_SIGNING|password|secret|private.?key|token)'
-    }
-
-    It 'keeps public package content generic' {
+    It 'keeps public installer content generic' {
         $publicFiles = @(
-            $wixSource,
-            $buildScript,
-            $updateScript,
-            $nugetConfig,
-            $provisionScript,
-            $uninstallScript,
-            $ciWorkflow,
-            $releaseWorkflow,
-            $testScript
+            $installerSource, $pagesSource, $stringsSource, $buildScript, $updateScript,
+            $provisionScript, $statusScript, $uninstallScript, $testScript
         )
         $internalPattern = 'S' + 'ber|Co' + 'work|Mid' + 'gard|Ygg' + 'drasil'
 

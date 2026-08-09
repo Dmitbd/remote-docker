@@ -1,19 +1,9 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$CandidatePath,
-    [Parameter(Mandatory = $true)]
-    [ValidatePattern('^[A-Fa-f0-9]{64}$')]
-    [string]$ExpectedSha256,
-    [Parameter(Mandatory = $true)]
-    [ValidatePattern('^[A-Fa-f0-9]{40}$')]
-    [string]$ExpectedSignerThumbprint,
-    [Parameter(Mandatory = $true)]
-    [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z.-]{0,63}$')]
-    [string]$Version,
-    [Parameter(Mandatory = $true)]
-    [ValidateSet('RemoteDockerAgent.exe', 'RemoteDockerTray.exe')]
-    [string]$TargetName
+    [Parameter(Mandatory = $true)][string]$CandidatePath,
+    [Parameter(Mandatory = $true)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ExpectedSha256,
+    [Parameter(Mandatory = $true)][ValidatePattern('^[0-9A-Za-z][0-9A-Za-z.-]{0,63}$')][string]$Version,
+    [Parameter(Mandatory = $true)][string]$ApplicationRoot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,41 +12,27 @@ function Assert-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        throw 'Updating a per-machine Remote Docker binary requires an elevated Administrator session.'
+        throw 'Updating Remote Docker requires an elevated Administrator session.'
     }
 }
 
-function Assert-VerifiedBinary {
-    param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$Sha256,
-        [Parameter(Mandatory = $true)][string]$SignerThumbprint
-    )
+function Assert-FreeReleaseBinary {
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Sha256)
 
     $actualHash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actualHash -ne $Sha256.ToLowerInvariant()) {
         throw "SHA-256 verification failed for '$Path'."
     }
-
     $signature = Get-AuthenticodeSignature -LiteralPath $Path
-    if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
-        throw "Authenticode verification failed for '$Path'."
-    }
-    if ($null -eq $signature.SignerCertificate) {
-        throw "Authenticode signer information is missing for '$Path'."
-    }
-    $actualThumbprint = $signature.SignerCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant()
-    if ($actualThumbprint -ne $SignerThumbprint.Replace(' ', '').ToUpperInvariant()) {
-        throw "Authenticode signer verification failed for '$Path'."
+    if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned) {
+        throw "The free release update channel accepts only explicitly unsigned Remote Docker binaries."
     }
 }
 
 function Assert-NoReparseTree {
     param([Parameter(Mandatory = $true)][string]$Path)
 
-    if (-not (Test-Path -LiteralPath $Path)) {
-        return
-    }
+    if (-not (Test-Path -LiteralPath $Path)) { return }
     $pending = [System.Collections.Generic.Queue[string]]::new()
     $pending.Enqueue((Get-Item -LiteralPath $Path -Force).FullName)
     while ($pending.Count -gt 0) {
@@ -70,59 +46,41 @@ function Assert-NoReparseTree {
                 if (($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
                     throw "Refusing to update through a reparse point at '$($child.FullName)'."
                 }
-                if ($child.PSIsContainer) {
-                    $pending.Enqueue($child.FullName)
-                }
+                if ($child.PSIsContainer) { $pending.Enqueue($child.FullName) }
             }
         }
     }
 }
 
 Assert-Administrator
+if (-not [System.IO.Path]::IsPathFullyQualified($ApplicationRoot)) {
+    throw 'Application root must be absolute.'
+}
+$ApplicationRoot = [System.IO.Path]::GetFullPath($ApplicationRoot)
+$resolvedInstallRoot = (Resolve-Path -LiteralPath $ApplicationRoot -ErrorAction Stop).Path
+if (-not [string]::Equals($resolvedInstallRoot, $ApplicationRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Resolved application root does not match the selected install path.'
+}
+$installRootItem = Get-Item -LiteralPath $ApplicationRoot -Force
+if (($installRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw 'Refusing to update through a reparse point at the application root.'
+}
 
 $resolvedCandidate = (Resolve-Path -LiteralPath $CandidatePath -ErrorAction Stop).Path
-if (-not (Test-Path -LiteralPath $resolvedCandidate -PathType Leaf)) {
-    throw "Update candidate is not a file: '$CandidatePath'."
-}
-
-$programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
-$installRoot = [System.IO.Path]::GetFullPath((Join-Path $programFiles 'Remote Docker'))
-$resolvedInstallRoot = (Resolve-Path -LiteralPath $installRoot -ErrorAction Stop).Path
-if (-not [string]::Equals($resolvedInstallRoot, $installRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw "Resolved install path does not match the packaged path '$installRoot'."
-}
-$installRootItem = Get-Item -LiteralPath $resolvedInstallRoot -Force
-if (($installRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-    throw "Refusing to update through a reparse point at '$installRoot'."
-}
-$activePath = Join-Path $resolvedInstallRoot $TargetName
+$activePath = Join-Path $ApplicationRoot 'RemoteDocker.exe'
 if (-not (Test-Path -LiteralPath $activePath -PathType Leaf)) {
-    throw "The active packaged binary was not found at '$activePath'."
+    throw 'The active RemoteDocker.exe was not found.'
 }
-$activeItem = Get-Item -LiteralPath $activePath -Force
-if (($activeItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-    throw "Refusing to replace a reparse point at '$activePath'."
+Assert-FreeReleaseBinary -Path $resolvedCandidate -Sha256 $ExpectedSha256
+if ((Get-AuthenticodeSignature -LiteralPath $activePath).Status -ne [System.Management.Automation.SignatureStatus]::NotSigned) {
+    throw 'The installed binary does not belong to the free unsigned release channel.'
 }
-$activeSignature = Get-AuthenticodeSignature -LiteralPath $activePath
-if ($activeSignature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or
-    $null -eq $activeSignature.SignerCertificate) {
-    throw "The active packaged binary at '$activePath' does not have a valid Authenticode signer."
-}
-$activeThumbprint = $activeSignature.SignerCertificate.Thumbprint.Replace(' ', '').ToUpperInvariant()
-if ($activeThumbprint -ne $ExpectedSignerThumbprint.Replace(' ', '').ToUpperInvariant()) {
-    throw 'The expected update signer does not match the active packaged binary signer.'
-}
+& $activePath --shutdown
 
-Assert-VerifiedBinary `
-    -Path $resolvedCandidate `
-    -Sha256 $ExpectedSha256 `
-    -SignerThumbprint $ExpectedSignerThumbprint
-
-$updatesRoot = Join-Path $installRoot '.updates'
+$updatesRoot = Join-Path $ApplicationRoot '.updates'
 $stagingRoot = Join-Path $updatesRoot $Version
-$stagedPath = Join-Path $stagingRoot $TargetName
-$backupPath = Join-Path $stagingRoot "$TargetName.previous"
-
+$stagedPath = Join-Path $stagingRoot 'RemoteDocker.exe'
+$backupPath = Join-Path $stagingRoot 'RemoteDocker.exe.previous'
 if (-not (Test-Path -LiteralPath $updatesRoot)) {
     New-Item -ItemType Directory -Path $updatesRoot -Force | Out-Null
 }
@@ -134,22 +92,17 @@ try {
         Remove-Item -LiteralPath $stagingRoot -Recurse -Force
     }
     New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
-    Assert-NoReparseTree -Path $stagingRoot
     Copy-Item -LiteralPath $resolvedCandidate -Destination $stagedPath
-
-    Assert-VerifiedBinary `
-        -Path $stagedPath `
-        -Sha256 $ExpectedSha256 `
-        -SignerThumbprint $ExpectedSignerThumbprint
-
-    $activeVolume = [System.IO.Path]::GetPathRoot($activePath)
-    $stagingVolume = [System.IO.Path]::GetPathRoot($stagedPath)
-    if (-not [string]::Equals($activeVolume, $stagingVolume, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw 'The verified staging path must be on the same volume as the active binary.'
+    Assert-FreeReleaseBinary -Path $stagedPath -Sha256 $ExpectedSha256
+    if (-not [string]::Equals(
+        [System.IO.Path]::GetPathRoot($activePath),
+        [System.IO.Path]::GetPathRoot($stagedPath),
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw 'The verified staging path must be on the same volume as Remote Docker.'
     }
-
     [System.IO.File]::Replace($stagedPath, $activePath, $backupPath, $true)
-    Write-Output "Updated $TargetName to version $Version."
+    Write-Output "Updated RemoteDocker.exe to version $Version."
 }
 finally {
     if (Test-Path -LiteralPath $stagingRoot) {

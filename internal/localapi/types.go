@@ -24,9 +24,6 @@ const (
 	MethodPairApprove     Method = "PairApprove"
 	MethodPairReject      Method = "PairReject"
 	MethodPairCancel      Method = "PairCancel"
-	// MethodPairConfirm is retained only while the legacy tray package is
-	// removed. Schema v4 does not accept it from clients.
-	MethodPairConfirm     Method = "PairConfirm"
 	MethodDisconnect      Method = "Disconnect"
 	MethodForgetDevice    Method = "ForgetDevice"
 	MethodUnpair          Method = "Unpair"
@@ -204,16 +201,6 @@ type PairStartResult struct {
 
 type PairSessionParams struct {
 	SessionID string `json:"session_id"`
-}
-
-// Deprecated compatibility shapes for the legacy tray package.
-type PairConfirmParams struct {
-	SessionID string `json:"session_id"`
-	Code      string `json:"code"`
-}
-
-type PairConfirmResult struct {
-	Device Device `json:"device"`
 }
 
 type DisconnectParams struct {

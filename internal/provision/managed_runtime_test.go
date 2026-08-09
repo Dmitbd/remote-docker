@@ -62,7 +62,7 @@ func TestManagedWSLRuntimeRetriesInstallThenKeepsRecoveringIdentity(t *testing.T
 }
 
 func TestNewManagedWSLRuntimeUsesAssetsNextToInstalledAgent(t *testing.T) {
-	executable := filepath.Join(t.TempDir(), "Remote Docker", "RemoteDockerAgent.exe")
+	executable := filepath.Join(t.TempDir(), "Remote Docker", "RemoteDocker.exe")
 	runtime, err := NewManagedWSLRuntime(executable, credentials.NewMemoryStore())
 	if err != nil {
 		t.Fatalf("NewManagedWSLRuntime() error = %v", err)

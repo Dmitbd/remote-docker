@@ -1,10 +1,12 @@
 [CmdletBinding()]
 param(
     [switch]$ConfirmProvisioning,
-    [ValidateRange(1024, 65535)]
-    [int]$SshBridgePort = 49222,
-    [ValidateRange(1024, 65535)]
-    [int]$SyncthingBridgePort = 49220
+    [Parameter(Mandatory = $true)][string]$ApplicationRoot,
+    [Parameter(Mandatory = $true)][string]$DataRoot,
+    [Parameter(Mandatory = $true)][string]$ProgressPath,
+    [Parameter(Mandatory = $true)][string]$LogPath,
+    [ValidateRange(1024, 65535)][int]$SshBridgePort = 49222,
+    [ValidateRange(1024, 65535)][int]$SyncthingBridgePort = 49220
 )
 
 $ErrorActionPreference = 'Stop'
@@ -12,12 +14,8 @@ $managedDistroName = 'remote-docker'
 $managedRelease = 'remote-docker-managed-v1'
 $managedMetadata = '{"schema_version":1,"managed_by":"remote-docker"}'
 $firewallRuleGroup = 'Remote Docker Managed Rules'
-$programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
-$programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
-$installRoot = [System.IO.Path]::GetFullPath((Join-Path $programData 'RemoteDocker'))
-$agentExecutable = [System.IO.Path]::GetFullPath((Join-Path $programFiles 'Remote Docker\RemoteDockerAgent.exe'))
-$rootfsPath = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\assets\remote-docker-rootfs.tar.zst'))
-$rootfsChecksumPath = "$rootfsPath.sha256"
+
+. (Join-Path $PSScriptRoot 'provision-status.ps1')
 
 function Assert-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -27,7 +25,20 @@ function Assert-Administrator {
     }
 }
 
-function Assert-NoReparseDirectory {
+function Assert-AbsolutePath {
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Description)
+
+    if (-not [System.IO.Path]::IsPathFullyQualified($Path)) {
+        throw "$Description must be an absolute path."
+    }
+    $canonical = [System.IO.Path]::GetFullPath($Path)
+    if (-not [string]::Equals($canonical.TrimEnd('\'), $Path.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Description must already be canonical."
+    }
+    $canonical
+}
+
+function Assert-ManagedDirectory {
     param([Parameter(Mandatory = $true)][string]$Path)
 
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
@@ -38,203 +49,224 @@ function Assert-NoReparseDirectory {
         throw "Refusing to use a reparse point at '$Path'."
     }
     $resolved = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
-    $canonical = [System.IO.Path]::GetFullPath($Path)
-    if (-not [string]::Equals($resolved, $canonical, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "Resolved managed directory does not match '$canonical'."
+    if (-not [string]::Equals($resolved.TrimEnd('\'), $Path.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Resolved managed directory does not match '$Path'."
     }
+}
+
+function Write-InstallLog {
+    param([Parameter(Mandatory = $true)][string]$Message)
+
+    $line = '[{0}] {1}' -f [DateTimeOffset]::UtcNow.ToString('O'), $Message
+    Add-Content -LiteralPath $LogPath -Value $line -Encoding utf8
 }
 
 function Invoke-External {
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$FilePath,
-        [Parameter(Mandatory = $true)]
-        [string[]]$ArgumentList,
-        [Parameter(Mandatory = $true)]
-        [string]$Description
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string[]]$ArgumentList,
+        [Parameter(Mandatory = $true)][string]$Description,
+        [switch]$IgnoreFailure
     )
 
-    & $FilePath @ArgumentList
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Description failed with exit code $LASTEXITCODE."
+    Write-InstallLog -Message "$Description started."
+    & $FilePath @ArgumentList *> $null
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0 -and -not $IgnoreFailure) {
+        throw "$Description failed with exit code $exitCode."
     }
+    Write-InstallLog -Message "$Description completed with exit code $exitCode."
+    $exitCode
+}
+
+function Invoke-WslCapture {
+    param([Parameter(Mandatory = $true)][string[]]$ArgumentList)
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = (& wsl.exe @ArgumentList 2>$null | Out-String)
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    [PSCustomObject]@{ Output = $output; ExitCode = $exitCode }
 }
 
 function Test-ManagedDistro {
-    $names = (& wsl.exe --list --quiet 2>&1 | Out-String) -replace "`0", ''
+    $list = Invoke-WslCapture -ArgumentList @('--list', '--quiet')
+    if ($list.ExitCode -ne 0) {
+        return $false
+    }
+    $names = $list.Output -replace "`0", ''
     $exists = $null -ne (($names -split "`r?`n") | Where-Object { $_.Trim() -eq $managedDistroName } | Select-Object -First 1)
     if (-not $exists) {
         return $false
     }
-
-    $release = (& wsl.exe --distribution $managedDistroName --exec cat /etc/remote-docker-release 2>$null | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $release -ne $managedRelease) {
+    $releaseProbe = Invoke-WslCapture -ArgumentList @('--distribution', $managedDistroName, '--exec', 'cat', '/etc/remote-docker-release')
+    if ($releaseProbe.ExitCode -ne 0 -or $releaseProbe.Output.Trim() -ne $managedRelease) {
         throw "WSL distribution name '$managedDistroName' is already used by an unmanaged distribution."
     }
     return $true
 }
 
 if (-not $ConfirmProvisioning) {
-    throw 'No changes were made. Re-run with -ConfirmProvisioning after reviewing the provisioning plan.'
+    throw 'No changes were made. The installer must explicitly confirm provisioning.'
 }
 
 Assert-Administrator
-
-$requiredFeatures = @('Microsoft-Windows-Subsystem-Linux', 'VirtualMachinePlatform')
-$disabledFeatures = @()
-foreach ($featureName in $requiredFeatures) {
-    $feature = Get-WindowsOptionalFeature -Online -FeatureName $featureName
-    if ($feature.State -ne 'Enabled') {
-        $disabledFeatures += $featureName
+$ApplicationRoot = Assert-AbsolutePath -Path $ApplicationRoot -Description 'Application root'
+$DataRoot = Assert-AbsolutePath -Path $DataRoot -Description 'Data root'
+$ProgressPath = Assert-AbsolutePath -Path $ProgressPath -Description 'Progress path'
+$LogPath = Assert-AbsolutePath -Path $LogPath -Description 'Log path'
+if ([string]::Equals($ApplicationRoot.TrimEnd('\'), $DataRoot.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Application and data roots must be different.'
+}
+Assert-ManagedDirectory -Path $ApplicationRoot
+if (-not (Test-Path -LiteralPath $DataRoot)) {
+    New-Item -ItemType Directory -Path $DataRoot -Force | Out-Null
+}
+Assert-ManagedDirectory -Path $DataRoot
+if ((Split-Path -Parent $ProgressPath) -ne $DataRoot -or (Split-Path -Parent $LogPath) -ne $DataRoot) {
+    throw 'Installer status and log files must be direct children of the selected data root.'
+}
+Set-Content -LiteralPath $ProgressPath -Value '' -Encoding utf8
+Set-Content -LiteralPath $LogPath -Value '' -Encoding utf8
+$dataMarker = Join-Path $DataRoot '.remote-docker-managed-data'
+$dataMarkerValue = 'remote-docker-managed-data-v1'
+if (Test-Path -LiteralPath $dataMarker -PathType Leaf) {
+    if ((Get-Content -LiteralPath $dataMarker -Raw).Trim() -ne $dataMarkerValue) {
+        throw 'The selected data root contains an invalid ownership marker.'
     }
 }
-
-if ($disabledFeatures.Count -gt 0) {
-    foreach ($featureName in $disabledFeatures) {
-        Enable-WindowsOptionalFeature -Online -FeatureName $featureName -All -NoRestart | Out-Null
-    }
-    [ordered]@{
-        state = 'reboot_required'
-        enabled_features = $disabledFeatures
-    } | ConvertTo-Json -Compress
-    exit 0
+else {
+    Set-Content -LiteralPath $dataMarker -Value $dataMarkerValue -Encoding ascii
 }
 
-if ($null -eq (Get-Command 'wsl.exe' -ErrorAction SilentlyContinue)) {
-    throw 'WSL features are enabled, but wsl.exe is unavailable. Install the current WSL runtime and retry.'
+$desktopExecutable = Join-Path $ApplicationRoot 'RemoteDocker.exe'
+$rootfsPath = Join-Path $ApplicationRoot 'assets\remote-docker-rootfs.tar.zst'
+$rootfsChecksumPath = "$rootfsPath.sha256"
+$distroRoot = Join-Path $DataRoot 'wsl'
+if (-not (Test-Path -LiteralPath $desktopExecutable -PathType Leaf)) {
+    throw "Remote Docker executable was not found at '$desktopExecutable'."
 }
 
-& wsl.exe --version *> $null
-if ($LASTEXITCODE -ne 0) {
-    Invoke-External -FilePath 'wsl.exe' -ArgumentList @('--update', '--web-download') -Description 'WSL update'
-}
-
-$distroExists = Test-ManagedDistro
-$firstBootRequired = -not $distroExists
-$distroRoot = Join-Path $installRoot 'wsl'
-
-if ($distroExists) {
-    $managedMetadataProbe = 'if [ -f /etc/remote-docker/managed.json ]; then cat /etc/remote-docker/managed.json; fi'
-    $metadataProbeArguments = @(
-        '--distribution', $managedDistroName, '--user', 'root',
-        '--exec', '/bin/sh', '-c', $managedMetadataProbe
-    )
-    $installedMetadata = (& wsl.exe @metadataProbeArguments | Out-String).Trim()
-    $firstBootRequired = $installedMetadata -ne $managedMetadata
-}
-
-if (-not (Test-Path -LiteralPath $installRoot)) {
-    New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
-}
-Assert-NoReparseDirectory -Path $installRoot
-
-if (-not $distroExists) {
-    if (-not (Test-Path -LiteralPath $distroRoot)) {
-        New-Item -ItemType Directory -Path $distroRoot -Force | Out-Null
+try {
+    Write-RemoteDockerProvisionStatus -ProgressPath $ProgressPath -Phase 'preflight' -State 'started' -Message 'Checking Windows components.'
+    $requiredFeatures = @('Microsoft-Windows-Subsystem-Linux', 'VirtualMachinePlatform')
+    $disabledFeatures = @()
+    foreach ($featureName in $requiredFeatures) {
+        $feature = Get-WindowsOptionalFeature -Online -FeatureName $featureName
+        if ($feature.State -ne 'Enabled') {
+            $disabledFeatures += $featureName
+        }
     }
-    Assert-NoReparseDirectory -Path $distroRoot
-
-    if (-not (Test-Path -LiteralPath $rootfsChecksumPath -PathType Leaf)) {
-        throw "Rootfs checksum manifest was not found at '$rootfsChecksumPath'."
-    }
-    $rootfsSha256 = ((Get-Content -LiteralPath $rootfsChecksumPath -Raw).Trim() -split '\s+')[0]
-    if ($rootfsSha256 -notmatch '^[A-Fa-f0-9]{64}$') {
-        throw "Rootfs checksum manifest at '$rootfsChecksumPath' is invalid."
+    if ($disabledFeatures.Count -gt 0) {
+        foreach ($featureName in $disabledFeatures) {
+            Enable-WindowsOptionalFeature -Online -FeatureName $featureName -All -NoRestart | Out-Null
+        }
+        Write-RemoteDockerProvisionStatus -ProgressPath $ProgressPath -Phase 'preflight' -State 'reboot_required' -Message 'Windows components require a reboot.'
+        Write-InstallLog -Message 'Windows components enabled; reboot required.'
+        [Environment]::Exit(3010)
     }
 
-    $resolvedRootfs = (Resolve-Path -LiteralPath $rootfsPath -ErrorAction Stop).Path
-    if (-not [string]::Equals($resolvedRootfs, $rootfsPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "Resolved rootfs path does not match the packaged path '$rootfsPath'."
+    if ($null -eq (Get-Command 'wsl.exe' -ErrorAction SilentlyContinue)) {
+        throw 'WSL features are enabled, but wsl.exe is unavailable.'
     }
-    $actualHash = (Get-FileHash -LiteralPath $resolvedRootfs -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actualHash -ne $rootfsSha256.ToLowerInvariant()) {
-        throw "Rootfs SHA-256 mismatch. Expected $($rootfsSha256.ToLowerInvariant()), got $actualHash."
+    & wsl.exe --version *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Invoke-External -FilePath 'wsl.exe' -ArgumentList @('--update', '--web-download') -Description 'WSL update' | Out-Null
+    }
+    Write-RemoteDockerProvisionStatus -ProgressPath $ProgressPath -Phase 'preflight' -State 'completed' -Message 'Windows is ready.'
+
+    Write-RemoteDockerProvisionStatus -ProgressPath $ProgressPath -Phase 'wsl' -State 'started' -Message 'Preparing managed WSL environment.'
+    $distroExists = Test-ManagedDistro
+    if (-not $distroExists) {
+        if (-not (Test-Path -LiteralPath $distroRoot)) {
+            New-Item -ItemType Directory -Path $distroRoot -Force | Out-Null
+        }
+        Assert-ManagedDirectory -Path $DataRoot
+        Assert-ManagedDirectory -Path $distroRoot
+        if (-not (Test-Path -LiteralPath $rootfsChecksumPath -PathType Leaf)) {
+            throw 'Rootfs checksum manifest was not found.'
+        }
+        $rootfsSha256 = ((Get-Content -LiteralPath $rootfsChecksumPath -Raw).Trim() -split '\s+')[0]
+        if ($rootfsSha256 -notmatch '^[A-Fa-f0-9]{64}$') {
+            throw 'Rootfs checksum manifest is invalid.'
+        }
+        $resolvedRootfs = (Resolve-Path -LiteralPath $rootfsPath -ErrorAction Stop).Path
+        if (-not [string]::Equals($resolvedRootfs, $rootfsPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Resolved rootfs path does not match the packaged path.'
+        }
+        $actualHash = (Get-FileHash -LiteralPath $resolvedRootfs -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualHash -ne $rootfsSha256.ToLowerInvariant()) {
+            throw 'Rootfs SHA-256 verification failed.'
+        }
+        Invoke-External -FilePath 'wsl.exe' -ArgumentList @(
+            '--import', $managedDistroName, $distroRoot, $resolvedRootfs, '--version', '2'
+        ) -Description 'Managed WSL import' | Out-Null
     }
 
-    Invoke-External -FilePath 'wsl.exe' -ArgumentList @(
-        '--import', $managedDistroName, $distroRoot, $resolvedRootfs, '--version', '2'
-    ) -Description 'Managed WSL import'
-}
-
-if ($firstBootRequired) {
     $firstBoot = @(
         'set -eu'
         'install -d -m 0755 /etc/remote-docker'
-        'systemctl daemon-reload'
-        'systemctl disable ssh.socket ssh.service syncthing@remote-docker.service remote-docker.target >/dev/null 2>&1 || true'
+        'systemctl --root=/ disable docker.service containerd.service ssh.socket ssh.service syncthing@remote-docker.service remote-docker.target >/dev/null 2>&1 || true'
         "printf '%s\n' '$managedMetadata' > /etc/remote-docker/managed.json.tmp"
         'chmod 0644 /etc/remote-docker/managed.json.tmp'
         'mv -f /etc/remote-docker/managed.json.tmp /etc/remote-docker/managed.json'
     ) -join "`n"
     Invoke-External -FilePath 'wsl.exe' -ArgumentList @(
         '--distribution', $managedDistroName, '--user', 'root', '--exec', '/bin/sh', '-c', $firstBoot
-    ) -Description 'Managed WSL first boot'
-}
+    ) -Description 'Managed WSL first boot' | Out-Null
+    Write-RemoteDockerProvisionStatus -ProgressPath $ProgressPath -Phase 'wsl' -State 'completed' -Message 'Managed WSL environment is ready.'
 
-if (-not (Test-Path -LiteralPath $agentExecutable -PathType Leaf)) {
-    throw "Windows Agent executable was not found at '$agentExecutable'."
-}
+    Write-RemoteDockerProvisionStatus -ProgressPath $ProgressPath -Phase 'docker' -State 'started' -Message 'Installing the managed Docker helper.'
+    Invoke-External -FilePath $desktopExecutable -ArgumentList @('--prepare-wsl') -Description 'Managed WSL identity preparation' | Out-Null
+    Invoke-External -FilePath 'wsl.exe' -ArgumentList @(
+        '--distribution', $managedDistroName, '--user', 'root', '--exec',
+        '/usr/local/bin/remote-docker-remote', 'runtime-status'
+    ) -Description 'Managed WSL health check' | Out-Null
+    Write-RemoteDockerProvisionStatus -ProgressPath $ProgressPath -Phase 'docker' -State 'completed' -Message 'Docker environment is ready and stopped.'
 
-Invoke-External -FilePath $agentExecutable -ArgumentList @('--prepare-wsl') -Description 'Managed WSL identity preparation'
-Invoke-External -FilePath 'wsl.exe' -ArgumentList @(
-    '--distribution', $managedDistroName, '--user', 'root', '--exec',
-    '/usr/local/bin/remote-docker-remote', 'runtime-status'
-) -Description 'Managed WSL health check'
-
-$firewallRules = @(
-    @{ Name = 'RemoteDocker.Managed.SSH'; DisplayName = 'Remote Docker Managed SSH'; Port = $SshBridgePort },
-    @{ Name = 'RemoteDocker.Managed.Syncthing'; DisplayName = 'Remote Docker Managed Syncthing'; Port = $SyncthingBridgePort }
-)
-foreach ($rule in $firewallRules) {
-    $existingRule = Get-NetFirewallRule -Name $rule.Name -ErrorAction SilentlyContinue
-    if ($null -ne $existingRule) {
-        if ($existingRule.Group -ne $firewallRuleGroup) {
-            throw "Refusing to replace the foreign firewall rule '$($rule.Name)'."
-        }
-        Remove-NetFirewallRule -InputObject $existingRule
-    }
-    New-NetFirewallRule `
-        -Name $rule.Name `
-        -DisplayName $rule.DisplayName `
-        -Group $firewallRuleGroup `
-        -Direction Inbound `
-        -Action Allow `
-        -Program $agentExecutable `
-        -Protocol TCP `
-        -LocalPort $rule.Port `
-        -Profile Private `
-        -RemoteAddress LocalSubnet | Out-Null
-}
-
-$agentRunning = @(
-    Get-Process -Name 'RemoteDockerAgent' -ErrorAction SilentlyContinue |
-        Where-Object {
-            try {
-                $null -ne $_.Path -and [string]::Equals(
-                    [System.IO.Path]::GetFullPath($_.Path),
-                    $agentExecutable,
-                    [System.StringComparison]::OrdinalIgnoreCase
-                )
-            } catch {
-                $false
+    Write-RemoteDockerProvisionStatus -ProgressPath $ProgressPath -Phase 'firewall' -State 'started' -Message 'Restricting access to the private local network.'
+    $firewallRules = @(
+        @{ Name = 'RemoteDocker.Managed.SSH'; DisplayName = 'Remote Docker Managed SSH'; Port = $SshBridgePort },
+        @{ Name = 'RemoteDocker.Managed.Syncthing'; DisplayName = 'Remote Docker Managed Syncthing'; Port = $SyncthingBridgePort }
+    )
+    foreach ($rule in $firewallRules) {
+        $existingRule = Get-NetFirewallRule -Name $rule.Name -ErrorAction SilentlyContinue
+        if ($null -ne $existingRule) {
+            if ($existingRule.Group -ne $firewallRuleGroup) {
+                throw "Refusing to replace the foreign firewall rule '$($rule.Name)'."
             }
+            Remove-NetFirewallRule -InputObject $existingRule
         }
-).Count -gt 0
-if (-not $agentRunning) {
-    $startedAgent = Start-Process `
-        -FilePath $agentExecutable `
-        -WorkingDirectory (Split-Path -Parent $agentExecutable) `
-        -WindowStyle Hidden `
-        -PassThru
-    Start-Sleep -Milliseconds 500
-    if ($startedAgent.HasExited) {
-        throw 'Windows Agent did not remain running after provisioning.'
+        New-NetFirewallRule `
+            -Name $rule.Name `
+            -DisplayName $rule.DisplayName `
+            -Group $firewallRuleGroup `
+            -Direction Inbound `
+            -Action Allow `
+            -Program $desktopExecutable `
+            -Protocol TCP `
+            -LocalPort $rule.Port `
+            -Profile Private `
+            -RemoteAddress LocalSubnet | Out-Null
     }
-}
+    Write-RemoteDockerProvisionStatus -ProgressPath $ProgressPath -Phase 'firewall' -State 'completed' -Message 'Private network access is configured.'
 
-[ordered]@{
-    state = $(if ($distroExists) { 'already-ready' } else { 'ready' })
-    distro = $managedDistroName
-    ssh_bridge_port = $SshBridgePort
-    syncthing_bridge_port = $SyncthingBridgePort
-} | ConvertTo-Json -Compress
+    Invoke-External -FilePath 'wsl.exe' -ArgumentList @(
+        '--distribution', $managedDistroName, '--user', 'root', '--exec', '/usr/bin/systemctl', 'stop', 'remote-docker.target'
+    ) -Description 'Managed runtime stop' -IgnoreFailure | Out-Null
+    Invoke-External -FilePath 'wsl.exe' -ArgumentList @('--terminate', $managedDistroName) -Description 'Managed WSL shutdown' -IgnoreFailure | Out-Null
+    Write-RemoteDockerProvisionStatus -ProgressPath $ProgressPath -Phase 'complete' -State 'completed' -Message 'Remote Docker is installed and stopped.'
+    Write-InstallLog -Message 'Provisioning completed successfully.'
+    [ordered]@{ state = 'ready'; distro = $managedDistroName; data_root = $DataRoot } | ConvertTo-Json -Compress
+}
+catch {
+    $reason = $_.Exception.Message -replace '[\r\n]+', ' '
+    Write-InstallLog -Message "Provisioning failed: $reason"
+    Write-RemoteDockerProvisionStatus -ProgressPath $ProgressPath -Phase 'complete' -State 'failed' -Message $reason
+    throw $reason
+}
