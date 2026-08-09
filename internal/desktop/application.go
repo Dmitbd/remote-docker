@@ -53,6 +53,7 @@ type Application struct {
 	checks               []localapi.DoctorCheck
 	resources            metrics.Sample
 	lastDiagnosticsPoll  time.Time
+	actionError          string
 }
 
 func NewApplication(options ApplicationOptions) (*Application, error) {
@@ -267,6 +268,11 @@ func (a *Application) connectionBody(model ViewModel, snapshot lifecycle.Snapsho
 	detail := widget.NewLabel(model.Detail)
 	detail.Wrapping = fyne.TextWrapWord
 	body := container.NewVBox(headline, detail)
+	if a.actionError != "" {
+		actionError := widget.NewLabel(a.actionError)
+		actionError.TextStyle = fyne.TextStyle{Bold: true}
+		body.Add(actionError)
+	}
 	if model.Notice != "" {
 		notice := widget.NewLabel(model.Notice)
 		notice.TextStyle = fyne.TextStyle{Bold: true}
@@ -281,16 +287,29 @@ func (a *Application) connectionBody(model ViewModel, snapshot lifecycle.Snapsho
 		body.Add(code)
 	}
 	if snapshot.State == lifecycle.StateSearching {
-		if len(a.candidates) == 0 {
+		rows := BuildDeviceRows(snapshot, a.candidates)
+		if len(rows) == 0 {
 			body.Add(widget.NewLabel("Пока ничего не найдено"))
 		}
-		for _, candidate := range a.candidates {
-			candidate := candidate
-			name := widget.NewLabel(candidate.Name)
+		for _, row := range rows {
+			row := row
+			name := widget.NewLabel(row.Name + " · " + row.Status)
 			name.TextStyle = fyne.TextStyle{Bold: true}
-			connect := widget.NewButton("Подключиться", func() { a.perform(ActionConnect, candidate.ID) })
-			connect.Importance = widget.HighImportance
-			body.Add(container.NewBorder(nil, nil, name, connect))
+			actions := container.NewHBox()
+			for _, action := range row.Actions {
+				action := action
+				button := widget.NewButton(action.Label, func() { a.perform(action.ID, row.ID) })
+				if !action.Enabled {
+					button.Disable()
+				}
+				if action.Destructive {
+					button.Importance = widget.DangerImportance
+				} else {
+					button.Importance = widget.HighImportance
+				}
+				actions.Add(button)
+			}
+			body.Add(container.NewBorder(nil, nil, name, actions))
 		}
 	}
 	if model.Countdown != "" {
@@ -376,11 +395,15 @@ func (a *Application) diagnosticsBody() *fyne.Container {
 }
 
 func (a *Application) perform(action ActionID, value string) {
+	a.clearActionError()
+	fyne.Do(func() { a.render(a.snapshot()) })
 	go func() {
 		if err := a.controller.Perform(context.Background(), action, value); err != nil {
-			fyne.Do(func() { a.status.SetText("Нужна помощь") })
+			a.setActionError(err)
+			fyne.Do(func() { a.render(a.snapshot()) })
 			return
 		}
+		a.clearActionError()
 		if action == ActionQuit {
 			if a.onQuit != nil {
 				a.onQuit()
@@ -388,6 +411,48 @@ func (a *Application) perform(action ActionID, value string) {
 			fyne.Do(func() { a.app.Quit() })
 		}
 	}()
+}
+
+func (a *Application) setActionError(err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.actionError = safeActionMessage(err)
+}
+
+func (a *Application) clearActionError() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.actionError = ""
+}
+
+func safeActionMessage(err error) string {
+	if errors.Is(err, ErrConnectionLimit) {
+		return "Можно сохранить только одно доверенное устройство. Сначала забудьте сохранённый компьютер."
+	}
+	var public *localapi.PublicError
+	if errors.As(err, &public) {
+		return safeLocalAPIErrorMessage(public.Code)
+	}
+	var remote *localapi.RemoteError
+	if errors.As(err, &remote) {
+		return safeLocalAPIErrorMessage(remote.Code)
+	}
+	return "Не удалось выполнить действие. Попробуйте снова."
+}
+
+func safeLocalAPIErrorMessage(code localapi.ErrorCode) string {
+	switch code {
+	case localapi.ErrorNeedsAction:
+		return "Действие сейчас недоступно. Проверьте состояние подключения."
+	case localapi.ErrorInvalidRequest:
+		return "Не удалось выполнить действие. Проверьте выбранное устройство."
+	case localapi.ErrorPeerForbidden:
+		return "Подключение отклонено. Проверьте, что это доверенное устройство."
+	case localapi.ErrorUnavailable:
+		return "Remote Docker сейчас недоступен. Попробуйте снова."
+	default:
+		return "Не удалось выполнить действие. Попробуйте снова."
+	}
 }
 
 func (a *Application) configureTray() {

@@ -54,6 +54,9 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 		}
 		return c.actionResult(), nil
 	case localapi.MethodPairStart:
+		if connectionLimitOccupied(c.supervisor.Snapshot()) {
+			return nil, needsAction("the trusted-device limit is occupied")
+		}
 		result, err := c.delegate(ctx, method, raw)
 		if err != nil {
 			return nil, err
@@ -66,6 +69,12 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 			return nil, err
 		}
 		return started, nil
+	case localapi.MethodConnect:
+		snapshot := c.supervisor.Snapshot()
+		if snapshot.TrustedPeers < 1 || snapshot.Peer == nil {
+			return nil, needsAction("trusted device was not found")
+		}
+		return c.delegate(ctx, method, raw)
 	case localapi.MethodPairStatus, localapi.MethodPairApprove, localapi.MethodPairReject, localapi.MethodPairCancel:
 		result, err := c.delegate(ctx, method, raw)
 		if err != nil {
@@ -127,6 +136,14 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 	default:
 		return c.delegate(ctx, method, raw)
 	}
+}
+
+func connectionLimitOccupied(snapshot lifecycle.Snapshot) bool {
+	limit := snapshot.ConnectionLimit
+	if limit <= 0 {
+		limit = 1
+	}
+	return snapshot.TrustedPeers >= limit
 }
 
 func (c *DesktopController) startPairing(started localapi.PairStartResult) error {

@@ -107,14 +107,14 @@ func TestBuildDeviceRowsShowsActionsByDeviceKind(t *testing.T) {
 	}
 	if got := deviceRowByID(t, rows, "saved"); got.Status != "Сохранено · доступно" || got.Kind != "saved" ||
 		!reflect.DeepEqual(got.Actions, []Action{
-			enabledAction(ActionConnect, "Подключиться"),
+			enabledAction(ActionConnectTrusted, "Подключиться"),
 			{ID: ActionForgetDevice, Label: "Забыть", Enabled: true, Destructive: true},
 		}) {
 		t.Fatalf("saved available row = %#v", got)
 	}
 	if got := deviceRowByID(t, rows, "offline"); got.Status != "Сохранено · недоступно" || got.Kind != "saved" ||
 		!reflect.DeepEqual(got.Actions, []Action{
-			{ID: ActionConnect, Label: "Подключиться", Enabled: false},
+			{ID: ActionConnectTrusted, Label: "Подключиться", Enabled: false},
 			{ID: ActionForgetDevice, Label: "Забыть", Enabled: true, Destructive: true},
 		}) {
 		t.Fatalf("saved unavailable row = %#v", got)

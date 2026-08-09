@@ -12,6 +12,8 @@ import (
 
 type SnapshotProvider func() lifecycle.Snapshot
 
+var ErrConnectionLimit = errors.New("trusted-device connection limit is occupied")
+
 type Controller struct {
 	handler  localapi.Handler
 	snapshot SnapshotProvider
@@ -24,6 +26,9 @@ func NewController(handler localapi.Handler, snapshot SnapshotProvider) *Control
 func (c *Controller) Perform(ctx context.Context, action ActionID, value string) error {
 	if c == nil || c.handler == nil || c.snapshot == nil {
 		return errors.New("desktop controller is unavailable")
+	}
+	if action == ActionConnect && connectionLimitOccupied(c.snapshot()) {
+		return ErrConnectionLimit
 	}
 	method, params, ok := c.resolve(action, value)
 	if !ok {
@@ -127,6 +132,8 @@ func (c *Controller) resolve(action ActionID, value string) (localapi.Method, an
 		return localapi.MethodSearchStop, nil, true
 	case ActionConnect:
 		return localapi.MethodPairStart, localapi.PairStartParams{Device: strings.TrimSpace(value)}, strings.TrimSpace(value) != ""
+	case ActionConnectTrusted:
+		return localapi.MethodConnect, nil, strings.TrimSpace(value) != ""
 	case ActionApprovePair, ActionRejectPair, ActionCancelPair:
 		snapshot := c.snapshot()
 		if snapshot.Pairing == nil || snapshot.Pairing.SessionID == "" {
@@ -144,7 +151,7 @@ func (c *Controller) resolve(action ActionID, value string) (localapi.Method, an
 	case ActionDisconnect:
 		return localapi.MethodDisconnect, localapi.DisconnectParams{}, true
 	case ActionForgetDevice:
-		return localapi.MethodForgetDevice, localapi.ForgetDeviceParams{}, true
+		return localapi.MethodForgetDevice, localapi.ForgetDeviceParams{DeviceID: strings.TrimSpace(value)}, true
 	case ActionAddWorkspace:
 		value = strings.TrimSpace(value)
 		return localapi.MethodWorkspaceAdd, localapi.WorkspaceAddParams{Path: value}, value != ""
@@ -155,4 +162,12 @@ func (c *Controller) resolve(action ActionID, value string) (localapi.Method, an
 	default:
 		return "", nil, false
 	}
+}
+
+func connectionLimitOccupied(snapshot lifecycle.Snapshot) bool {
+	limit := snapshot.ConnectionLimit
+	if limit <= 0 {
+		limit = 1
+	}
+	return snapshot.TrustedPeers >= limit
 }

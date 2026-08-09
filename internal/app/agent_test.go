@@ -104,6 +104,24 @@ func TestAgentReconnectRefreshesPersistedPairingBeforeInfrastructureFailure(t *t
 	}
 }
 
+func TestAgentHandlerReconnectsTrustedDeviceForConnectMethod(t *testing.T) {
+	events := []string{}
+	agent := NewAgent(
+		&sequenceObserver{observations: []AgentObservation{{
+			Paired: true, PinnedSSH: true, DockerPing: true, SyncthingConnected: true,
+		}}},
+		&recordingRestorer{events: &events},
+		&recordingController{},
+	)
+
+	if _, err := agent.Handle(context.Background(), localapi.MethodConnect, nil); err != nil {
+		t.Fatalf("Handle(Connect) error = %v", err)
+	}
+	if want := []string{"event-stream", "relays"}; !reflect.DeepEqual(events, want) {
+		t.Fatalf("connect events = %#v, want %#v", events, want)
+	}
+}
+
 func TestAgentHandlerRoutesAllControlOperations(t *testing.T) {
 	controller := &recordingController{}
 	agent := NewAgent(&sequenceObserver{}, nil, controller)

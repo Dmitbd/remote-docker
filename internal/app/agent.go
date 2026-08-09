@@ -166,6 +166,9 @@ func (a *Agent) Handle(ctx context.Context, method localapi.Method, params json.
 		status := a.Status()
 		return localapi.StatusResult{State: string(status.State), Paired: status.Paired, Message: status.Message}, nil
 	}
+	if method == localapi.MethodConnect {
+		return nil, a.Reconnect(ctx)
+	}
 	if a == nil || a.controller == nil {
 		return nil, &localapi.PublicError{Code: localapi.ErrorUnavailable, Message: "agent operation is unavailable"}
 	}

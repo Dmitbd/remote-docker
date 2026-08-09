@@ -131,6 +131,48 @@ func TestDesktopControllerStartsDisplayOnlyPairingFromMacSearch(t *testing.T) {
 	}
 }
 
+func TestDesktopControllerRejectsNewPairBeforeDelegatingWhenLimitIsFull(t *testing.T) {
+	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "saved", Name: "Saved Windows"}))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := &recordingLocalHandler{}
+	controller, _ := NewDesktopController(supervisor, fallback)
+	_, _ = controller.Handle(context.Background(), localapi.MethodEnable, nil)
+	_, _ = controller.Handle(context.Background(), localapi.MethodSearchStart, nil)
+
+	_, err = controller.Handle(context.Background(), localapi.MethodPairStart, json.RawMessage(`{"device":"new-windows"}`))
+	var public *localapi.PublicError
+	if !errors.As(err, &public) || public.Code != localapi.ErrorNeedsAction {
+		t.Fatalf("PairStart error = %v, want needs_action", err)
+	}
+	if len(fallback.methods) != 0 {
+		t.Fatalf("PairStart delegated methods = %v, want none", fallback.methods)
+	}
+}
+
+func TestDesktopControllerReconnectsSavedDeviceWithoutStartingPairing(t *testing.T) {
+	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "saved", Name: "Saved Windows"}))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := &recordingLocalHandler{}
+	controller, _ := NewDesktopController(supervisor, fallback)
+
+	if _, err := controller.Handle(context.Background(), localapi.MethodConnect, nil); err != nil {
+		t.Fatalf("Connect error = %v", err)
+	}
+	if got := fallback.methods; len(got) != 1 || got[0] != localapi.MethodConnect {
+		t.Fatalf("delegated methods = %v, want [Connect]", got)
+	}
+	snapshot := supervisor.Snapshot()
+	if snapshot.TrustedPeers != 1 || snapshot.Peer == nil || snapshot.Peer.ID != "saved" {
+		t.Fatalf("trusted device changed after reconnect = %#v", snapshot)
+	}
+}
+
 func TestDesktopControllerRequiresWindowsApprovalBeforeCompletingPairing(t *testing.T) {
 	machine := newLifecycleMachine(t, lifecycle.RoleWindowsHost)
 	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())

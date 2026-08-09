@@ -34,6 +34,35 @@ func TestControllerMapsStableActionsToOwnerOnlyMethods(t *testing.T) {
 	}
 }
 
+func TestControllerRejectsNewPairBeforeDelegatingWhenLimitIsFull(t *testing.T) {
+	handler := &recordingHandler{}
+	controller := NewController(handler, func() lifecycle.Snapshot {
+		return lifecycle.Snapshot{State: lifecycle.StateSearching, TrustedPeers: 1, ConnectionLimit: 1}
+	})
+
+	err := controller.Perform(context.Background(), ActionConnect, "new-windows")
+	if !errors.Is(err, ErrConnectionLimit) {
+		t.Fatalf("Perform(Connect) error = %v, want ErrConnectionLimit", err)
+	}
+	if handler.method != "" {
+		t.Fatalf("Perform(Connect) delegated method = %q, want none", handler.method)
+	}
+}
+
+func TestControllerReconnectsTrustedDeviceWithoutPairStart(t *testing.T) {
+	handler := &recordingHandler{}
+	controller := NewController(handler, func() lifecycle.Snapshot {
+		return lifecycle.Snapshot{TrustedPeers: 1, ConnectionLimit: 1}
+	})
+
+	if err := controller.Perform(context.Background(), ActionConnectTrusted, "saved-windows"); err != nil {
+		t.Fatalf("Perform(ConnectTrusted) error = %v", err)
+	}
+	if handler.method != localapi.MethodConnect {
+		t.Fatalf("Perform(ConnectTrusted) method = %q, want %q", handler.method, localapi.MethodConnect)
+	}
+}
+
 func TestControllerAddsOnlySelectedWorkspacePath(t *testing.T) {
 	handler := &recordingHandler{}
 	controller := NewController(handler, func() lifecycle.Snapshot { return lifecycle.Snapshot{} })

@@ -28,6 +28,7 @@ const (
 	ActionStartSearch  ActionID = "start-search"
 	ActionStopSearch   ActionID = "stop-search"
 	ActionConnect      ActionID = "connect"
+	ActionConnectTrusted ActionID = "connect-trusted"
 	ActionApprovePair  ActionID = "approve-pair"
 	ActionRejectPair   ActionID = "reject-pair"
 	ActionCancelPair   ActionID = "cancel-pair"
@@ -246,11 +247,11 @@ func buildDeviceRow(snapshot lifecycle.Snapshot, candidate localapi.PairingCandi
 	forget := Action{ID: ActionForgetDevice, Label: "Забыть", Enabled: true, Destructive: true}
 	if candidate.Available {
 		row.Status = "Сохранено · доступно"
-		row.Actions = []Action{enabledAction(ActionConnect, "Подключиться"), forget}
+		row.Actions = []Action{enabledAction(ActionConnectTrusted, "Подключиться"), forget}
 		return row
 	}
 	row.Status = "Сохранено · недоступно"
-	row.Actions = []Action{{ID: ActionConnect, Label: "Подключиться", Enabled: false}, forget}
+	row.Actions = []Action{{ID: ActionConnectTrusted, Label: "Подключиться", Enabled: false}, forget}
 	return row
 }
 

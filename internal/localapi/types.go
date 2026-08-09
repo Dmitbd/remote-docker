@@ -22,6 +22,7 @@ const (
 	MethodListDevices     Method = "ListDevices"
 	MethodPairCandidates  Method = "PairCandidates"
 	MethodPairStart       Method = "PairStart"
+	MethodConnect         Method = "Connect"
 	MethodPairStatus      Method = "PairStatus"
 	MethodPairApprove     Method = "PairApprove"
 	MethodPairReject      Method = "PairReject"
@@ -43,7 +44,7 @@ const (
 func (m Method) valid() bool {
 	switch m {
 	case MethodStatus, MethodShowWindow, MethodEnable, MethodPause, MethodSearchStart, MethodSearchStop,
-		MethodListDevices, MethodPairCandidates, MethodPairStart, MethodPairStatus,
+		MethodListDevices, MethodPairCandidates, MethodPairStart, MethodConnect, MethodPairStatus,
 		MethodPairApprove, MethodPairReject, MethodPairCancel,
 		MethodDisconnect, MethodForgetDevice,
 		MethodUnpair, MethodWorkspaceAdd, MethodWorkspaceList,
