@@ -132,9 +132,8 @@ func validate(cfg Config) error {
 		return errors.New("configuration supports only one trusted device")
 	}
 	if cfg.ActiveDevice == "" {
-		if len(cfg.Devices) != 0 {
-			return errors.New("trusted device requires an active device identifier")
-		}
+		// A single dormant public record is tolerated while an old pairing is
+		// being revoked. Only ActiveDevice is trusted by the application.
 		return nil
 	}
 	if _, ok := cfg.Devices[cfg.ActiveDevice]; !ok {
