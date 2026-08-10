@@ -1,0 +1,68 @@
+FROM golang:1.26-bookworm AS remote-builder
+
+WORKDIR /src
+COPY go.mod go.sum ./
+COPY cmd/remote-docker-remote ./cmd/remote-docker-remote
+COPY internal/credentials ./internal/credentials
+COPY internal/metrics ./internal/metrics
+COPY internal/syncer ./internal/syncer
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath -ldflags='-s -w' -o /out/remote-docker-remote ./cmd/remote-docker-remote
+
+FROM ubuntu:24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG SYNCTHING_VERSION=2.1.1
+ARG SYNCTHING_SHA256=0b960a67a0391156c2ca45943ed1ceaad9ae1fc3772d967e6aafc5a7c662565d
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        dbus \
+        dbus-user-session \
+        docker-buildx \
+        docker.io \
+        iproute2 \
+        kmod \
+        openssh-client \
+        openssh-server \
+        sudo \
+        systemd \
+        systemd-sysv \
+        tini \
+        tzdata \
+    && sed -i '/pam_lastlog\.so/d' /etc/pam.d/login \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=syncthing-asset /syncthing-linux-amd64-v2.1.1.tar.gz /tmp/
+
+RUN set -eux; \
+    archive="syncthing-linux-amd64-v${SYNCTHING_VERSION}.tar.gz"; \
+    echo "${SYNCTHING_SHA256}  /tmp/${archive}" | sha256sum --check --strict -; \
+    tar --extract --gzip --file "/tmp/${archive}" --directory /tmp; \
+    install -m 0755 "/tmp/syncthing-linux-amd64-v${SYNCTHING_VERSION}/syncthing" /usr/local/bin/syncthing; \
+    rm -rf "/tmp/${archive}" "/tmp/syncthing-linux-amd64-v${SYNCTHING_VERSION}"
+
+COPY --from=remote-builder /out/remote-docker-remote /usr/local/bin/remote-docker-remote
+COPY packaging/wsl/etc/ /etc/
+COPY packaging/wsl/usr/ /usr/
+
+RUN set -eux; \
+    groupadd --force docker; \
+    useradd --create-home --shell /bin/sh --groups docker remote-docker; \
+    passwd --lock remote-docker; \
+    install -d -m 0700 -o remote-docker -g remote-docker /var/lib/remote-docker; \
+    install -d -m 0700 -o root -g root /var/lib/remote-docker-private; \
+    install -d -m 0700 -o remote-docker -g remote-docker /var/lib/remote-docker/syncthing; \
+    install -d -m 0700 -o remote-docker -g remote-docker /var/lib/remote-docker/syncthing/data; \
+    install -d -m 0700 -o remote-docker -g remote-docker /Users; \
+    install -d -m 0755 /etc/remote-docker; \
+    install -m 0600 -o remote-docker -g remote-docker /dev/null /var/lib/remote-docker/authorized_keys; \
+    printf '%s\n' 'remote-docker-managed-v1' > /etc/remote-docker-release; \
+    chmod 0755 /usr/local/bin/remote-docker-remote /usr/local/libexec/remote-docker/authorized-command; \
+    chmod 0440 /etc/sudoers.d/remote-docker-recovery; \
+    rm -f /etc/ssh/ssh_host_*
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

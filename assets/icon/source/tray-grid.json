@@ -1,0 +1,7 @@
+{
+  "grid": 16,
+  "states": ["paused", "search", "pairing", "connected", "error"],
+  "portal": "near-vertical ring",
+  "macos": "monochrome template with alpha",
+  "windows": "cyan portal with visible state marker"
+}

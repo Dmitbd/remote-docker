@@ -1,0 +1,249 @@
+package provision
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+)
+
+func TestApplyRunsProvisioningInOrder(t *testing.T) {
+	executor := &recordingApplyExecutor{}
+	plan := Plan{Actions: []Action{{Kind: ActionImportDistro}}}
+
+	result := Apply(context.Background(), plan, true, executor)
+
+	if result.State != ApplyReady || result.Err != nil {
+		t.Fatalf("Apply() = %#v, want ready", result)
+	}
+	want := []ApplyStep{
+		StepCreateDataDirectory,
+		StepVerifyRootfsChecksum,
+		StepImportDistro,
+		StepFirstBoot,
+		StepHealthCheck,
+		StepConfigurePrivateFirewall,
+	}
+	if !reflect.DeepEqual(executor.steps, want) {
+		t.Fatalf("steps = %#v, want %#v", executor.steps, want)
+	}
+}
+
+func TestApplyStopsAfterEnablingWSLForReboot(t *testing.T) {
+	executor := &recordingApplyExecutor{}
+	plan := Plan{Actions: []Action{
+		{Kind: ActionEnableWSL, RequiresReboot: true},
+		{Kind: ActionImportDistro},
+	}}
+
+	result := Apply(context.Background(), plan, true, executor)
+
+	if result.State != ApplyRebootRequired || result.Err != nil {
+		t.Fatalf("Apply() = %#v, want reboot required", result)
+	}
+	if want := []ApplyStep{StepEnableWSL}; !reflect.DeepEqual(executor.steps, want) {
+		t.Fatalf("steps = %#v, want %#v", executor.steps, want)
+	}
+}
+
+func TestApplyDoesNotMutateWithoutConfirmationOrWithBlockers(t *testing.T) {
+	tests := []struct {
+		name      string
+		plan      Plan
+		confirmed bool
+		wantErr   error
+	}{
+		{
+			name:      "not confirmed",
+			plan:      Plan{Actions: []Action{{Kind: ActionImportDistro}}},
+			confirmed: false,
+			wantErr:   ErrProvisioningNotConfirmed,
+		},
+		{
+			name: "blocked",
+			plan: Plan{Blockers: []Diagnostic{{
+				Code: DiagnosticVirtualizationDisabled,
+			}}},
+			confirmed: true,
+			wantErr:   ErrProvisioningBlocked,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			executor := &recordingApplyExecutor{}
+			result := Apply(context.Background(), tt.plan, tt.confirmed, executor)
+			if result.State != ApplyFailedRecoverable || !errors.Is(result.Err, tt.wantErr) {
+				t.Fatalf("Apply() = %#v, want recoverable %v", result, tt.wantErr)
+			}
+			if len(executor.steps) != 0 {
+				t.Fatalf("mutating steps executed: %#v", executor.steps)
+			}
+		})
+	}
+}
+
+func TestApplyReportsFailedStepAndStops(t *testing.T) {
+	stepErr := errors.New("firewall unavailable")
+	executor := &recordingApplyExecutor{
+		failStep: StepConfigurePrivateFirewall,
+		err:      stepErr,
+	}
+
+	result := Apply(context.Background(), Plan{}, true, executor)
+
+	if result.State != ApplyFailedRecoverable || result.FailedStep != StepConfigurePrivateFirewall || !errors.Is(result.Err, stepErr) {
+		t.Fatalf("Apply() = %#v", result)
+	}
+	want := []ApplyStep{StepHealthCheck, StepConfigurePrivateFirewall}
+	if !reflect.DeepEqual(executor.steps, want) {
+		t.Fatalf("steps = %#v, want %#v", executor.steps, want)
+	}
+}
+
+func TestProvisionScriptKeepsConfirmationAndMutationOrder(t *testing.T) {
+	script := readWindowsScript(t, "provision.ps1")
+	ordered := []string{
+		"if (-not $ConfirmProvisioning)",
+		"Assert-ManagedDirectory -Path $ApplicationRoot",
+		"New-Item -ItemType Directory",
+		"Enable-WindowsOptionalFeature",
+		"Get-FileHash",
+		"'--import'",
+		"$firstBoot = @(",
+		"Managed WSL health check",
+		"New-NetFirewallRule",
+	}
+	last := -1
+	for _, fragment := range ordered {
+		position := strings.Index(script, fragment)
+		if position < 0 {
+			t.Fatalf("provision.ps1 is missing %q", fragment)
+		}
+		if position <= last {
+			t.Fatalf("provision.ps1 fragment %q is out of order", fragment)
+		}
+		last = position
+	}
+	for _, fragment := range []string{"-Program $desktopExecutable", "-Profile Private", "-RemoteAddress LocalSubnet"} {
+		if !strings.Contains(script, fragment) {
+			t.Fatalf("provision.ps1 is missing firewall restriction %q", fragment)
+		}
+	}
+	for _, fragment := range []string{"New-ScheduledTask", "Register-ScheduledTask", "RunLevel Highest"} {
+		if strings.Contains(script, fragment) {
+			t.Fatalf("provision.ps1 contains obsolete elevated startup registration %q", fragment)
+		}
+	}
+}
+
+func TestProvisionScriptReportsEarlyValidationFailuresToInstaller(t *testing.T) {
+	script := readWindowsScript(t, "provision.ps1")
+
+	tryBlock := strings.Index(script, "try {")
+	confirmation := strings.Index(script, "if (-not $ConfirmProvisioning)")
+	rootValidation := strings.Index(script, "Assert-ManagedDirectory -Path $ApplicationRoot")
+	catchBlock := strings.LastIndex(script, "catch {")
+	stderr := strings.Index(script, "[Console]::Error.WriteLine($reason)")
+	exit := strings.Index(script, "exit 1")
+	if tryBlock < 0 || confirmation <= tryBlock || rootValidation <= confirmation || catchBlock <= rootValidation || stderr <= catchBlock || exit <= stderr {
+		t.Fatal("provision.ps1 does not report early validation failures through one installer-visible error boundary")
+	}
+	for _, fragment := range []string{"$logReady = $false", "$progressReady = $false"} {
+		if !strings.Contains(script, fragment) {
+			t.Fatalf("provision.ps1 is missing guarded failure state %q", fragment)
+		}
+	}
+	if strings.Contains(script, "throw $reason") {
+		t.Fatal("provision.ps1 rethrows the failure instead of returning one concise installer-visible error")
+	}
+}
+
+func TestProvisionFirstBootIsLFStableAndIdempotentAfterPartialImport(t *testing.T) {
+	script := readWindowsScript(t, "provision.ps1")
+
+	for _, fragment := range []string{
+		"$distroExists = Test-ManagedDistro",
+		"if (-not $distroExists)",
+		"$firstBoot = @(",
+		") -join \"`n\"",
+		"managed.json.tmp",
+		"mv -f /etc/remote-docker/managed.json.tmp /etc/remote-docker/managed.json",
+		"/etc/remote-docker/managed.json",
+	} {
+		if !strings.Contains(script, fragment) {
+			t.Fatalf("provision.ps1 is missing recoverable LF-only first boot fragment %q", fragment)
+		}
+	}
+	if strings.Contains(script, "$firstBoot = @'") {
+		t.Fatal("provision.ps1 first boot uses a source-newline-dependent here-string")
+	}
+
+	firstBoot := strings.Index(script, "$firstBoot = @(")
+	invoke := strings.Index(script, "-Description 'Managed WSL first boot'")
+	if firstBoot < 0 || invoke <= firstBoot {
+		t.Fatal("provision.ps1 does not invoke the recoverable first boot script")
+	}
+}
+
+func TestProvisionRecreatesManagedMetadataWithoutDependingOnItsPresence(t *testing.T) {
+	script := readWindowsScript(t, "provision.ps1")
+
+	for _, fragment := range []string{
+		"$distroExists = Test-ManagedDistro",
+		"$firstBoot = @(",
+		"install -d -m 0755 /etc/remote-docker",
+		"managed.json.tmp",
+		"-Description 'Managed WSL first boot'",
+	} {
+		if !strings.Contains(script, fragment) {
+			t.Fatalf("provision.ps1 is missing idempotent metadata preparation fragment %q", fragment)
+		}
+	}
+	if strings.Contains(script, "managedMetadataProbe") || strings.Contains(script, "firstBootRequired") {
+		t.Fatal("provision.ps1 must not require optional managed metadata before idempotent first boot")
+	}
+}
+
+func TestUninstallPreservesDataUnlessSeparatelyConfirmed(t *testing.T) {
+	script := readWindowsScript(t, "uninstall.ps1")
+	preserve := strings.Index(script, "if (-not $DeleteData)")
+	exactPhrase := strings.Index(script, "$DataRemovalConfirmation -ne 'DELETE-REMOTE-DOCKER-DATA'")
+	ownership := strings.Index(script, "Managed data ownership marker is missing or invalid")
+	confirm := strings.Index(script, "$PSCmdlet.ShouldProcess")
+	deleteDistro := strings.Index(script, "Invoke-Wsl -ArgumentList @('--unregister', $managedDistroName)")
+	deleteTree := strings.Index(script, "Remove-Item -LiteralPath $distroRoot -Recurse -Force")
+	if preserve < 0 || exactPhrase <= preserve || ownership <= exactPhrase || confirm <= ownership || deleteDistro <= confirm || deleteTree <= confirm {
+		t.Fatalf("uninstall.ps1 does not preserve and separately confirm data deletion")
+	}
+	if strings.Contains(script, "Remove-Item -LiteralPath $ApplicationRoot -Recurse") {
+		t.Fatal("uninstall.ps1 must not recursively remove the selected application root")
+	}
+}
+
+func readWindowsScript(t *testing.T, name string) string {
+	t.Helper()
+	path := filepath.Join("..", "..", "packaging", "windows", "scripts", name)
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(contents)
+}
+
+type recordingApplyExecutor struct {
+	steps    []ApplyStep
+	failStep ApplyStep
+	err      error
+}
+
+func (e *recordingApplyExecutor) Run(_ context.Context, step ApplyStep) error {
+	e.steps = append(e.steps, step)
+	if step == e.failStep {
+		return e.err
+	}
+	return nil
+}

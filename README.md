@@ -1,93 +1,93 @@
 # Remote Docker
 
-Run Docker on a Windows PC while keeping your development workflow on a Mac.
+Remote Docker lets a Mac use Docker Engine on a Windows PC in the same private network. Containers, images, volumes, databases, build cache, CPU load, and most Docker memory usage stay on Windows. The editor, terminal, source code, Git, and ordinary development tools stay on the Mac.
 
-> Status: early development. The architecture is defined, but the first working release is not available yet.
+> Status: pre-release development. Packages are intentionally unsigned and must be verified before installation.
 
-## Why
+## What it feels like
 
-Docker Desktop can consume a significant amount of memory and CPU on a development Mac. Remote Docker moves containers, image builds, databases, volumes, and build cache to a second Windows PC connected to the same local network.
-
-Your editor, terminal, source code, Git, tests, and local development tools stay on the Mac. Standard Docker commands use the Windows machine:
+After the computers are paired, Docker commands on the Mac keep their normal syntax:
 
 ```bash
 docker compose up -d
 docker ps
-docker compose exec api ./migrate
-docker logs -f api
+docker compose exec app sh
+docker logs -f app
 docker compose down
 ```
 
+Only Docker work is redirected. Shell commands, editors, tests, Git operations, and source files remain local to the Mac.
+
 ## How it works
 
-Remote Docker consists of two paired applications:
-
-- a lightweight macOS agent that provides Docker CLI connectivity, source synchronization, and local port forwarding;
-- a Windows agent that manages a dedicated WSL2 environment with Docker Engine.
-
 ```text
-Mac                                      Windows PC
------------------------------------      --------------------------------
-Editor, terminal, Git                    Windows agent
-Docker CLI and Compose             <->   Managed WSL2 environment
-Source synchronization                   Docker Engine and BuildKit
-localhost port forwarding                Containers, images and volumes
+Mac client                              Windows host
+-----------------------------------     -----------------------------------
+Editor, terminal and source files       Remote Docker desktop application
+Docker CLI and Compose             <->  Dedicated managed WSL2 environment
+Selected workspace synchronization      Docker Engine, images and volumes
+localhost port access                   Containers and build cache
 ```
 
-Only Docker operations are remote. Other commands continue to run normally on the Mac.
+The Mac application has the fixed **Client** role. The Windows application has the fixed **Docker host** role. The first version supports one trusted Mac-to-Windows pair.
 
-## Planned setup
+Source directories selected as workspaces are synchronized into the Linux filesystem inside the managed WSL2 environment. Heavy Docker data is never synchronized back to the Mac. Published TCP ports are relayed to the same `localhost` ports on the Mac.
 
-1. Install the Windows agent.
-2. Let it create and validate a dedicated WSL2 environment with Docker Engine.
-3. Install the macOS agent and Docker CLI integration.
-4. Pair both computers with a one-time code while they are on the same network.
-5. Select the local project directories that may be used as bind mounts.
-6. Continue using standard `docker` and `docker compose` commands.
+## Normal setup flow
 
-Docker Desktop is not required on either computer after the remote environment is ready.
+1. Install Remote Docker on Windows with the visible Setup wizard. Choose the application and data locations and let Setup prepare WSL2.
+2. Install Remote Docker on the Mac.
+3. Start both applications manually. Both initially show **Paused** and do not start Docker work by themselves.
+4. On Windows, choose **Start hosting**. On the Mac, choose **Search for a PC**.
+5. Select the expected Windows PC, compare the device names and six-digit code shown on both screens, then approve the request on Windows.
+6. Add the Mac source directories that Docker may use as bind mounts.
+7. Run normal `docker` and `docker compose` commands in the Mac terminal.
 
-## Data model
+There is no application autostart on either computer. After a Windows reboot, launch Remote Docker manually and start hosting again. Wi-Fi interruptions can reconnect automatically while both applications remain running.
 
-Project directories used as bind mounts are synchronized between the Mac and the managed WSL2 environment. This allows source changes to reach containers and files generated inside containers to return to the Mac.
+Detailed steps are in [Installation](docs/INSTALL.md). Recovery guidance is in [Troubleshooting](docs/TROUBLESHOOTING.md).
 
-Heavy Docker data remains on Windows:
+## Application states
 
-- images and container layers;
-- named volumes and databases;
-- BuildKit cache;
-- container writable data.
+- **Paused**: the application is open, but discovery, hosting, synchronization, relays, and managed Docker work are stopped.
+- **Searching / Waiting for connection**: the selected role is active and the other computer can find or connect to it.
+- **Pairing**: both screens show the participants and the same six-digit comparison code; Windows can approve or reject.
+- **Connected**: both applications show the peer, roles, connection state, and synchronized workspaces.
+- **Disconnected**: both sides explain that the link ended and which side initiated it when known.
 
-Published TCP ports are forwarded back to the same `localhost` ports on the Mac, so browsers, API clients, database tools, and local frontend servers can use familiar addresses.
+Closing the window keeps the application available from the menu-bar or tray icon. **Finish work** exits the application and stops all background work owned by Remote Docker.
 
-## Intended capabilities
+## Workspaces and data
 
-- Standard `docker` and `docker compose` syntax.
-- Commands invoked indirectly by Makefiles and shell scripts.
-- Interactive TTY, `Ctrl+C`, logs, exec, attach, events, stats, copy, build, pull, and push.
-- Two-way synchronization for source bind mounts.
-- Automatic localhost port forwarding.
-- Automatic reconnection after Wi-Fi interruptions or Windows restarts.
-- WSL2 and Docker diagnostics without silently deleting container data.
-- Clear errors for unavailable hosts, conflicting ports, and unsupported bind paths.
+Only explicitly added Mac directories may be used as source bind mounts. The first release accepts source workspaces below `/Users` and rejects paths that escape a registered workspace. External-volume workspaces are not mapped implicitly.
+
+Data placement is deliberate:
+
+- source files: Mac plus a synchronized WSL copy;
+- containers, images, named volumes, databases, and build cache: Windows only;
+- application settings and managed WSL data: the locations selected during Windows Setup.
+
+## Resource visibility
+
+The Resources screen labels responsibility instead of presenting a combined machine total:
+
+- **Mac sends source files and commands**: Remote Docker application CPU/RAM and whether a local Docker engine is running;
+- **Windows runs Docker workloads**: Remote Docker application CPU/RAM, managed environment state, and container count.
+
+Metrics that cannot be attributed safely to Remote Docker are shown as unavailable with a reason. The application does not substitute whole-machine or unrelated-process usage.
 
 ## Security
 
-The Docker API is never exposed as an unsecured port on Wi-Fi. Paired devices communicate through an authenticated encrypted channel, and access can be revoked by removing the pairing.
+The Docker API is not exposed as an unsecured Wi-Fi port. Pairing uses an authenticated encrypted channel, shows the same short comparison code on both devices, and pins the host identity. Access can be revoked by disconnecting and removing the trusted device.
 
-The initial version is intended for two trusted computers on the same private local network.
+The intended environment is two trusted computers on one private Wi-Fi or Ethernet network. Public networks, internet exposure, multi-host clustering, Kubernetes, UDP relays, and host networking are outside the first release.
 
-## Scope of the first release
+## Free unsigned releases
 
-- macOS client and Windows host;
-- Linux containers in a managed WSL2 distribution;
-- one paired Windows Docker host;
-- TCP port forwarding;
-- command-line Docker compatibility;
-- small status applications for connection, synchronization, and diagnostics.
+The project is designed to remain buildable and distributable without paid Apple or Windows signing certificates. Release packages are therefore unsigned. Each release must include SHA-256 checksums, a manifest that records the source commit, and an SBOM.
 
-Kubernetes, internet access, multi-host clustering, UDP forwarding, and a full Docker Desktop-style dashboard are outside the first release.
+Verify those files before approving an operating-system warning. Never disable Gatekeeper, SmartScreen, antivirus, Smart App Control, or another system security feature globally for Remote Docker.
 
-## Project state
+## Release gate
 
-Development will start with a minimal secure connection and Docker compatibility prototype. Bind-mount synchronization, port forwarding, recovery, and performance validation will follow.
+A release is ready only after focused CI, clean installation, pairing approval, Docker and Compose compatibility, source synchronization, lifecycle cleanup, reconnect behavior, LAN security checks, and resource attribution have passed on a real Mac and Windows pair. Until then, artifacts are development previews.

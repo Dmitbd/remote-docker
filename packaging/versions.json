@@ -1,0 +1,48 @@
+{
+  "go": "1.26.5",
+  "docker_cli": "29.6.1",
+  "compose": "5.1.4",
+  "syncthing": "2.1.1",
+  "assets": {
+    "go": {
+      "amd64": {
+        "filename": "go1.26.5.darwin-amd64.tar.gz",
+        "url": "https://go.dev/dl/go1.26.5.darwin-amd64.tar.gz"
+      },
+      "arm64": {
+        "filename": "go1.26.5.darwin-arm64.tar.gz",
+        "url": "https://go.dev/dl/go1.26.5.darwin-arm64.tar.gz"
+      }
+    },
+    "docker_cli": {
+      "amd64": {
+        "filename": "docker-29.6.1-macos-amd64.tgz",
+        "url": "https://download.docker.com/mac/static/stable/x86_64/docker-29.6.1.tgz"
+      },
+      "arm64": {
+        "filename": "docker-29.6.1-macos-arm64.tgz",
+        "url": "https://download.docker.com/mac/static/stable/aarch64/docker-29.6.1.tgz"
+      }
+    },
+    "compose": {
+      "amd64": {
+        "filename": "docker-compose-darwin-x86_64",
+        "url": "https://github.com/docker/compose/releases/download/v5.1.4/docker-compose-darwin-x86_64"
+      },
+      "arm64": {
+        "filename": "docker-compose-darwin-aarch64",
+        "url": "https://github.com/docker/compose/releases/download/v5.1.4/docker-compose-darwin-aarch64"
+      }
+    },
+    "syncthing": {
+      "amd64": {
+        "filename": "syncthing-macos-amd64-v2.1.1.zip",
+        "url": "https://github.com/syncthing/syncthing/releases/download/v2.1.1/syncthing-macos-amd64-v2.1.1.zip"
+      },
+      "arm64": {
+        "filename": "syncthing-macos-arm64-v2.1.1.zip",
+        "url": "https://github.com/syncthing/syncthing/releases/download/v2.1.1/syncthing-macos-arm64-v2.1.1.zip"
+      }
+    }
+  }
+}

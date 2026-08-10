@@ -1,0 +1,5 @@
+.git
+.gitignore
+dist
+.coverage
+.DS_Store

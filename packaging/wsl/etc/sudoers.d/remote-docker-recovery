@@ -1,0 +1,1 @@
+remote-docker ALL=(root) NOPASSWD: /usr/bin/systemctl restart remote-docker.target

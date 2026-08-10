@@ -1,0 +1,15 @@
+services:
+  app:
+    image: alpine:3.23
+    command: ["sh", "-c", "trap 'exit 0' TERM; while :; do sleep 60; done"]
+    working_dir: /workspace
+    volumes:
+      - type: bind
+        source: ./src
+        target: /workspace
+      - type: volume
+        source: cache
+        target: /cache
+
+volumes:
+  cache:

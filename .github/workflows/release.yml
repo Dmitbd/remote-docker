@@ -1,0 +1,258 @@
+name: Release free unsigned desktop packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  rootfs:
+    name: Build verified rootfs input
+    if: github.repository == 'Dmitbd/remote-docker' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify release context
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          tag_object="$(git rev-parse "refs/tags/$GITHUB_REF_NAME")"
+          [[ "$(git cat-file -t "$tag_object")" == "tag" ]]
+          [[ "$(git rev-list -n 1 "$GITHUB_REF_NAME")" == "$GITHUB_SHA" ]]
+
+      - name: Build rootfs input
+        run: bash packaging/wsl/build-rootfs.sh
+
+      - name: Verify rootfs artifact
+        run: sudo bash tests/integration/rootfs_test.sh
+
+      - name: Upload rootfs input
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact@v7
+        with:
+          name: release-rootfs
+          path: |
+            dist/remote-docker-rootfs.tar.zst
+            dist/remote-docker-rootfs.tar.zst.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  windows-release:
+    name: Build and verify unsigned Windows package
+    needs: rootfs
+    if: github.repository == 'Dmitbd/remote-docker' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify release context
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_NAME -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw 'Release tag must be vMAJOR.MINOR.PATCH.' }
+          $tagObject = (git rev-parse "refs/tags/$($env:GITHUB_REF_NAME)").Trim()
+          if ((git cat-file -t $tagObject).Trim() -ne 'tag') { throw 'Release tag must be annotated.' }
+          if ((git rev-list -n 1 $env:GITHUB_REF_NAME).Trim() -ne $env:GITHUB_SHA) { throw 'Release tag does not match the workflow commit.' }
+          "RELEASE_VERSION=$($env:GITHUB_REF_NAME.Substring(1))" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Set up pinned Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # actions/setup-go@v7
+        with:
+          go-version: '1.26.5'
+          cache: true
+
+      - name: Download rootfs input
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # actions/download-artifact@v7
+        with:
+          name: release-rootfs
+          path: dist
+
+      - name: Install pinned Pester
+        shell: pwsh
+        run: Install-Module Pester -RequiredVersion 6.0.0 -Scope CurrentUser -Force
+
+      - name: Verify Windows package contract
+        shell: pwsh
+        run: Invoke-Pester -Path tests/integration/windows_package.Tests.ps1 -CI
+
+      - name: Build unsigned Windows package
+        shell: pwsh
+        run: >-
+          ./packaging/windows/build-installer.ps1
+          -Version $env:RELEASE_VERSION
+          -RootfsPath dist/remote-docker-rootfs.tar.zst
+
+      - name: Confirm the Windows Setup EXE is unsigned
+        shell: pwsh
+        run: |
+          $installer = Get-Item -LiteralPath "dist/windows/Remote-Docker-$env:RELEASE_VERSION-x64-Setup.exe"
+          $legacyPackages = @(Get-ChildItem -LiteralPath dist/windows -Recurse -File -Include '*.msi')
+          if ($legacyPackages.Count -ne 0) { throw 'Legacy MSI output must not be produced.' }
+          if ((Get-AuthenticodeSignature -LiteralPath $installer.FullName).Status -ne 'NotSigned') {
+            throw "Free release installer must be unsigned: $($installer.Name)"
+          }
+
+      - name: Create Windows provenance manifest
+        shell: pwsh
+        run: |
+          $installer = Get-Item -LiteralPath "dist/windows/Remote-Docker-$env:RELEASE_VERSION-x64-Setup.exe"
+          $artifacts = @(
+            [ordered]@{
+              name = $installer.Name
+              sha256 = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+          )
+          [ordered]@{
+            version = $env:RELEASE_VERSION
+            source_commit = $env:GITHUB_SHA
+            platform = 'windows-x64'
+            signed = $false
+            artifacts = $artifacts
+          } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath dist/windows/Remote-Docker-Windows-x64-manifest.json -Encoding utf8NoBOM
+
+      - name: Create Windows SBOM
+        shell: pwsh
+        run: >-
+          go run github.com/anchore/syft/cmd/syft@v1.50.0
+          scan dir:dist/windows
+          -o cyclonedx-json=dist/windows/remote-docker-windows.cdx.json
+
+      - name: Create Windows checksums
+        shell: pwsh
+        run: |
+          $checksumFile = 'Remote-Docker-Windows-x64-SHA256SUMS'
+          $releaseFiles = Get-ChildItem -LiteralPath dist/windows -Recurse -File | Where-Object Name -ne $checksumFile
+          $lines = foreach ($file in $releaseFiles) {
+            $relative = [IO.Path]::GetRelativePath((Resolve-Path dist/windows).Path, $file.FullName).Replace('\', '/')
+            "{0}  {1}" -f (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $relative
+          }
+          $lines | Sort-Object | Set-Content -LiteralPath "dist/windows/$checksumFile" -Encoding ascii
+
+      - name: Upload Windows release payload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact@v7
+        with:
+          name: remote-docker-windows-x64
+          path: dist/windows
+          if-no-files-found: error
+          retention-days: 1
+
+  macos-release:
+    name: Build and verify unsigned macOS package
+    needs: rootfs
+    if: github.repository == 'Dmitbd/remote-docker' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-14
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify release context
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          tag_object="$(git rev-parse "refs/tags/$GITHUB_REF_NAME")"
+          [[ "$(git cat-file -t "$tag_object")" == "tag" ]]
+          [[ "$(git rev-list -n 1 "$GITHUB_REF_NAME")" == "$GITHUB_SHA" ]]
+          printf 'RELEASE_VERSION=%s\n' "${GITHUB_REF_NAME#v}" >>"$GITHUB_ENV"
+
+      - name: Set up pinned Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # actions/setup-go@v7
+        with:
+          go-version: '1.26.5'
+          cache: true
+
+      - name: Build unsigned macOS package
+        run: REMOTE_DOCKER_VERSION="$RELEASE_VERSION" packaging/macos/build-pkg.sh --arch arm64 --output dist/macos
+
+      - name: Verify unsigned macOS package
+        run: |
+          set -euo pipefail
+          packages=(dist/macos/*.pkg)
+          [[ ${#packages[@]} -eq 1 && -f "${packages[0]}" ]]
+          packaging/macos/inspect-pkg.sh "${packages[0]}"
+          if pkgutil --check-signature "${packages[0]}" >dist/macos/signature-status.txt 2>&1; then
+            echo 'Free macOS release package must not contain a Developer ID signature.' >&2
+            exit 1
+          fi
+          grep -F 'Status: no signature' dist/macos/signature-status.txt >/dev/null
+
+      - name: Create macOS provenance manifest
+        run: |
+          set -euo pipefail
+          package=(dist/macos/*.pkg)
+          PACKAGE_NAME="$(basename "${package[0]}")" \
+          PACKAGE_SHA256="$(shasum -a 256 "${package[0]}" | awk '{print $1}')" \
+          ruby -rjson -e '
+            manifest = {
+              version: ENV.fetch("RELEASE_VERSION"), source_commit: ENV.fetch("GITHUB_SHA"),
+              platform: "macos-arm64", signed: false,
+              artifacts: [{name: ENV.fetch("PACKAGE_NAME"), sha256: ENV.fetch("PACKAGE_SHA256")}]
+            }
+            File.write("dist/macos/Remote-Docker-macOS-arm64-manifest.json", JSON.pretty_generate(manifest) + "\n")
+          '
+
+      - name: Create macOS SBOM
+        run: >-
+          go run github.com/anchore/syft/cmd/syft@v1.50.0
+          scan dir:dist/macos
+          -o cyclonedx-json=dist/macos/remote-docker-macos.cdx.json
+
+      - name: Create macOS checksums
+        run: |
+          set -euo pipefail
+          checksum_file='dist/macos/Remote-Docker-macOS-arm64-SHA256SUMS'
+          find dist/macos -type f ! -name "$(basename "$checksum_file")" -print0 |
+            sort -z |
+            while IFS= read -r -d '' file; do
+              hash="$(shasum -a 256 "$file" | awk '{print $1}')"
+              printf '%s  %s\n' "$hash" "${file#dist/macos/}"
+            done >"$checksum_file"
+
+      - name: Upload macOS release payload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact@v7
+        with:
+          name: remote-docker-macos-arm64
+          path: dist/macos
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish verified free release artifacts
+    needs: [windows-release, macos-release]
+    if: github.repository == 'Dmitbd/remote-docker' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows payload
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # actions/download-artifact@v7
+        with:
+          name: remote-docker-windows-x64
+          path: release/windows
+
+      - name: Download macOS payload
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # actions/download-artifact@v7
+        with:
+          name: remote-docker-macos-arm64
+          path: release/macos
+
+      - name: Publish one release from both payloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mapfile -d '' artifacts < <(find release -type f -print0 | sort -z)
+          [[ ${#artifacts[@]} -gt 0 ]]
+          gh release create "$GITHUB_REF_NAME" "${artifacts[@]}" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes

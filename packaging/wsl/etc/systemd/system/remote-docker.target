@@ -1,0 +1,7 @@
+[Unit]
+Description=Managed Remote Docker environment
+Requires=docker.service ssh.service remote-docker-remote.service syncthing@remote-docker.service
+After=network-online.target docker.service ssh.service remote-docker-remote.service syncthing@remote-docker.service
+
+[Install]
+WantedBy=multi-user.target
