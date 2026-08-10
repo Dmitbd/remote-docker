@@ -173,7 +173,7 @@ func operationTimeout(id string) time.Duration {
 
 func main() {
 	if err := runUI(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "Remote Docker UI could not start.")
+		fmt.Fprintln(os.Stderr, startupErrorMessage(err))
 		os.Exit(1)
 	}
 }

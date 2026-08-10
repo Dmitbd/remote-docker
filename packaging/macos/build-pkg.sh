@@ -205,8 +205,10 @@ build_payload() {
   env \
     GOROOT="${go_root}/go" \
     PATH="${go_root}/go/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    MACOSX_DEPLOYMENT_TARGET=12.0 \
+    CGO_LDFLAGS='-framework UniformTypeIdentifiers -mmacosx-version-min=12.0' \
     GOOS=darwin GOARCH="${target_arch}" CGO_ENABLED=1 \
-    "${go_root}/go/bin/go" -C "${repo_root}" build -trimpath -buildvcs=false -ldflags='-s -w' \
+    "${go_root}/go/bin/go" -C "${repo_root}" build -trimpath -buildvcs=false -tags=desktop,production -ldflags='-s -w' \
     -o "${app_contents}/MacOS/remote-docker-ui" ./cmd/remote-docker-ui
   env \
     GOROOT="${go_root}/go" \

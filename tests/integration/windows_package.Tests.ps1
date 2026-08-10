@@ -127,6 +127,7 @@ Describe 'Windows Setup EXE contract' {
         $script | Should -Match 'cmd/remote-docker-ui'
         $script | Should -Match 'remote-docker-ui\.exe'
         $script | Should -Match 'wv2runtime\.error'
+        $script | Should -Match 'desktop,production,wv2runtime\.error'
         $script | Should -Match 'Copy-Item -LiteralPath \$desktopResourceObject -Destination \$uiResourceObject -Force'
         $script | Should -Match 'cmd/remote-docker-remote'
         $script | Should -Match 'Remote-Docker-\$Version-x64-Setup\.exe'

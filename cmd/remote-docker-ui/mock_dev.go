@@ -156,3 +156,7 @@ func peerName(role string) string {
 	}
 	return "Windows PC"
 }
+
+func startupErrorMessage(err error) string {
+	return "Remote Docker devui could not start: " + err.Error()
+}

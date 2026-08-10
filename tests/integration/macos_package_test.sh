@@ -121,6 +121,9 @@ grep -F 'verify-checksum.sh" "${checksums_file}" "${download_path}" "${filename}
 grep -F 'xattr -crs "${payload}"' "${build_script}" >/dev/null || fail "payload xattrs are not cleared without following package symlinks"
 grep -F -- '--identifier io.github.dmitbd.remote-docker "${app_bundle}"' "${build_script}" >/dev/null || fail "free macOS package does not bind the application identity"
 grep -F './cmd/remote-docker-ui' "${build_script}" >/dev/null || fail "macOS package does not build the stable Wails UI child"
+grep -F -- '-tags=desktop,production' "${build_script}" >/dev/null || fail "macOS Wails UI build is missing required production tags"
+grep -F 'CGO_LDFLAGS=' "${build_script}" | grep -F 'UniformTypeIdentifiers' >/dev/null || fail "macOS Wails UI build is missing the native type framework"
+grep -F 'MACOSX_DEPLOYMENT_TARGET=12.0' "${build_script}" >/dev/null || fail "macOS Wails UI build does not match the application deployment target"
 grep -F 'dwarfdump --uuid "${app_executable}"' "${package_inspector}" >/dev/null || fail "package inspection does not require an executable application Mach-O UUID"
 grep -F -- "--filter '(^|/)\\._'" "${build_script}" >/dev/null || fail "pkgbuild does not exclude AppleDouble metadata"
 for extractor in 'tar -x' 'unzip -q'; do

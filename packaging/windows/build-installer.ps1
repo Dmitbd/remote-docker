@@ -144,7 +144,7 @@ try {
                 './cmd/remote-docker-desktop'
             ) -Description 'Remote Docker desktop build'
             Invoke-Checked -FilePath 'go' -ArgumentList @(
-                '-C', $repoRoot, 'build', '-trimpath', '-buildvcs=false', '-tags=wv2runtime.error',
+                '-C', $repoRoot, 'build', '-trimpath', '-buildvcs=false', '-tags=desktop,production,wv2runtime.error',
                 '-ldflags=-H=windowsgui -s -w -buildid=',
                 '-o', (Join-Path $binaryOutput 'remote-docker-ui.exe'),
                 './cmd/remote-docker-ui'

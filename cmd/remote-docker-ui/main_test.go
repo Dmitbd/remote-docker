@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"reflect"
 	"sort"
@@ -70,6 +71,13 @@ func TestFrontendKeepsDestructiveCancellationLocalAndUsesCompleteQuit(t *testing
 func TestProductionBuildRejectsMockArguments(t *testing.T) {
 	if _, enabled, err := mockBackendFromArgs([]string{"--mock=mac:connected"}, "darwin"); err == nil || enabled {
 		t.Fatalf("production mock arguments enabled=%t error=%v", enabled, err)
+	}
+}
+
+func TestProductionStartupErrorDoesNotExposeDetails(t *testing.T) {
+	message := startupErrorMessage(errors.New("token=secret --argument path=/private/account"))
+	if message != "Remote Docker UI could not start." {
+		t.Fatalf("production startup error leaked details: %q", message)
 	}
 }
 

@@ -10,3 +10,5 @@ func mockBackendFromArgs(args []string, _ string) (uiBackend, bool, error) {
 	}
 	return nil, false, nil
 }
+
+func startupErrorMessage(error) string { return "Remote Docker UI could not start." }
