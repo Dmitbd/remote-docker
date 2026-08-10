@@ -96,12 +96,12 @@ func TestDiscoverSavedTrustWinsOverPairingAdvertisementForSameIdentity(t *testin
 	close(records)
 	peers, err := (Service{
 		Browser: fakeBrowser{records: records},
-		Saved:   []Peer{{InstanceID: "crypto-id", DeviceID: "crypto-id", Port: 49221, Addresses: []net.IP{net.ParseIP("10.0.0.20")}}},
+		Saved:   []Peer{{InstanceID: "crypto-id", DeviceID: "stable-config-id", Port: 49221, Addresses: []net.IP{net.ParseIP("10.0.0.20")}}},
 	}).Discover(context.Background())
 	if err != nil || len(peers) != 1 {
 		t.Fatalf("Discover() = %#v, %v", peers, err)
 	}
-	if peers[0].Pairing || peers[0].DeviceID != "crypto-id" {
+	if peers[0].Pairing || peers[0].InstanceID != "crypto-id" || peers[0].DeviceID != "stable-config-id" || len(peers[0].Addresses) != 2 {
 		t.Fatalf("saved trust was downgraded by discovery: %#v", peers[0])
 	}
 }

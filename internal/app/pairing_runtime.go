@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -616,13 +617,16 @@ func (c *macPairingCoordinator) forgetLocal(deviceID string) error {
 }
 
 type discoveryPairingTransport struct {
-	Store         config.Store
-	SSHConfigPath string
-	SSHBinary     string
-	DialContext   systemtransport.DialContextFunc
-	discover      func(context.Context) ([]discovery.Peer, error)
-	inspect       func(context.Context, string, string) (pairing.Info, error)
-	bootstrap     func(context.Context, string, ed25519.PublicKey) (pairing.SessionDescriptor, error)
+	Store             config.Store
+	Secrets           credentials.Store
+	SSHConfigPath     string
+	SSHBinary         string
+	DialContext       systemtransport.DialContextFunc
+	TunnelDialContext systemtransport.DialContextFunc
+	discover          func(context.Context) ([]discovery.Peer, error)
+	inspect           func(context.Context, string, string) (pairing.Info, error)
+	bootstrap         func(context.Context, string, ed25519.PublicKey) (pairing.SessionDescriptor, error)
+	verifySaved       func(context.Context, discovery.Peer) (pairingTarget, error)
 }
 
 func (t discoveryPairingTransport) Candidates(ctx context.Context) ([]pairingTarget, error) {
@@ -636,13 +640,14 @@ func (t discoveryPairingTransport) Candidates(ctx context.Context) ([]pairingTar
 			continue
 		}
 		if !peer.Pairing {
-			if strings.TrimSpace(peer.DeviceID) == "" {
-				continue
+			verify := t.verifySaved
+			if verify == nil {
+				verify = t.verifySavedPeer
 			}
-			targets = append(targets, pairingTarget{
-				InstanceID: peer.DeviceID, Address: peer.Addresses[0].String(), PairingPort: peer.Port,
-				TrustedAdvertisement: true,
-			})
+			target, verifyErr := verify(ctx, peer)
+			if verifyErr == nil {
+				targets = append(targets, target)
+			}
 			continue
 		}
 		target, inspectErr := t.inspectPeer(ctx, peer, peer.Addresses)
@@ -760,14 +765,80 @@ func (t discoveryPairingTransport) savedPeers() []discovery.Peer {
 	}
 	device, ok := cfg.Devices[cfg.ActiveDevice]
 	address := net.ParseIP(device.Address)
+	peerPublicKey, keyErr := tunnel.ParsePublicKey(device.TunnelPeerPublicKey)
 	if !ok || address == nil || !address.IsPrivate() || address.IsLoopback() ||
-		device.TunnelPort != tunnel.TunnelPort || device.TransportVersion != tunnel.CurrentTransportVersion {
+		device.TunnelPort != tunnel.TunnelPort || device.TransportVersion != tunnel.CurrentTransportVersion || keyErr != nil {
 		return nil
 	}
 	return []discovery.Peer{{
-		InstanceID: cfg.ActiveDevice, DeviceID: cfg.ActiveDevice, Port: tunnel.TunnelPort,
+		InstanceID: pairing.InstanceIDFromPublicKey(peerPublicKey), DeviceID: cfg.ActiveDevice, Port: tunnel.TunnelPort,
 		Addresses: []net.IP{address},
 	}}
+}
+
+func (t discoveryPairingTransport) verifySavedPeer(ctx context.Context, peer discovery.Peer) (pairingTarget, error) {
+	deviceID := strings.TrimSpace(peer.DeviceID)
+	if deviceID == "" || peer.Port != tunnel.TunnelPort || len(peer.Addresses) == 0 || t.Secrets == nil {
+		return pairingTarget{}, errors.New("saved tunnel peer is incomplete")
+	}
+	cfg, err := loadAgentConfig(t.Store)
+	if err != nil {
+		return pairingTarget{}, errors.New("cannot load saved tunnel peer")
+	}
+	device, ok := cfg.Devices[deviceID]
+	if !ok || device.TunnelPort != tunnel.TunnelPort || device.TransportVersion != tunnel.CurrentTransportVersion {
+		return pairingTarget{}, errors.New("saved tunnel peer is no longer trusted")
+	}
+	serverPublicKey, err := tunnel.ParsePublicKey(device.TunnelPeerPublicKey)
+	if err != nil || pairing.InstanceIDFromPublicKey(serverPublicKey) != peer.InstanceID {
+		return pairingTarget{}, errors.New("saved tunnel identity does not match discovery")
+	}
+	encodedIdentity, err := t.Secrets.Get(deviceID, tunnel.IdentityCredential)
+	if err != nil {
+		return pairingTarget{}, errors.New("saved tunnel client identity is unavailable")
+	}
+	defer clearSecret(encodedIdentity)
+	clientIdentity, err := tunnel.IdentityFromPKCS8(encodedIdentity)
+	if err != nil {
+		return pairingTarget{}, errors.New("saved tunnel client identity is invalid")
+	}
+	tlsConfig, err := tunnel.ClientTLSConfig(clientIdentity, serverPublicKey)
+	if err != nil {
+		return pairingTarget{}, errors.New("saved tunnel TLS configuration is invalid")
+	}
+	dialContext := t.TunnelDialContext
+	if dialContext == nil {
+		dialContext = systemtransport.TunnelDialContext()
+	}
+	var lastErr error
+	for _, address := range peer.Addresses {
+		if address == nil || (!address.IsPrivate() && !address.IsLoopback()) || address.IsUnspecified() {
+			continue
+		}
+		endpoint := net.JoinHostPort(address.String(), fmt.Sprintf("%d", tunnel.TunnelPort))
+		connection, dialErr := dialContext(ctx, "tcp", endpoint)
+		if dialErr != nil {
+			lastErr = dialErr
+			continue
+		}
+		secured := tls.Client(connection, tlsConfig.Clone())
+		handshakeErr := secured.HandshakeContext(ctx)
+		_ = secured.Close()
+		if handshakeErr == nil {
+			return pairingTarget{
+				InstanceID: deviceID, Name: device.Name, Address: address.String(), PairingPort: tunnel.TunnelPort,
+				TrustedAdvertisement: true,
+			}, nil
+		}
+		lastErr = handshakeErr
+		if ctx.Err() != nil {
+			return pairingTarget{}, ctx.Err()
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("saved tunnel peer has no safe address")
+	}
+	return pairingTarget{}, fmt.Errorf("verify saved tunnel peer: %w", lastErr)
 }
 
 func (t discoveryPairingTransport) Confirm(ctx context.Context, target pairingTarget, descriptor pairing.SessionDescriptor, clientDeviceID, authorizedKey, code string) (pairing.DeviceRecord, error) {

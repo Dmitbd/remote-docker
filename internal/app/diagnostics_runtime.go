@@ -45,6 +45,7 @@ type productionDiagnosticsOptions struct {
 	LANReachability      diagnostics.Check
 	TunnelIdentity       diagnostics.Check
 	TunnelSession        diagnostics.Check
+	LocalRelays          diagnostics.Check
 	DockerChannel        diagnostics.Check
 	SyncChannel          diagnostics.Check
 	ManagedWSL           diagnostics.Check
@@ -71,122 +72,28 @@ func (d productionDiagnostics) Doctor(ctx context.Context) localapi.DoctorResult
 
 func (d productionDiagnostics) observeHealth(ctx context.Context) (localapi.DoctorResult, AgentStatus) {
 	var status AgentStatus
-	observedAgent := false
-	current := func(context.Context) AgentStatus {
-		if !observedAgent {
-			if d.options.Observe != nil {
-				status = d.options.Observe(ctx)
-			}
-			observedAgent = true
-		}
-		return status
+	if d.options.Observe != nil {
+		status = d.options.Observe(ctx)
 	}
-
-	var remoteStatus remoteDiagnosticStatus
-	var remoteErr error
-	observedRemote := false
-	remoteCurrent := func(observeCtx context.Context) (remoteDiagnosticStatus, error) {
-		if observedRemote {
-			return remoteStatus, remoteErr
-		}
-		observedRemote = true
-		if d.options.Platform == "windows" {
-			if d.options.Windows == nil {
-				return remoteStatus, diagnostics.ErrCheckUnavailable
-			}
-			windowsStatus, err := d.options.Windows.Observe(observeCtx)
-			remoteStatus = remoteDiagnosticStatus{
-				WSLRunning:       windowsStatus.Running,
-				SystemdTarget:    windowsStatus.SystemdTarget,
-				DockerSocket:     windowsStatus.DockerSocket,
-				DiskAvailable:    windowsStatus.DiskAvailable,
-				SyncthingService: windowsStatus.SyncthingService,
-			}
-			remoteErr = err
-			return remoteStatus, remoteErr
-		}
-		if d.options.Remote == nil {
-			return remoteStatus, diagnostics.ErrCheckUnavailable
-		}
-		remoteStatus, remoteErr = d.options.Remote.Observe(observeCtx)
-		return remoteStatus, remoteErr
-	}
-
-	checkState := func(allowed map[AgentState]bool, reason diagnostics.Reason) diagnostics.Check {
-		return diagnostics.CheckFunc(func(checkCtx context.Context) error {
-			if !allowed[current(checkCtx).State] {
-				return diagnostics.NewPublicError(reason)
-			}
-			return nil
-		})
-	}
-	checkRemote := func(selectValue func(remoteDiagnosticStatus) bool, reason diagnostics.Reason) diagnostics.Check {
-		return diagnostics.CheckFunc(func(checkCtx context.Context) error {
-			observed, err := remoteCurrent(checkCtx)
-			if err != nil || !selectValue(observed) {
-				return diagnostics.NewPublicError(reason)
-			}
-			return nil
-		})
-	}
-	lanReachabilityCheck := checkState(map[AgentState]bool{
-		AgentConnecting: true, AgentEngineStarting: true, AgentSyncing: true,
-		AgentReady: true, AgentDegraded: true,
-	}, diagnostics.ReasonHostUnreachable)
-	tunnelIdentityCheck := checkState(map[AgentState]bool{
-		AgentEngineStarting: true, AgentSyncing: true, AgentReady: true,
-	}, diagnostics.ReasonTunnelIdentityMismatch)
-	tunnelSessionCheck := checkState(map[AgentState]bool{
-		AgentEngineStarting: true, AgentSyncing: true, AgentReady: true,
-	}, diagnostics.ReasonPeerBusy)
-	dockerChannelCheck := checkState(map[AgentState]bool{
-		AgentSyncing: true, AgentReady: true,
-	}, diagnostics.ReasonLocalPortOccupied)
-	syncChannelCheck := checkState(map[AgentState]bool{
-		AgentReady: true,
-	}, diagnostics.ReasonLANBlocked)
-	if d.options.Platform == "windows" {
-		lanReachabilityCheck = checkRemote(func(value remoteDiagnosticStatus) bool { return value.WSLRunning }, diagnostics.ReasonHostUnreachable)
-		tunnelIdentityCheck = checkRemote(func(value remoteDiagnosticStatus) bool { return value.SystemdTarget }, diagnostics.ReasonTunnelIdentityMismatch)
-		tunnelSessionCheck = checkRemote(func(value remoteDiagnosticStatus) bool { return value.SystemdTarget }, diagnostics.ReasonPeerBusy)
-		dockerChannelCheck = checkRemote(func(value remoteDiagnosticStatus) bool { return value.DockerSocket }, diagnostics.ReasonWSLUnavailable)
-		syncChannelCheck = checkRemote(func(value remoteDiagnosticStatus) bool { return value.SyncthingService }, diagnostics.ReasonWSLUnavailable)
-	}
-	choose := func(explicit, fallback diagnostics.Check) diagnostics.Check {
-		if explicit != nil {
-			return explicit
-		}
-		return fallback
-	}
-	if d.options.DockerChannel == nil && d.options.PortRelays != nil {
-		d.options.DockerChannel = diagnostics.CheckFunc(func(checkCtx context.Context) error {
-			if err := dockerChannelCheck.Check(checkCtx); err != nil {
-				return err
-			}
-			if err := d.options.PortRelays.Check(checkCtx); err != nil {
-				return diagnostics.NewPublicError(diagnostics.ReasonLocalPortOccupied)
-			}
-			return nil
-		})
+	localRelays := d.options.LocalRelays
+	if localRelays == nil {
+		localRelays = d.options.PortRelays
 	}
 
 	results := (diagnostics.Runner{Operations: diagnostics.Operations{
-		LANReachability: choose(d.options.LANReachability, lanReachabilityCheck),
-		TunnelIdentity:  choose(d.options.TunnelIdentity, tunnelIdentityCheck),
-		TunnelSession:   choose(d.options.TunnelSession, tunnelSessionCheck),
-		DockerChannel:   choose(d.options.DockerChannel, dockerChannelCheck),
-		SyncChannel:     choose(d.options.SyncChannel, syncChannelCheck),
-		ManagedWSL: choose(d.options.ManagedWSL,
-			checkRemote(func(value remoteDiagnosticStatus) bool { return value.WSLRunning }, diagnostics.ReasonWSLUnavailable)),
+		LANReachability: d.options.LANReachability,
+		TunnelIdentity:  d.options.TunnelIdentity,
+		TunnelSession:   d.options.TunnelSession,
+		LocalRelays:     localRelays,
+		DockerChannel:   d.options.DockerChannel,
+		SyncChannel:     d.options.SyncChannel,
+		ManagedWSL:      d.options.ManagedWSL,
 	}}).Check(ctx)
 	checks := make([]localapi.DoctorCheck, 0, len(results))
 	for _, result := range results {
 		checks = append(checks, localapi.DoctorCheck{
 			Name: string(result.Name), OK: result.OK, Message: result.Reason,
 		})
-	}
-	if !observedAgent {
-		current(ctx)
 	}
 	return localapi.DoctorResult{Checks: checks}, status
 }
@@ -197,7 +104,7 @@ func (d productionDiagnostics) Recover(ctx context.Context) (diagnostics.Recover
 		health, observed := d.observeHealth(observeCtx)
 		latest = safeAgentStatus(observed)
 		if d.options.Platform == "windows" {
-			ready := checksReady(health.Checks, "lan_reachability", "tunnel_identity", "tunnel_session", "docker_channel", "sync_channel", "managed_wsl")
+			ready := checksReady(health.Checks, "lan_reachability", "tunnel_identity", "tunnel_session", "local_relays", "docker_channel", "sync_channel", "managed_wsl")
 			if ready {
 				latest = AgentStatus{State: AgentReady, Paired: true, Message: "connected"}
 			}

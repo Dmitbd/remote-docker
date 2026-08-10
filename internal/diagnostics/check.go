@@ -14,6 +14,7 @@ const (
 	CheckLANReachability CheckName = "lan_reachability"
 	CheckTunnelIdentity  CheckName = "tunnel_identity"
 	CheckTunnelSession   CheckName = "tunnel_session"
+	CheckLocalRelays     CheckName = "local_relays"
 	CheckDockerChannel   CheckName = "docker_channel"
 	CheckSyncChannel     CheckName = "sync_channel"
 	CheckManagedWSL      CheckName = "managed_wsl"
@@ -23,6 +24,7 @@ var orderedCheckNames = []CheckName{
 	CheckLANReachability,
 	CheckTunnelIdentity,
 	CheckTunnelSession,
+	CheckLocalRelays,
 	CheckDockerChannel,
 	CheckSyncChannel,
 	CheckManagedWSL,
@@ -53,6 +55,7 @@ type Operations struct {
 	LANReachability Check
 	TunnelIdentity  Check
 	TunnelSession   Check
+	LocalRelays     Check
 	DockerChannel   Check
 	SyncChannel     Check
 	ManagedWSL      Check
@@ -66,6 +69,8 @@ func (o Operations) get(name CheckName) Check {
 		return o.TunnelIdentity
 	case CheckTunnelSession:
 		return o.TunnelSession
+	case CheckLocalRelays:
+		return o.LocalRelays
 	case CheckDockerChannel:
 		return o.DockerChannel
 	case CheckSyncChannel:
@@ -85,6 +90,8 @@ func (o *Operations) set(name CheckName, check Check) {
 		o.TunnelIdentity = check
 	case CheckTunnelSession:
 		o.TunnelSession = check
+	case CheckLocalRelays:
+		o.LocalRelays = check
 	case CheckDockerChannel:
 		o.DockerChannel = check
 	case CheckSyncChannel:

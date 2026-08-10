@@ -4,13 +4,16 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/tls"
 	"errors"
 	"net"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Dmitbd/remote-docker/internal/config"
+	"github.com/Dmitbd/remote-docker/internal/credentials"
 	"github.com/Dmitbd/remote-docker/internal/discovery"
 	"github.com/Dmitbd/remote-docker/internal/pairing"
 	"github.com/Dmitbd/remote-docker/internal/tunnel"
@@ -96,36 +99,104 @@ func TestDiscoveryPairingSavedPeerRequiresCurrentTunnelMetadata(t *testing.T) {
 	if err := store.Save(config.Config{SchemaVersion: config.CurrentSchemaVersion, ActiveDevice: "windows", Devices: map[string]config.Device{"windows": legacy}}); err != nil {
 		t.Fatal(err)
 	}
-	if peers := transport.savedPeers(); len(peers) != 1 || peers[0].DeviceID != "windows" || peers[0].Port != tunnel.TunnelPort {
+	wantInstance := pairing.InstanceIDFromPublicKey(publicKey)
+	if peers := transport.savedPeers(); len(peers) != 1 || peers[0].InstanceID != wantInstance ||
+		peers[0].DeviceID != "windows" || peers[0].Port != tunnel.TunnelPort {
 		t.Fatalf("current saved peers = %#v", peers)
 	}
 }
 
-func TestDiscoveryPairingCandidatesExposeStableTrustedAdvertisementWithoutInferringName(t *testing.T) {
-	inspectCalls := 0
-	transport := discoveryPairingTransport{
-		discover: func(context.Context) ([]discovery.Peer, error) {
-			return []discovery.Peer{{
-				InstanceID: "trusted-windows", DeviceID: "trusted-windows", Pairing: false, Port: 43119,
-				Addresses: []net.IP{net.ParseIP("192.168.1.20")},
-			}}, nil
-		},
-		inspect: func(context.Context, string, string) (pairing.Info, error) {
-			inspectCalls++
-			return pairing.Info{}, errors.New("stable advertisement must not use a pairing identity")
-		},
+func TestDiscoveryPairingCandidatesRequirePinnedTLSForSavedAvailability(t *testing.T) {
+	peer := discovery.Peer{
+		InstanceID: "cryptographic-id", DeviceID: "stable-config-id", Port: tunnel.TunnelPort,
+		Addresses: []net.IP{net.ParseIP("192.168.1.20")},
 	}
+	for _, test := range []struct {
+		name      string
+		verifyErr error
+		want      []pairingTarget
+	}{
+		{name: "saved host offline", verifyErr: errors.New("dial failed"), want: []pairingTarget{}},
+		{name: "saved host has pinned TLS identity", want: []pairingTarget{{
+			InstanceID: "stable-config-id", Address: "192.168.1.20", PairingPort: tunnel.TunnelPort,
+			TrustedAdvertisement: true,
+		}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			verifyCalls := 0
+			transport := discoveryPairingTransport{
+				discover: func(context.Context) ([]discovery.Peer, error) { return []discovery.Peer{peer}, nil },
+				verifySaved: func(context.Context, discovery.Peer) (pairingTarget, error) {
+					verifyCalls++
+					if test.verifyErr != nil {
+						return pairingTarget{}, test.verifyErr
+					}
+					return test.want[0], nil
+				},
+			}
+			targets, err := transport.Candidates(context.Background())
+			if err != nil || verifyCalls != 1 || !reflect.DeepEqual(targets, test.want) {
+				t.Fatalf("Candidates() = %#v, %v; verify=%d, want %#v", targets, err, verifyCalls, test.want)
+			}
+		})
+	}
+}
 
-	targets, err := transport.Candidates(context.Background())
+func TestDiscoveryPairingSavedVerificationUsesPersistedMutualTLSIdentity(t *testing.T) {
+	serverIdentity := testTunnelIdentity(t)
+	clientIdentity := testTunnelIdentity(t)
+	store := config.Store{Path: t.TempDir() + "/config.json"}
+	deviceID := "stable-config-id"
+	device := config.Device{
+		Name: "Windows", Address: "192.168.1.20", TunnelPort: tunnel.TunnelPort,
+		TunnelPeerPublicKey: tunnel.EncodePublicKey(serverIdentity.PublicKey), TransportVersion: tunnel.CurrentTransportVersion,
+	}
+	if err := store.Save(config.Config{SchemaVersion: config.CurrentSchemaVersion, ActiveDevice: deviceID, Devices: map[string]config.Device{deviceID: device}}); err != nil {
+		t.Fatal(err)
+	}
+	secrets := credentials.NewMemoryStore()
+	encodedIdentity, _ := tunnel.EncodeIdentity(clientIdentity)
+	if err := secrets.Put(deviceID, tunnel.IdentityCredential, encodedIdentity); err != nil {
+		t.Fatal(err)
+	}
+	serverTLS, _ := tunnel.ServerTLSConfig(serverIdentity, func(key ed25519.PublicKey) bool {
+		return reflect.DeepEqual(key, clientIdentity.PublicKey)
+	})
+	transport := discoveryPairingTransport{
+		Store: store, Secrets: secrets,
+		TunnelDialContext: func(context.Context, string, string) (net.Conn, error) {
+			client, server := net.Pipe()
+			go func() {
+				secured := tls.Server(server, serverTLS.Clone())
+				_ = secured.Handshake()
+				_ = secured.Close()
+			}()
+			return client, nil
+		},
+	}
+	peer := discovery.Peer{
+		InstanceID: pairing.InstanceIDFromPublicKey(serverIdentity.PublicKey), DeviceID: deviceID,
+		Port: tunnel.TunnelPort, Addresses: []net.IP{net.ParseIP("192.168.1.20")},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	target, err := transport.verifySavedPeer(ctx, peer)
+	if err != nil || target.InstanceID != deviceID || target.Address != "192.168.1.20" || !target.TrustedAdvertisement {
+		t.Fatalf("verifySavedPeer() = %#v, %v", target, err)
+	}
+	peer.InstanceID = "different-cryptographic-id"
+	if _, err := transport.verifySavedPeer(ctx, peer); err == nil {
+		t.Fatal("verifySavedPeer() accepted saved key under a different cryptographic identity")
+	}
+}
+
+func testTunnelIdentity(t *testing.T) tunnel.Identity {
+	t.Helper()
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		t.Fatalf("Candidates() error = %v", err)
+		t.Fatal(err)
 	}
-	want := []pairingTarget{{
-		InstanceID: "trusted-windows", Address: "192.168.1.20", PairingPort: 43119, TrustedAdvertisement: true,
-	}}
-	if !reflect.DeepEqual(targets, want) || inspectCalls != 0 {
-		t.Fatalf("targets=%#v inspect=%d, want %#v/0", targets, inspectCalls, want)
-	}
+	return tunnel.Identity{PrivateKey: privateKey, PublicKey: publicKey}
 }
 
 func TestDiscoveryPairingBootstrapRequiresExplicitInstanceAndPinsInspectedTLSKey(t *testing.T) {

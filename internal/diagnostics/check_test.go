@@ -36,11 +36,11 @@ func TestRunnerChecksEveryDependencyInStableOrder(t *testing.T) {
 			t.Fatalf("result[%d].Name = %q, want %q", index, result.Name, orderedCheckNames[index])
 		}
 	}
-	if results[3].OK || results[3].Reason != string(ReasonCheckFailed) {
-		t.Fatalf("Docker result = %#v, want a stable generic failure", results[3])
+	if results[4].OK || results[4].Reason != string(ReasonCheckFailed) {
+		t.Fatalf("Docker result = %#v, want a stable generic failure", results[4])
 	}
-	if results[4].OK || results[4].Reason != string(ReasonLANBlocked) {
-		t.Fatalf("sync result = %#v, want explicitly safe reason", results[4])
+	if results[5].OK || results[5].Reason != string(ReasonLANBlocked) {
+		t.Fatalf("sync result = %#v, want explicitly safe reason", results[5])
 	}
 }
 

@@ -22,7 +22,7 @@ func TestProductionRecoveryUsesOneOrchestrationPathAndFreshReadiness(t *testing.
 	observations := 0
 	reconnects := 0
 	userProcessRestarts := 0
-	controller := &productionAgentController{diagnostics: newProductionDiagnosticsWithOptions(productionDiagnosticsOptions{
+	options := productionDiagnosticsOptions{
 		Observe: func(context.Context) AgentStatus {
 			observations++
 			if observations == 1 {
@@ -38,12 +38,15 @@ func TestProductionRecoveryUsesOneOrchestrationPathAndFreshReadiness(t *testing.
 			userProcessRestarts++
 			return nil
 		},
-		Remote: staticRemoteDiagnostics{status: remoteDiagnosticStatus{
-			WSLRunning: true, SystemdTarget: true, DiskAvailable: true,
-		}},
-		PortRelays: diagnostics.CheckFunc(func(context.Context) error { return nil }),
-		Platform:   "darwin",
-	})}
+		Platform: "darwin",
+	}
+	setTestDiagnosticChecks(&options, func(context.Context) error {
+		if observations < 2 {
+			return errors.New("not ready")
+		}
+		return nil
+	})
+	controller := &productionAgentController{diagnostics: newProductionDiagnosticsWithOptions(options)}
 
 	raw, err := controller.Handle(context.Background(), localapi.MethodRecover, nil)
 	if err != nil {
@@ -75,7 +78,7 @@ func TestProductionRecoveryUsesOneOrchestrationPathAndFreshReadiness(t *testing.
 }
 
 func TestProductionRecoveryReturnsPublicAttemptsAndNoRawFailureDetail(t *testing.T) {
-	controller := &productionAgentController{diagnostics: newProductionDiagnosticsWithOptions(productionDiagnosticsOptions{
+	options := productionDiagnosticsOptions{
 		Observe: func(context.Context) AgentStatus {
 			return AgentStatus{State: AgentNeedsAction, Message: "ORDINARY_SETTING=quoted secret with spaces"}
 		},
@@ -83,7 +86,9 @@ func TestProductionRecoveryReturnsPublicAttemptsAndNoRawFailureDetail(t *testing
 			return errors.New("pairing_token=internal-pairing-secret")
 		},
 		Platform: "darwin",
-	})}
+	}
+	setTestDiagnosticChecks(&options, func(context.Context) error { return errors.New("still unhealthy") })
+	controller := &productionAgentController{diagnostics: newProductionDiagnosticsWithOptions(options)}
 
 	raw, err := controller.Handle(context.Background(), localapi.MethodRecover, nil)
 	if err != nil {
@@ -135,12 +140,6 @@ func TestMacRepairStepsReconcileInfrastructureOnceBeforeReadiness(t *testing.T) 
 					return errors.New("initial reconnect did not repair the root cause")
 				},
 				Remote: remote,
-				PortRelays: diagnostics.CheckFunc(func(context.Context) error {
-					if !ready {
-						return diagnostics.NewPublicError(diagnostics.ReasonPortRelaysNotReady)
-					}
-					return nil
-				}),
 				ReconcileAfterRepair: func(context.Context) error {
 					reconciles++
 					ready = true
@@ -148,6 +147,12 @@ func TestMacRepairStepsReconcileInfrastructureOnceBeforeReadiness(t *testing.T) 
 				},
 				Platform: "darwin",
 			}
+			setTestDiagnosticChecks(&options, func(context.Context) error {
+				if !ready {
+					return diagnostics.NewPublicError(diagnostics.ReasonPortRelaysNotReady)
+				}
+				return nil
+			})
 			if tt.restartUser {
 				options.RestartUserProcess = func(context.Context) error {
 					userRepairs++
@@ -205,11 +210,25 @@ func TestWindowsRecoveryRequiresFreshDockerAndSyncthingHealth(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			windows := &recordingWindowsDiagnostics{status: tt.status}
-			diagnosticsRuntime := newProductionDiagnosticsWithOptions(productionDiagnosticsOptions{
+			options := productionDiagnosticsOptions{
 				Observe:  func(context.Context) AgentStatus { return AgentStatus{State: AgentUnpaired} },
 				Windows:  windows,
 				Platform: "windows",
+			}
+			setTestDiagnosticChecks(&options, func(context.Context) error { return nil })
+			options.DockerChannel = diagnostics.CheckFunc(func(context.Context) error {
+				if !tt.status.DockerSocket {
+					return diagnostics.NewPublicError(diagnostics.ReasonWSLUnavailable)
+				}
+				return nil
 			})
+			options.SyncChannel = diagnostics.CheckFunc(func(context.Context) error {
+				if !tt.status.SyncthingService {
+					return diagnostics.NewPublicError(diagnostics.ReasonWSLUnavailable)
+				}
+				return nil
+			})
+			diagnosticsRuntime := newProductionDiagnosticsWithOptions(options)
 			doctor := diagnosticsRuntime.Doctor(context.Background())
 			if tt.failedCheck != "" {
 				found := false
@@ -329,6 +348,7 @@ func TestTunnelDiagnosticsMapOnlyStableFailureClassesAndRedactInternals(t *testi
 		LANReachability: unsafe(diagnostics.ReasonHostUnreachable, ""),
 		TunnelIdentity:  unsafe(diagnostics.ReasonTunnelIdentityMismatch, ""),
 		TunnelSession:   unsafe(diagnostics.ReasonPeerBusy, ""),
+		LocalRelays:     unsafe(diagnostics.ReasonLocalPortOccupied, ""),
 		DockerChannel:   unsafe(diagnostics.ReasonLocalPortOccupied, ""),
 		SyncChannel:     unsafe(diagnostics.ReasonLANBlocked, ""),
 		ManagedWSL:      unsafe("", "private-key signed-nonce ORDINARY_SETTING=value docker --host secret"),
@@ -336,7 +356,7 @@ func TestTunnelDiagnosticsMapOnlyStableFailureClassesAndRedactInternals(t *testi
 	}).Doctor(context.Background())
 	want := []string{
 		string(diagnostics.ReasonHostUnreachable), string(diagnostics.ReasonTunnelIdentityMismatch),
-		string(diagnostics.ReasonPeerBusy), string(diagnostics.ReasonLocalPortOccupied),
+		string(diagnostics.ReasonPeerBusy), string(diagnostics.ReasonLocalPortOccupied), string(diagnostics.ReasonLocalPortOccupied),
 		string(diagnostics.ReasonLANBlocked), string(diagnostics.ReasonCheckFailed),
 	}
 	if len(doctor.Checks) != len(want) {
@@ -353,6 +373,17 @@ func TestTunnelDiagnosticsMapOnlyStableFailureClassesAndRedactInternals(t *testi
 			t.Fatalf("diagnostics report leaked %q: %s", secret, encoded)
 		}
 	}
+}
+
+func setTestDiagnosticChecks(options *productionDiagnosticsOptions, check func(context.Context) error) {
+	operation := diagnostics.CheckFunc(check)
+	options.LANReachability = operation
+	options.TunnelIdentity = operation
+	options.TunnelSession = operation
+	options.LocalRelays = operation
+	options.DockerChannel = operation
+	options.SyncChannel = operation
+	options.ManagedWSL = operation
 }
 
 func TestManagedSSHRestartClosesAndReplacesHealthyUserProcess(t *testing.T) {

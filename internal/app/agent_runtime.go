@@ -145,6 +145,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 	var windowsBridge localSyncLifecycle
 	var tunnelClient localSyncLifecycle
 	var tunnelReady *atomic.Bool
+	var tunnelServerState *atomic.Int32
 	if runtime.GOOS == "windows" {
 		installer := provision.WSLPairingInstaller{}
 		registry := windowsPairingRegistry{store: store, configTransactions: configTransactions}
@@ -173,6 +174,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 			return nil, tunnelTLSErr
 		}
 		serviceDialer := windowsbridge.NewProductionServiceDialer()
+		tunnelServerState = &atomic.Int32{}
 		pairHost.tunnelTLSConfig = tunnelTLSConfig
 		pairHost.serveTunnel = func(ctx context.Context, listener net.Listener) error {
 			server := tunnel.Server{
@@ -189,6 +191,16 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 					return session, nil
 				},
 				Dialer: serviceDialer,
+				OnState: func(state tunnel.ServerState) {
+					switch state {
+					case tunnel.ServerConnected:
+						tunnelServerState.Store(1)
+					case tunnel.ServerBusy:
+						tunnelServerState.Store(2)
+					default:
+						tunnelServerState.Store(0)
+					}
+				},
 			}
 			return server.Run(ctx)
 		}
@@ -216,9 +228,11 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 			Store: store, Secrets: secrets,
 			ConfigTransactions: configTransactions,
 			Transport: discoveryPairingTransport{
-				Store:         store,
-				SSHConfigPath: sshConfigPath,
-				DialContext:   systemtransport.PairingDialContext(),
+				Store:             store,
+				Secrets:           secrets,
+				SSHConfigPath:     sshConfigPath,
+				DialContext:       systemtransport.PairingDialContext(),
+				TunnelDialContext: systemtransport.TunnelDialContext(),
 			},
 			Docker: dockercli.Runner{}, DockerCLI: dockerCLI, DockerContext: defaultContextName,
 			SSHConfigPath: sshConfigPath, KnownHostsPath: knownHostsPath,
@@ -284,19 +298,28 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 		metrics:        metrics.NewCollector(metrics.Options{Remote: remoteMetrics}),
 	}
 	agent := NewAgent(observer, restorer, controller)
-	controller.diagnostics = newProductionDiagnosticsWithOptions(productionDiagnosticsOptions{
-		Observe: agent.Refresh, Reconnect: agent.Reconnect, Platform: runtime.GOOS,
-		Remote:  sshRemoteDiagnostics{store: store, sshConfigPath: sshConfigPath},
-		Windows: windowsbridge.ManagedWSLOperations{},
-	})
+	remoteDiagnostics := sshRemoteDiagnostics{store: store, sshConfigPath: sshConfigPath}
+	windowsDiagnostics := windowsbridge.ManagedWSLOperations{}
+	var diagnosticsOptions productionDiagnosticsOptions
 	if runtime.GOOS == "windows" {
-		controller.diagnostics.options.Remote = nil
+		diagnosticsOptions = (windowsDiagnosticProbe{
+			secrets: secrets, operations: windowsDiagnostics, serverState: tunnelServerState,
+		}).checks()
+		diagnosticsOptions.Windows = windowsDiagnostics
 	} else {
-		controller.diagnostics.options.Windows = nil
-		controller.diagnostics.options.RestartUserProcess = sshRuntime.Restart
-		controller.diagnostics.options.ReconcileAfterRepair = agent.Reconnect
-		controller.diagnostics.options.PortRelays = diagnostics.CheckFunc(restorer.CheckPortRelays)
+		diagnosticsOptions = (macDiagnosticProbe{
+			store: store, secrets: secrets, tunnelReady: tunnelReady,
+			dockerCLI: dockerCLI, dockerContext: defaultContextName, dockerEnv: dockerEnv,
+			sync: syncInspector, remote: remoteDiagnostics,
+		}).checks()
+		diagnosticsOptions.Remote = remoteDiagnostics
+		diagnosticsOptions.RestartUserProcess = sshRuntime.Restart
+		diagnosticsOptions.ReconcileAfterRepair = agent.Reconnect
 	}
+	diagnosticsOptions.Observe = agent.Refresh
+	diagnosticsOptions.Reconnect = agent.Reconnect
+	diagnosticsOptions.Platform = runtime.GOOS
+	controller.diagnostics = newProductionDiagnosticsWithOptions(diagnosticsOptions)
 	controller.afterPair = func(ctx context.Context) { _ = agent.Reconnect(ctx) }
 	startupSelfHeal := func(ctx context.Context) error {
 		_, _, err := controller.diagnostics.Recover(ctx)

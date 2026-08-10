@@ -20,7 +20,6 @@ import (
 
 	"github.com/Dmitbd/remote-docker/internal/config"
 	"github.com/Dmitbd/remote-docker/internal/credentials"
-	"github.com/Dmitbd/remote-docker/internal/diagnostics"
 	"github.com/Dmitbd/remote-docker/internal/discovery"
 	"github.com/Dmitbd/remote-docker/internal/dockercli"
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
@@ -465,19 +464,17 @@ func (p *recordingDockerPreparer) Prepare(_ context.Context, params localapi.Pre
 }
 
 func TestProductionDiagnosticsReturnsOrderedSafeChecks(t *testing.T) {
-	checks := newProductionDiagnosticsWithOptions(productionDiagnosticsOptions{
+	options := productionDiagnosticsOptions{
 		Observe: func(context.Context) AgentStatus {
 			return AgentStatus{State: AgentReady, Message: "Bearer not-a-secret-in-output"}
 		},
-		Remote: staticRemoteDiagnostics{status: remoteDiagnosticStatus{
-			WSLRunning: true, SystemdTarget: true, DiskAvailable: true,
-		}},
-		PortRelays: diagnostics.CheckFunc(func(context.Context) error { return nil }),
-		Platform:   "darwin",
-	}).Doctor(context.Background()).Checks
+		Platform: "darwin",
+	}
+	setTestDiagnosticChecks(&options, func(context.Context) error { return nil })
+	checks := newProductionDiagnosticsWithOptions(options).Doctor(context.Background()).Checks
 	wantNames := []string{
 		"lan_reachability", "tunnel_identity", "tunnel_session",
-		"docker_channel", "sync_channel", "managed_wsl",
+		"local_relays", "docker_channel", "sync_channel", "managed_wsl",
 	}
 	if len(checks) != len(wantNames) {
 		t.Fatalf("check count = %d, want %d", len(checks), len(wantNames))
