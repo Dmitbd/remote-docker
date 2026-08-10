@@ -128,7 +128,6 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 		}
 		defer c.operations.Unlock()
 		snapshot := c.supervisor.Snapshot()
-		delegateMethod := method
 		if snapshot.State == lifecycle.StatePairingCancellationPending {
 			if method != localapi.MethodPairStatus && method != localapi.MethodPairCancel {
 				return nil, needsAction("only replacement cancellation can be retried")
@@ -136,10 +135,11 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 			if snapshot.Pairing == nil {
 				return nil, unavailable("replacement cancellation metadata is unavailable")
 			}
-			delegateMethod = localapi.MethodPairCancel
-			raw, _ = json.Marshal(localapi.PairSessionParams{SessionID: snapshot.Pairing.SessionID})
+			raw, _ = json.Marshal(localapi.PairSessionParams{
+				SessionID: snapshot.Pairing.SessionID, ObserveOnly: method == localapi.MethodPairStatus,
+			})
 		}
-		result, err := c.delegate(ctx, delegateMethod, raw)
+		result, err := c.delegate(ctx, method, raw)
 		if err != nil {
 			return nil, err
 		}
@@ -178,14 +178,28 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 	case localapi.MethodUnpair:
 		return nil, &localapi.PublicError{Code: localapi.ErrorInvalidRequest, Message: "Unpair is an internal cleanup operation"}
 	case localapi.MethodShutdown:
-		if !c.operations.TryLock() {
+		cancellationPending := c.supervisor.Snapshot().State == lifecycle.StatePairingCancellationPending
+		if cancellationPending {
+			c.operations.Lock()
+		} else if !c.operations.TryLock() {
 			return nil, needsAction("wait for the active lifecycle operation to finish")
 		}
 		defer c.operations.Unlock()
-		if c.supervisor.Snapshot().State == lifecycle.StatePairingCancellationPending {
-			return nil, needsAction("cancel the pending replacement before shutting down")
+		if snapshot := c.supervisor.Snapshot(); snapshot.State == lifecycle.StatePairingCancellationPending && snapshot.Pairing != nil {
+			sessionID := snapshot.Pairing.SessionID
+			cancelCtx, cancel := context.WithTimeout(context.Background(), pairingRollbackTimeout)
+			cancelRaw, _ := json.Marshal(localapi.PairSessionParams{SessionID: sessionID})
+			_, _ = c.delegate(cancelCtx, localapi.MethodPairCancel, cancelRaw)
+			cancel()
+			if cleaner, ok := c.fallback.(interface{ abandonPairing(string) }); ok {
+				cleaner.abandonPairing(sessionID)
+			}
 		}
-		if err := c.supervisor.Shutdown(ctx); err != nil {
+		shutdownCtx := ctx
+		if cancellationPending {
+			shutdownCtx = context.Background()
+		}
+		if err := c.supervisor.Shutdown(shutdownCtx); err != nil {
 			return nil, unavailable("Remote Docker could not stop every owned process")
 		}
 		return localapi.ShutdownResult{Stopped: true}, nil
@@ -385,8 +399,10 @@ func (c *DesktopController) reconcilePairing(status localapi.PairingStatusResult
 		case string(lifecycle.PairingExpired):
 			_, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingExpired})
 			return err
+		case string(lifecycle.PairingPending), string(lifecycle.PairingApproved), string(pairing.SessionCompleted):
+			return nil
 		default:
-			return unavailable("replacement cancellation is not yet confirmed")
+			return unavailable("replacement cancellation returned an invalid status")
 		}
 	}
 	if snapshot.Pairing == nil {

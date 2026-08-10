@@ -80,7 +80,7 @@ func TestBuildViewModelShowsReplacementCancellationPendingWithRetryOnly(t *testi
 	quit := viewActionByID(t, model.Actions, ActionQuit)
 	if model.Status != "Отмена нового подключения" || model.PeerName != "New Windows" ||
 		!hasViewAction(model.Actions, ActionCancelPair) || hasViewAction(model.Actions, ActionPause) ||
-		quit.Enabled {
+		!quit.Enabled {
 		t.Fatalf("cancellation-pending model = %#v", model)
 	}
 }

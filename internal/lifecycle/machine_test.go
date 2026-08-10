@@ -219,10 +219,10 @@ func TestPairingCancellationPendingKeepsOldTrustUntilRemoteAck(t *testing.T) {
 	if pending.State != StatePairingCancellationPending || pending.Pairing == nil ||
 		pending.Pairing.Status != PairingCancellationPending || pending.TrustedPeers != 1 ||
 		pending.Peer == nil || pending.Peer.ID != "saved" || !machine.Allowed(CommandCancel) ||
-		machine.Allowed(CommandConnect) || machine.Allowed(CommandForget) || machine.Allowed(CommandPause) || machine.Allowed(CommandQuit) {
+		machine.Allowed(CommandConnect) || machine.Allowed(CommandForget) || machine.Allowed(CommandPause) || !machine.Allowed(CommandQuit) {
 		t.Fatalf("cancellation-pending snapshot = %#v", pending)
 	}
-	for _, event := range []EventType{EventPairingApproved, EventPairingCompleted, EventPauseRequested, EventQuitRequested} {
+	for _, event := range []EventType{EventPairingApproved, EventPairingCompleted, EventPauseRequested} {
 		if _, err := machine.Apply(Event{Type: event, Peer: &pairing.Peer}); !errors.As(err, new(*TransitionError)) {
 			t.Fatalf("%s during cancellation pending error = %v, want TransitionError", event, err)
 		}
@@ -232,6 +232,29 @@ func TestPairingCancellationPendingKeepsOldTrustUntilRemoteAck(t *testing.T) {
 	if cleared.State != StateSearching || cleared.Pairing != nil || cleared.TrustedPeers != 1 ||
 		cleared.Peer == nil || cleared.Peer.ID != "saved" {
 		t.Fatalf("cleared cancellation-pending snapshot = %#v", cleared)
+	}
+}
+
+func TestPairingCancellationPendingAllowsTerminalShutdown(t *testing.T) {
+	machine, err := NewMachine(RoleMacClient, "MacBook", WithTrustedPeer(Peer{ID: "saved", Name: "Saved Windows"}))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	mustApply(t, machine, Event{Type: EventEnabled})
+	mustApply(t, machine, Event{Type: EventSearchStarted})
+	pairing := Pairing{
+		SessionID: "new-session", Peer: Peer{ID: "new", Name: "New Windows"}, Code: "123456",
+		Status: PairingPending, ExpiresAt: time.Now().Add(time.Minute),
+	}
+	mustApply(t, machine, Event{Type: EventPairingCancellationPending, Pairing: &pairing})
+
+	stopping := mustApply(t, machine, Event{Type: EventQuitRequested})
+	if stopping.State != StateStopping || !stopping.Terminal || !stopping.ActionInProgress {
+		t.Fatalf("shutdown snapshot = %#v", stopping)
+	}
+	stopped := mustApply(t, machine, Event{Type: EventStopCompleted})
+	if stopped.State != StatePaused || !stopped.Terminal || stopped.Pairing != nil || stopped.ActionInProgress {
+		t.Fatalf("stopped snapshot = %#v", stopped)
 	}
 }
 

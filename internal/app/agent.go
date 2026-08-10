@@ -70,6 +70,15 @@ func NewAgent(observer AgentObserver, restorer InfrastructureRestorer, controlle
 	}
 }
 
+func (a *Agent) abandonPairing(sessionID string) {
+	if a == nil || a.controller == nil {
+		return
+	}
+	if cleaner, ok := a.controller.(interface{ abandonPairing(string) }); ok {
+		cleaner.abandonPairing(sessionID)
+	}
+}
+
 func (a *Agent) Status() AgentStatus {
 	if a == nil {
 		return AgentStatus{State: AgentNeedsAction, Message: "background agent is unavailable"}

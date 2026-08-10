@@ -267,6 +267,14 @@ func (c *macPairingCoordinator) cancelDetached(target pairingTarget, descriptor 
 }
 
 func (c *macPairingCoordinator) Status(ctx context.Context, sessionID string) (localapi.PairingStatusResult, error) {
+	return c.readStatus(ctx, sessionID, true)
+}
+
+func (c *macPairingCoordinator) Observe(ctx context.Context, sessionID string) (localapi.PairingStatusResult, error) {
+	return c.readStatus(ctx, sessionID, false)
+}
+
+func (c *macPairingCoordinator) readStatus(ctx context.Context, sessionID string, allowCompletion bool) (localapi.PairingStatusResult, error) {
 	if c == nil {
 		return localapi.PairingStatusResult{}, unavailable("pairing infrastructure is unavailable")
 	}
@@ -294,6 +302,10 @@ func (c *macPairingCoordinator) Status(ctx context.Context, sessionID string) (l
 	result := pairingStatusResult(pending, status)
 	if status.State == pairing.SessionRejected || status.State == pairing.SessionCancelled || status.State == pairing.SessionExpired {
 		c.clearPending(sessionID)
+		clearSecret(pending.privateKeyPEM)
+		return result, nil
+	}
+	if !allowCompletion {
 		clearSecret(pending.privateKeyPEM)
 		return result, nil
 	}
@@ -477,6 +489,13 @@ func (c *macPairingCoordinator) clearPending(sessionID string) {
 		clearSecret(c.pending.privateKeyPEM)
 		c.pending = nil
 	}
+}
+
+func (c *macPairingCoordinator) Abandon(sessionID string) {
+	if c == nil {
+		return
+	}
+	c.clearPending(sessionID)
 }
 
 func pairingStatusResult(pending pendingPairing, status pairing.SessionStatus) localapi.PairingStatusResult {

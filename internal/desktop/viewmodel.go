@@ -208,7 +208,7 @@ func BuildViewModel(snapshot lifecycle.Snapshot, selected Section, now time.Time
 
 	model.Actions = append(model.Actions, Action{
 		ID: ActionQuit, Label: "Завершить работу",
-		Enabled:     !snapshot.ActionInProgress && snapshot.State != lifecycle.StatePairingCancellationPending,
+		Enabled:     !snapshot.ActionInProgress,
 		Destructive: true, Icon: "exit",
 	})
 	return model

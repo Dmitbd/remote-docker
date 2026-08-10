@@ -169,7 +169,8 @@ func allowed(snapshot Snapshot, command Command) bool {
 		return false
 	}
 	if snapshot.State == StatePairingCancellationPending {
-		return snapshot.Role == RoleMacClient && snapshot.Pairing != nil && command == CommandCancel
+		return snapshot.Role == RoleMacClient && snapshot.Pairing != nil &&
+			(command == CommandCancel || command == CommandQuit)
 	}
 	switch command {
 	case CommandEnable:
@@ -432,7 +433,7 @@ func (m *Machine) applyLocked(event Event) error {
 		}
 		m.beginStop(&Disconnect{Initiator: InitiatorLocal, Reason: ReasonUserPause}, StatePaused)
 	case EventQuitRequested:
-		if snapshot.State == StateStopping || snapshot.State == StatePairingCancellationPending {
+		if snapshot.State == StateStopping {
 			return m.transitionError(event, "application is already stopping")
 		}
 		snapshot.Terminal = true

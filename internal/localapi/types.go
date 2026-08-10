@@ -219,7 +219,8 @@ type PairStartResult struct {
 }
 
 type PairSessionParams struct {
-	SessionID string `json:"session_id"`
+	SessionID   string `json:"session_id"`
+	ObserveOnly bool   `json:"observe_only,omitempty"`
 }
 
 type DisconnectParams struct {

@@ -429,40 +429,104 @@ func TestDesktopControllerKeepsFailedReplacementCancellationVisibleAndRetryable(
 	}
 }
 
-func TestDesktopControllerPollRetriesCancellationInsteadOfCompletingReplacement(t *testing.T) {
+func TestDesktopControllerObservesReplacementCancellationWithoutCommittingNewTrust(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      pairing.SessionState
+		wantState   lifecycle.State
+		wantPairing bool
+	}{
+		{name: "pending", status: pairing.SessionPending, wantState: lifecycle.StatePairingCancellationPending, wantPairing: true},
+		{name: "approved", status: pairing.SessionApproved, wantState: lifecycle.StatePairingCancellationPending, wantPairing: true},
+		{name: "completed", status: pairing.SessionCompleted, wantState: lifecycle.StatePairingCancellationPending, wantPairing: true},
+		{name: "rejected", status: pairing.SessionRejected, wantState: lifecycle.StateSearching},
+		{name: "expired", status: pairing.SessionExpired, wantState: lifecycle.StateSearching},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "saved", Name: "Saved Windows"}))
+			if err != nil {
+				t.Fatalf("NewMachine() error = %v", err)
+			}
+			_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled})
+			_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventSearchStarted})
+			pending := lifecycle.Pairing{
+				SessionID: "replacement-session", Peer: lifecycle.Peer{ID: "new", Name: "New Windows"},
+				Code: "123456", ExpiresAt: time.Now().Add(time.Minute),
+			}
+			_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCancellationPending, Pairing: &pending})
+			supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+			fallback := &recordingLocalHandler{result: localapi.PairingStatusResult{
+				SessionID: "replacement-session", Status: string(tt.status), Device: &localapi.Device{ID: "new"},
+			}}
+			controller, _ := NewDesktopController(supervisor, fallback)
+
+			if _, err := controller.Handle(context.Background(), localapi.MethodPairStatus, json.RawMessage(
+				`{"session_id":"replacement-session"}`,
+			)); err != nil {
+				t.Fatalf("PairStatus error = %v", err)
+			}
+			if !reflect.DeepEqual(fallback.methods, []localapi.Method{localapi.MethodPairStatus}) {
+				t.Fatalf("delegated methods = %v", fallback.methods)
+			}
+			var params localapi.PairSessionParams
+			if err := json.Unmarshal(fallback.raws[0], &params); err != nil || params.SessionID != "replacement-session" || !params.ObserveOnly {
+				t.Fatalf("PairStatus params = %#v error=%v", params, err)
+			}
+			got := supervisor.Snapshot()
+			if got.State != tt.wantState || (got.Pairing != nil) != tt.wantPairing || got.TrustedPeers != 1 || got.Peer == nil || got.Peer.ID != "saved" {
+				t.Fatalf("snapshot = %#v", got)
+			}
+		})
+	}
+}
+
+func TestDesktopControllerShutdownIgnoresReplacementCancelFailureAndStopsOwnedRuntime(t *testing.T) {
 	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "saved", Name: "Saved Windows"}))
 	if err != nil {
 		t.Fatalf("NewMachine() error = %v", err)
 	}
-	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled})
+	runtime := newRecordingSessionRuntime()
+	var stopContextErr error
+	runtime.stop = func(ctx context.Context) error {
+		stopContextErr = ctx.Err()
+		return stopContextErr
+	}
+	watchdog := &recordingCrashWatchdog{}
+	supervisor, _ := NewSupervisor(machine, runtime, WithWatchdogFactory(func() (CrashWatchdog, error) { return watchdog, nil }))
+	if err := supervisor.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
 	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventSearchStarted})
 	pending := lifecycle.Pairing{
 		SessionID: "replacement-session", Peer: lifecycle.Peer{ID: "new", Name: "New Windows"},
 		Code: "123456", ExpiresAt: time.Now().Add(time.Minute),
 	}
 	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCancellationPending, Pairing: &pending})
-	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
-	fallback := &recordingLocalHandler{results: map[localapi.Method]any{
-		localapi.MethodPairCancel: localapi.PairingStatusResult{
-			SessionID: "replacement-session", Status: string(pairing.SessionCancelled),
-		},
-		localapi.MethodPairStatus: localapi.PairingStatusResult{
-			SessionID: "replacement-session", Status: string(pairing.SessionCompleted),
-			Device: &localapi.Device{ID: "new"},
-		},
-	}}
+	fallback := &shutdownPairingHandler{cancelErr: errors.New("remote cancellation unavailable")}
 	controller, _ := NewDesktopController(supervisor, fallback)
+	requestCtx, cancel := context.WithCancel(context.Background())
+	cancel()
 
-	if _, err := controller.Handle(context.Background(), localapi.MethodPairStatus, json.RawMessage(
-		`{"session_id":"replacement-session"}`,
-	)); err != nil {
-		t.Fatalf("PairStatus cancellation retry error = %v", err)
+	result, err := controller.Handle(requestCtx, localapi.MethodShutdown, nil)
+	if err != nil {
+		t.Fatalf("Shutdown error = %v", err)
 	}
-	if !reflect.DeepEqual(fallback.methods, []localapi.Method{localapi.MethodPairCancel}) {
-		t.Fatalf("cancellation-pending poll delegated methods = %v", fallback.methods)
+	if result != (localapi.ShutdownResult{Stopped: true}) || fallback.cancelled != "replacement-session" || fallback.cancelContextErr != nil || fallback.abandoned != "replacement-session" {
+		t.Fatalf("shutdown result=%#v fallback=%#v", result, fallback)
 	}
-	if got := supervisor.Snapshot(); got.State != lifecycle.StateSearching || got.TrustedPeers != 1 || got.Peer == nil || got.Peer.ID != "saved" {
-		t.Fatalf("poll replaced old trust = %#v", got)
+	if runtime.stopCalls != 1 || runtime.reason != lifecycle.StopQuit || stopContextErr != nil || watchdog.cleanStops != 1 {
+		t.Fatalf("runtime stops=%d reason=%q context=%v watchdog=%d", runtime.stopCalls, runtime.reason, stopContextErr, watchdog.cleanStops)
+	}
+	if got := supervisor.Snapshot(); got.State != lifecycle.StatePaused || !got.Terminal || got.Pairing != nil {
+		t.Fatalf("terminal snapshot = %#v", got)
+	}
+	supervisor.mu.Lock()
+	running, ownedWatchdog := supervisor.running, supervisor.watchdog
+	supervisor.mu.Unlock()
+	if running || ownedWatchdog != nil {
+		t.Fatalf("owned runtime remains: running=%t watchdog=%#v", running, ownedWatchdog)
 	}
 }
 
@@ -1066,4 +1130,26 @@ func (h *recordingLocalHandler) Handle(_ context.Context, method localapi.Method
 		return result, h.err
 	}
 	return h.result, h.err
+}
+
+type shutdownPairingHandler struct {
+	cancelled        string
+	cancelContextErr error
+	cancelErr        error
+	abandoned        string
+}
+
+func (h *shutdownPairingHandler) Handle(ctx context.Context, method localapi.Method, raw json.RawMessage) (any, error) {
+	if method != localapi.MethodPairCancel {
+		return nil, errors.New("unexpected method")
+	}
+	var params localapi.PairSessionParams
+	_ = json.Unmarshal(raw, &params)
+	h.cancelled = params.SessionID
+	h.cancelContextErr = ctx.Err()
+	return nil, h.cancelErr
+}
+
+func (h *shutdownPairingHandler) abandonPairing(sessionID string) {
+	h.abandoned = sessionID
 }

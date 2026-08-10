@@ -524,6 +524,7 @@ type runtimePairingCoordinator interface {
 	Candidates(context.Context) (localapi.PairCandidatesResult, error)
 	Start(context.Context, string) (localapi.PairStartResult, error)
 	Status(context.Context, string) (localapi.PairingStatusResult, error)
+	Observe(context.Context, string) (localapi.PairingStatusResult, error)
 	Approve(context.Context, string) (localapi.PairingStatusResult, error)
 	Reject(context.Context, string) (localapi.PairingStatusResult, error)
 	Cancel(context.Context, string) (localapi.PairingStatusResult, error)
@@ -558,6 +559,15 @@ type productionAgentController struct {
 	mu                      sync.Mutex
 	beforeConfigTransaction func()
 	beforeConfigSave        func()
+}
+
+func (c *productionAgentController) abandonPairing(sessionID string) {
+	if c == nil || c.pairing == nil {
+		return
+	}
+	if cleaner, ok := c.pairing.(interface{ Abandon(string) }); ok {
+		cleaner.Abandon(sessionID)
+	}
 }
 
 type dockerPreparer interface {
@@ -635,8 +645,14 @@ func (c *productionAgentController) Handle(ctx context.Context, method localapi.
 		if err := decodeControlParams(raw, &params); err != nil {
 			return nil, err
 		}
-		result, err := c.pairing.Status(ctx, params.SessionID)
-		if err == nil && result.Status == string(pairing.SessionCompleted) && c.afterPair != nil {
+		var result localapi.PairingStatusResult
+		var err error
+		if params.ObserveOnly {
+			result, err = c.pairing.Observe(ctx, params.SessionID)
+		} else {
+			result, err = c.pairing.Status(ctx, params.SessionID)
+		}
+		if err == nil && !params.ObserveOnly && result.Status == string(pairing.SessionCompleted) && c.afterPair != nil {
 			go c.afterPair(context.Background())
 		}
 		return result, err
@@ -1467,6 +1483,10 @@ func (c windowsPairingCoordinator) Status(_ context.Context, sessionID string) (
 		result.Device = &localapi.Device{ID: status.DeviceID, Name: "Mac"}
 	}
 	return result, nil
+}
+
+func (c windowsPairingCoordinator) Observe(ctx context.Context, sessionID string) (localapi.PairingStatusResult, error) {
+	return c.Status(ctx, sessionID)
 }
 
 func (c windowsPairingCoordinator) Approve(ctx context.Context, sessionID string) (localapi.PairingStatusResult, error) {

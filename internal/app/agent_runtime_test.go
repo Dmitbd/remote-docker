@@ -579,6 +579,119 @@ func TestMacPairingCoordinatorPersistsPinnedDeviceAndRevokesBeforeLocalRemoval(t
 	}
 }
 
+func TestProductionPairStatusObserveOnlyNeverCompletesReplacement(t *testing.T) {
+	tests := []struct {
+		name   string
+		status pairing.SessionState
+		record *pairing.DeviceRecord
+	}{
+		{name: "approved", status: pairing.SessionApproved},
+		{name: "completed", status: pairing.SessionCompleted, record: &pairing.DeviceRecord{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &runtimePairingTransport{status: tt.status}
+			coordinator := newMacPairingCoordinator(macPairingOptions{
+				Secrets:        credentials.NewMemoryStore(),
+				Transport:      transport,
+				Docker:         &runtimeDockerExecutor{},
+				ClientDeviceID: func(context.Context) (string, error) { return "LOCAL-SYNC", nil },
+			})
+			started, err := coordinator.Start(context.Background(), "windows-peer")
+			if err != nil {
+				t.Fatalf("Start() error = %v", err)
+			}
+			coordinator.mu.Lock()
+			coordinator.pending.record = tt.record
+			secret := coordinator.pending.privateKeyPEM
+			coordinator.mu.Unlock()
+			afterPair := make(chan struct{}, 1)
+			controller := &productionAgentController{
+				pairing:   coordinator,
+				afterPair: func(context.Context) { afterPair <- struct{}{} },
+			}
+			raw, _ := json.Marshal(localapi.PairSessionParams{SessionID: started.SessionID, ObserveOnly: true})
+
+			result, err := controller.Handle(context.Background(), localapi.MethodPairStatus, raw)
+			if err != nil {
+				t.Fatalf("observe-only PairStatus error = %v", err)
+			}
+			status := result.(localapi.PairingStatusResult)
+			if status.Status != string(tt.status) || status.Device != nil {
+				t.Fatalf("observe-only status = %#v", status)
+			}
+			coordinator.mu.Lock()
+			pending := coordinator.pending
+			coordinator.mu.Unlock()
+			if pending == nil || pending.descriptor.ID != started.SessionID || pending.completing || allZero(secret) {
+				t.Fatalf("observe-only status mutated pending pairing = %#v", pending)
+			}
+			select {
+			case <-afterPair:
+				t.Fatal("observe-only completed replacement started post-pair recovery")
+			default:
+			}
+		})
+	}
+}
+
+func TestProductionPairStatusObserveOnlyClearsTerminalReplacementAndShutdownAbandonsSecret(t *testing.T) {
+	for _, state := range []pairing.SessionState{pairing.SessionRejected, pairing.SessionExpired} {
+		t.Run(string(state), func(t *testing.T) {
+			transport := &runtimePairingTransport{status: state}
+			coordinator := newMacPairingCoordinator(macPairingOptions{
+				Secrets:        credentials.NewMemoryStore(),
+				Transport:      transport,
+				Docker:         &runtimeDockerExecutor{},
+				ClientDeviceID: func(context.Context) (string, error) { return "LOCAL-SYNC", nil },
+			})
+			started, err := coordinator.Start(context.Background(), "windows-peer")
+			if err != nil {
+				t.Fatalf("Start() error = %v", err)
+			}
+			coordinator.mu.Lock()
+			secret := coordinator.pending.privateKeyPEM
+			coordinator.mu.Unlock()
+			controller := &productionAgentController{pairing: coordinator}
+			raw, _ := json.Marshal(localapi.PairSessionParams{SessionID: started.SessionID, ObserveOnly: true})
+
+			if _, err := controller.Handle(context.Background(), localapi.MethodPairStatus, raw); err != nil {
+				t.Fatalf("terminal observe-only PairStatus error = %v", err)
+			}
+			coordinator.mu.Lock()
+			pending := coordinator.pending
+			coordinator.mu.Unlock()
+			if pending != nil || !allZero(secret) {
+				t.Fatalf("terminal observation retained pending secret: pending=%#v zero=%t", pending, allZero(secret))
+			}
+		})
+	}
+
+	transport := &runtimePairingTransport{cancelErr: errors.New("remote cancellation unavailable")}
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Secrets:        credentials.NewMemoryStore(),
+		Transport:      transport,
+		Docker:         &runtimeDockerExecutor{},
+		ClientDeviceID: func(context.Context) (string, error) { return "LOCAL-SYNC", nil },
+	})
+	started, err := coordinator.Start(context.Background(), "windows-peer")
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	coordinator.mu.Lock()
+	secret := coordinator.pending.privateKeyPEM
+	coordinator.mu.Unlock()
+	agent := NewAgent(nil, nil, &productionAgentController{pairing: coordinator})
+	agent.abandonPairing(started.SessionID)
+	coordinator.mu.Lock()
+	pending := coordinator.pending
+	coordinator.mu.Unlock()
+	if pending != nil || !allZero(secret) {
+		t.Fatalf("shutdown abandon retained pending secret: pending=%#v zero=%t", pending, allZero(secret))
+	}
+}
+
 func TestMacPairingLocalForgetSkipsRemoteRevokeAndPreservesWorkspaces(t *testing.T) {
 	root := t.TempDir()
 	store := config.Store{Path: filepath.Join(root, "config.json")}
@@ -1532,6 +1645,15 @@ func testAuthorizedKey(t *testing.T) string {
 		t.Fatalf("NewPublicKey() error = %v", err)
 	}
 	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key)))
+}
+
+func allZero(value []byte) bool {
+	for _, item := range value {
+		if item != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func TestInfrastructureRestorerReplacesLongRunningEventStreamAndReconcilesRelays(t *testing.T) {
