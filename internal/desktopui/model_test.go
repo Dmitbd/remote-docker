@@ -103,6 +103,38 @@ func TestBuildStateFormatsUnavailableResourcesAndSafeDiagnostics(t *testing.T) {
 		state.Diagnostics[2].Status != DiagnosticUnavailable {
 		t.Fatalf("diagnostics = %#v", state.Diagnostics)
 	}
+	wantCards := []string{"mac-app", "mac-sync", "windows-app", "windows-wsl"}
+	for index, want := range wantCards {
+		if state.Resources.Cards[index].ID != want {
+			t.Fatalf("resource card %d = %q, want %q", index, state.Resources.Cards[index].ID, want)
+		}
+	}
+}
+
+func TestBuildStateShowsProjectProgressAndRedactsUnsafeMessages(t *testing.T) {
+	state := BuildState(SnapshotInput{
+		Status:     localapi.StatusResult{Role: "mac_client", State: "connected", Sync: localapi.ServiceStatus{State: "ready"}},
+		Workspaces: []localapi.Workspace{{ID: "project", Name: "Project", Path: "/Users/developer/project"}},
+		Sync: localapi.SyncStatusResult{Folders: []localapi.SyncFolderStatus{{
+			WorkspaceID: "project", State: "syncing", LastSuccess: "2026-08-10T10:00:00Z",
+			Message: "token=secret /Users/developer/.ssh/id_ed25519",
+		}}},
+		Diagnostics: []localapi.DoctorCheck{{
+			Name: "tunnel_session", Status: "failed", Message: "nonce=secret", Action: "run --key secret",
+		}},
+	}, "darwin", time.Unix(0, 0))
+
+	project := state.Projects[0]
+	if project.SyncStatus != "Синхронизация" || project.LastSuccess != "10.08.2026, 10:00" {
+		t.Fatalf("project progress = %#v", project)
+	}
+	if project.Error != "Синхронизация требует внимания. Откройте диагностику." {
+		t.Fatalf("unsafe project error was exposed: %q", project.Error)
+	}
+	check := state.Diagnostics[0]
+	if check.Detail != "Проверка не завершилась успешно." || check.Action != "Откройте диагностику и повторите проверку." {
+		t.Fatalf("unsafe diagnostic output was exposed: %#v", check)
+	}
 }
 
 func hasOperation(operations []Operation, id string) bool {

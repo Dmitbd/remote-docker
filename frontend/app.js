@@ -14,6 +14,7 @@
   let localBusy = false;
   let pollTimer = 0;
   let stopped = false;
+  let manualAddressRevealed = false;
 
   const escapeHTML = (value) => String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -60,6 +61,13 @@
       body += `<div class="device-list">${devices.map(renderDevice).join('')}</div>`;
     } else if (state.lifecycle === 'searching' || state.lifecycle === 'client_ready' || state.lifecycle === 'host_waiting') {
       body += '<div class="empty">Устройства пока не найдены.</div>';
+    }
+    const canUseManualAddress = state.platform === 'darwin' && (state.lifecycle === 'searching' || state.lifecycle === 'client_ready');
+    if (!canUseManualAddress) manualAddressRevealed = false;
+    if (canUseManualAddress && !manualAddressRevealed) {
+      body += '<button class="text-action" id="discovery-help" type="button">Windows не находится?</button>';
+    } else if (canUseManualAddress) {
+      body += '<form class="manual-address" id="manual-address-form"><label class="sr-only" for="manual-address-input">Частный IP-адрес Windows</label><input id="manual-address-input" name="address" type="text" inputmode="decimal" autocomplete="off" placeholder="Частный IP-адрес Windows, например 192.168.1.20" required><button class="secondary" type="submit">Подключиться</button></form><p class="path">Адрес проверяется повторно приложением. Разрешены только частные адреса локальной сети.</p>';
     }
     const actions = (state.operations || []).filter((operation) => operation.id !== 'quit');
     if (actions.length) body += `<div class="main-actions">${actions.map((operation) => operationButton(operation)).join('')}</div>`;
@@ -129,6 +137,19 @@
     });
     const picker = document.getElementById('pick-workspace');
     if (picker) picker.addEventListener('click', pickWorkspace, {once: true});
+    const discoveryHelp = document.getElementById('discovery-help');
+    if (discoveryHelp) discoveryHelp.addEventListener('click', () => {
+      manualAddressRevealed = true;
+      renderConnection(currentState);
+      bindDynamicActions();
+      document.getElementById('manual-address-input')?.focus();
+    }, {once: true});
+    const manualAddress = document.getElementById('manual-address-form');
+    if (manualAddress) manualAddress.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const input = document.getElementById('manual-address-input');
+      perform('manual-address', input?.value || '', manualAddress.querySelector('button'));
+    }, {once: true});
   }
 
   function pendingExists(state) {

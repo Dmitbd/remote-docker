@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/Dmitbd/remote-docker/internal/localapi"
@@ -25,6 +27,56 @@ func TestOperationGuardRejectsDuplicatesAndConflictsAndAlwaysReleases(t *testing
 	release()
 	if _, err := guard.Begin(OperationPause); err != nil {
 		t.Fatalf("guard remained locked after release: %v", err)
+	}
+}
+
+func TestBackendCanonicalizesMacWorkspaceBeforeRegistration(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	if err := os.Mkdir(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "project-alias")
+	if err := os.Symlink(project, alias); err != nil {
+		t.Fatal(err)
+	}
+	var received localapi.WorkspaceAddParams
+	handler := &desktopUIHandler{
+		responses: map[localapi.Method]any{
+			localapi.MethodStatus:         localapi.StatusResult{Role: "mac_client", State: "client_ready"},
+			localapi.MethodWorkspaceList:  localapi.WorkspaceListResult{},
+			localapi.MethodSyncStatus:     localapi.SyncStatusResult{},
+			localapi.MethodResourceStatus: localapi.ResourceStatusResult{},
+			localapi.MethodDoctor:         localapi.DoctorResult{},
+		},
+		rawCall: func(method localapi.Method, raw json.RawMessage) error {
+			if method == localapi.MethodWorkspaceAdd {
+				return json.Unmarshal(raw, &received)
+			}
+			return nil
+		},
+	}
+	backend := NewBackend(localClientForTest(handler), "darwin")
+	if _, err := backend.Perform(context.Background(), OperationAddProject, alias); err != nil {
+		t.Fatalf("Perform(add-project) error = %v", err)
+	}
+	want, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if received.Path != want {
+		t.Fatalf("workspace path = %q, want canonical %q", received.Path, want)
+	}
+}
+
+func TestBackendRejectsWorkspaceSelectionOutsideMacAndManualPublicAddress(t *testing.T) {
+	backend := NewBackend(localapi.Client{}, "windows")
+	if _, _, err := backend.resolve(context.Background(), OperationAddProject, `C:\project`); err == nil {
+		t.Fatal("Windows UI accepted a workspace selection")
+	}
+	backend.Platform = "darwin"
+	if _, _, err := backend.resolve(context.Background(), OperationManualAddress, "203.0.113.8"); err == nil {
+		t.Fatal("manual pairing accepted a public address")
 	}
 }
 
@@ -115,11 +167,17 @@ func operationByID(t *testing.T, operations []Operation, id string) Operation {
 type desktopUIHandler struct {
 	responses map[localapi.Method]any
 	call      func(localapi.Method) error
+	rawCall   func(localapi.Method, json.RawMessage) error
 }
 
-func (h *desktopUIHandler) Handle(_ context.Context, method localapi.Method, _ json.RawMessage) (any, error) {
+func (h *desktopUIHandler) Handle(_ context.Context, method localapi.Method, raw json.RawMessage) (any, error) {
 	if h.call != nil {
 		if err := h.call(method); err != nil {
+			return nil, err
+		}
+	}
+	if h.rawCall != nil {
+		if err := h.rawCall(method, raw); err != nil {
 			return nil, err
 		}
 	}

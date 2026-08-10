@@ -366,11 +366,11 @@ func buildProjects(workspaces []localapi.Workspace, syncResult localapi.SyncStat
 		folder := statuses[workspace.ID]
 		project := Project{
 			ID: workspace.ID, Name: fallback(workspace.Name, filepath.Base(workspace.Path)), Path: workspace.Path,
-			SyncStatus: fallback(folder.State, aggregate.State),
+			SyncStatus: syncStatusLabel(fallback(folder.State, aggregate.State)),
 			Operations: []Operation{operation(OperationRemoveProject, true)},
 		}
-		project.LastSuccess = fallback(folder.LastSuccess, aggregate.LastSuccess)
-		project.Error = folder.Message
+		project.LastSuccess = formatLastSuccess(fallback(folder.LastSuccess, aggregate.LastSuccess))
+		project.Error = safeProjectError(folder.Message)
 		projects = append(projects, project)
 	}
 	return projects
@@ -421,7 +421,7 @@ func buildDiagnostics(checks []localapi.DoctorCheck) []Diagnostic {
 		result = append(result, Diagnostic{
 			ID: check.Name, Label: diagnosticLabel(check.Name), Status: status,
 			StatusLabel: diagnosticStatusLabel(status), Detail: diagnosticDetail(check.Name, check.Message),
-			Action: check.Action,
+			Action: safeDiagnosticAction(check.Action),
 		})
 	}
 	return result
@@ -504,8 +504,57 @@ func diagnosticDetail(id, reason string) string {
 	case "check_failed":
 		return "Проверка не завершилась успешно."
 	default:
-		return fallback(reason, "Проверка недоступна в текущем состоянии.")
+		return "Проверка не завершилась успешно."
 	}
+}
+
+func syncStatusLabel(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "ready", "idle", "synced":
+		return "Синхронизировано"
+	case "starting", "scanning", "syncing":
+		return "Синхронизация"
+	case "paused", "stopped":
+		return "Остановлено"
+	case "error", "failed":
+		return "Требует внимания"
+	default:
+		return "Ожидание синхронизации"
+	}
+}
+
+func formatLastSuccess(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return "Обновлялось ранее"
+	}
+	return parsed.Format("02.01.2006, 15:04")
+}
+
+func safeProjectError(reason string) string {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "":
+		return ""
+	case "remote_connection_not_ready", "not_connected":
+		return "Удалённое подключение ещё не готово."
+	case "workspace_unavailable", "folder_unavailable":
+		return "Папка проекта сейчас недоступна."
+	case "permission_denied":
+		return "Remote Docker не может прочитать папку проекта."
+	default:
+		return "Синхронизация требует внимания. Откройте диагностику."
+	}
+}
+
+func safeDiagnosticAction(action string) string {
+	if strings.TrimSpace(action) == "" {
+		return ""
+	}
+	return "Откройте диагностику и повторите проверку."
 }
 
 func operation(id string, enabled bool) Operation {

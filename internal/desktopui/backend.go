@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -217,10 +219,14 @@ func (b *Backend) resolve(ctx context.Context, id, value string) (localapi.Metho
 		}
 		return localapi.MethodForgetDevice, localapi.ForgetDeviceParams{DeviceID: value}, nil
 	case OperationAddProject:
-		if value == "" {
-			return "", nil, errors.New("выберите папку проекта")
+		if b.Platform != "darwin" {
+			return "", nil, errors.New("папки проектов добавляются только на Mac")
 		}
-		return localapi.MethodWorkspaceAdd, localapi.WorkspaceAddParams{Path: value}, nil
+		canonical, err := canonicalWorkspacePath(value)
+		if err != nil {
+			return "", nil, err
+		}
+		return localapi.MethodWorkspaceAdd, localapi.WorkspaceAddParams{Path: canonical}, nil
 	case OperationRemoveProject:
 		if value == "" {
 			return "", nil, errors.New("выберите проект")
@@ -233,6 +239,26 @@ func (b *Backend) resolve(ctx context.Context, id, value string) (localapi.Metho
 	default:
 		return "", nil, errors.New("действие недоступно")
 	}
+}
+
+func canonicalWorkspacePath(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", errors.New("выберите папку проекта")
+	}
+	absolute, err := filepath.Abs(value)
+	if err != nil {
+		return "", errors.New("не удалось проверить папку проекта")
+	}
+	canonical, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", errors.New("выбранная папка проекта недоступна")
+	}
+	info, err := os.Stat(canonical)
+	if err != nil || !info.IsDir() {
+		return "", errors.New("выберите существующую папку проекта")
+	}
+	return filepath.Abs(canonical)
 }
 
 func (b *Backend) cachedDiagnostics(ctx context.Context) []localapi.DoctorCheck {
