@@ -84,6 +84,16 @@ func TestBuildStateKeepsDeviceActionsRoleAndConnectionSafe(t *testing.T) {
 	}
 }
 
+func TestBuildStateCarriesDisplayedPairingSessionID(t *testing.T) {
+	state := BuildState(SnapshotInput{Status: localapi.StatusResult{
+		Role: "mac_client", State: "pairing",
+		Pairing: &localapi.PairingStatusResult{SessionID: "session-1", Code: "123456"},
+	}}, "darwin", time.Unix(0, 0))
+	if state.PairSessionID != "session-1" {
+		t.Fatalf("pair session ID = %q", state.PairSessionID)
+	}
+}
+
 func TestBuildStateFormatsUnavailableResourcesAndSafeDiagnostics(t *testing.T) {
 	state := BuildState(SnapshotInput{
 		Status: localapi.StatusResult{Role: "mac_client", State: "connected"},

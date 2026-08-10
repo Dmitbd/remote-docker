@@ -78,7 +78,7 @@
       body += '<form class="manual-address" id="manual-address-form"><label class="sr-only" for="manual-address-input">Частный IP-адрес Windows</label><input id="manual-address-input" name="address" type="text" inputmode="decimal" autocomplete="off" placeholder="Частный IP-адрес Windows, например 192.168.1.20" required><button class="secondary" type="submit">Подключиться</button></form><p class="path">Адрес проверяется повторно приложением. Разрешены только частные адреса локальной сети.</p>';
     }
     const actions = (state.operations || []).filter((operation) => operation.id !== 'quit');
-    if (actions.length) body += `<div class="main-actions">${actions.map((operation) => operationButton(operation)).join('')}</div>`;
+    if (actions.length) body += `<div class="main-actions">${actions.map((operation) => operationButton(operation, state.pairSessionId || '')).join('')}</div>`;
     document.getElementById('connection-section').innerHTML = body;
   }
 
@@ -195,9 +195,10 @@
     if (localBusy || !id) return;
     if ((id === 'forget-device' || id === 'remove-project') && !window.confirm(id === 'forget-device' ? 'Забыть это устройство? Для следующего подключения потребуется безопасное сопряжение.' : 'Удалить проект из синхронизации? Исходные файлы на Mac останутся.')) return;
     setOperationError('');
-    localBusy = true;
-    await snapshotDone;
     const original = button?.textContent?.trim() || '';
+    const requestID = ++nextRequestID;
+    lastAppliedRequestID = requestID;
+    localBusy = true;
     if (button) {
       button.classList.add('loading');
       button.disabled = true;
@@ -206,8 +207,8 @@
     }
     updateGlobalBusy();
     announce(button?.textContent?.trim() || 'Выполняется действие');
+    await snapshotDone;
     let nextState = null;
-    const requestID = ++nextRequestID;
     try {
       const api = bridge();
       if (!api?.Perform) throw new Error('Окно не подключено к фоновому приложению.');

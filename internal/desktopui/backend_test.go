@@ -81,6 +81,31 @@ func TestBackendRejectsWorkspaceSelectionOutsideMacAndManualPublicAddress(t *tes
 	}
 }
 
+func TestBackendPairingActionsUseDisplayedSessionWithoutStatusRead(t *testing.T) {
+	calls := 0
+	handler := &desktopUIHandler{
+		responses: map[localapi.Method]any{
+			localapi.MethodStatus: localapi.StatusResult{Pairing: &localapi.PairingStatusResult{SessionID: "newer-session"}},
+		},
+		call: func(localapi.Method) error {
+			calls++
+			return nil
+		},
+	}
+	backend := NewBackend(localClientForTest(handler), "darwin")
+	method, rawParams, err := backend.resolve(context.Background(), OperationCancelPair, "displayed-session")
+	if err != nil {
+		t.Fatalf("resolve(cancel-pair) error = %v", err)
+	}
+	params, ok := rawParams.(localapi.PairSessionParams)
+	if method != localapi.MethodPairCancel || !ok || params.SessionID != "displayed-session" {
+		t.Fatalf("resolved cancel = method %q params %#v", method, rawParams)
+	}
+	if calls != 0 {
+		t.Fatalf("resolve(cancel-pair) made %d status calls, want none", calls)
+	}
+}
+
 func TestEveryMutatingDesktopOperationHasAnExplicitTimeout(t *testing.T) {
 	for _, id := range []string{
 		OperationConnect, OperationConnectTrusted, OperationManualAddress,

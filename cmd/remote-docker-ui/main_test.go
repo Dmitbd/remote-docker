@@ -103,6 +103,16 @@ func TestFrontendRestoresActionsShowsErrorsAndSerializesPolling(t *testing.T) {
 	if calls := strings.Count(appSource, "setOperationError(message)"); calls < 3 {
 		t.Errorf("visible operation errors are handled in only %d failure paths", calls)
 	}
+	performSource := appSource[strings.Index(appSource, "async function perform"):strings.Index(appSource, "function findOperation")]
+	waitIndex := strings.Index(performSource, "await snapshotDone")
+	loaderIndex := strings.Index(performSource, "button.classList.add('loading')")
+	requestIndex := strings.Index(performSource, "const requestID = ++nextRequestID")
+	if waitIndex < 0 || loaderIndex < 0 || requestIndex < 0 || loaderIndex > waitIndex || requestIndex > waitIndex {
+		t.Error("frontend does not reserve the operation request and show its loader before waiting for an old snapshot")
+	}
+	if !strings.Contains(appSource, "operationButton(operation, state.pairSessionId || '')") {
+		t.Error("pairing action does not carry the session ID from displayed state")
+	}
 	for _, required := range []string{`id="operation-error"`, `role="alert"`} {
 		if !strings.Contains(indexSource, required) {
 			t.Errorf("frontend markup is missing %q", required)
