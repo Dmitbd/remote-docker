@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <title>Remote Docker</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="window" id="app" aria-busy="true">
+    <header class="titlebar">
+      <div class="brand">
+        <img class="app-icon" src="assets/app.png" alt="">
+        <div class="brand-copy">
+          <strong>Remote Docker</strong>
+          <span id="role-label">Загрузка состояния…</span>
+        </div>
+      </div>
+      <div class="top-status" role="status" aria-live="polite">
+        <i class="status-dot gray" id="status-dot"></i>
+        <span id="status-label">Подключение</span>
+      </div>
+    </header>
+
+    <div class="shell">
+      <aside class="sidebar">
+        <nav class="nav" aria-label="Разделы">
+          <button class="nav-button active" data-section="connection" aria-current="page">
+            <svg class="nav-icon" aria-hidden="true"><use href="assets/icons.svg#connection"></use></svg>
+            <span>Соединение</span>
+          </button>
+          <button class="nav-button" data-section="projects">
+            <svg class="nav-icon" aria-hidden="true"><use href="assets/icons.svg#projects"></use></svg>
+            <span>Проекты</span>
+          </button>
+          <button class="nav-button" data-section="resources">
+            <svg class="nav-icon" aria-hidden="true"><use href="assets/icons.svg#resources"></use></svg>
+            <span>Ресурсы</span>
+          </button>
+          <button class="nav-button" data-section="diagnostics">
+            <svg class="nav-icon" aria-hidden="true"><use href="assets/icons.svg#diagnostics"></use></svg>
+            <span>Диагностика</span>
+          </button>
+        </nav>
+        <button class="nav-button quit" id="quit-button" data-action="quit">
+          <svg class="nav-icon" aria-hidden="true"><use href="assets/icons.svg#quit"></use></svg>
+          <span>Завершить работу</span>
+        </button>
+      </aside>
+
+      <main class="content" id="content">
+        <section id="connection-section" class="page" aria-labelledby="connection-title"></section>
+        <section id="projects-section" class="page section-hidden" aria-labelledby="projects-title"></section>
+        <section id="resources-section" class="page section-hidden" aria-labelledby="resources-title"></section>
+        <section id="diagnostics-section" class="page section-hidden" aria-labelledby="diagnostics-title"></section>
+      </main>
+    </div>
+  </div>
+
+  <div class="sr-status" id="announcement" role="status" aria-live="polite" aria-atomic="true"></div>
+  <script src="app.js"></script>
+</body>
+</html>
