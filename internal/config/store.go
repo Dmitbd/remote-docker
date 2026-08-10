@@ -133,6 +133,9 @@ func validate(cfg Config) error {
 	if len(cfg.Devices) > 1 {
 		return errors.New("configuration supports only one trusted device")
 	}
+	if len(cfg.PendingRevocations) > 16 {
+		return errors.New("configuration contains too many pending revocations")
+	}
 	if cfg.ActiveDevice == "" {
 		// A single dormant public record is tolerated while an old pairing is
 		// being revoked. Only ActiveDevice is trusted by the application.

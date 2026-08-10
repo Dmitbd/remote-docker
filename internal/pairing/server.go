@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
@@ -30,6 +31,7 @@ const (
 	pairSessionStatusPath = "/v1/pair/session/status"
 	pairSessionCancelPath = "/v1/pair/session/cancel"
 	pairInfoPath          = "/v1/pair/info"
+	pairRevokePath        = "/v1/pair/revoke"
 )
 
 // Installer applies or revokes the one managed Mac authorization on Windows.
@@ -58,6 +60,7 @@ type Server struct {
 	installer    Installer
 	sessionGuard func(context.Context) error
 	afterInstall func(context.Context, TrustedPeer) error
+	revoke       func(context.Context, string, []byte) error
 	now          func() time.Time
 	random       io.Reader
 	active       *sessionState
@@ -104,6 +107,12 @@ func WithAfterInstall(afterInstall func(context.Context, TrustedPeer) error) Ser
 	return func(server *Server) {
 		server.afterInstall = afterInstall
 	}
+}
+
+// WithRevocation configures proof-authenticated cleanup independently from an
+// operational SSH tunnel.
+func WithRevocation(revoke func(context.Context, string, []byte) error) ServerOption {
+	return func(server *Server) { server.revoke = revoke }
 }
 
 // WithDisplayName sets presentation metadata returned only over pairing TLS.
@@ -257,6 +266,10 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.serveSessionCancel(response, request)
 		return
 	}
+	if request.URL.Path == pairRevokePath {
+		s.serveRevocation(response, request)
+		return
+	}
 	if request.Method == http.MethodPost && request.URL.Path == pairSessionPath {
 		s.serveStartSession(response, request)
 		return
@@ -282,6 +295,27 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 	}
 	response.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(response).Encode(record)
+}
+
+func (s *Server) serveRevocation(response http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost || request.URL.RawQuery != "" || s.revoke == nil {
+		writeError(response, http.StatusNotFound, "pairing revocation endpoint not found")
+		return
+	}
+	request.Body = http.MaxBytesReader(response, request.Body, 8<<10)
+	var input revocationRequest
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil || !validDeviceID(input.DeviceID) || len(input.Proof) != RevocationProofSize {
+		writeError(response, http.StatusBadRequest, "invalid pairing revocation request")
+		return
+	}
+	if err := s.revoke(request.Context(), input.DeviceID, append([]byte(nil), input.Proof...)); err != nil {
+		writeError(response, http.StatusForbidden, "pairing revocation was not accepted")
+		return
+	}
+	response.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(response).Encode(map[string]bool{"revoked": true})
 }
 
 func (s *Server) serveInfo(response http.ResponseWriter, request *http.Request) {
@@ -410,7 +444,8 @@ func (s *Server) confirm(ctx context.Context, request confirmRequest) (DeviceRec
 	}
 
 	wantCode, err := Code(session.descriptor)
-	valid := err == nil &&
+	validProof := len(request.RevocationProof) == 0 || len(request.RevocationProof) == RevocationProofSize
+	valid := err == nil && validProof &&
 		subtle.ConstantTimeCompare([]byte(request.Code), []byte(wantCode)) == 1 &&
 		bytes.Equal(request.ClientPublicKey, session.descriptor.ClientPublicKey) &&
 		validDeviceID(request.DeviceID) &&
@@ -434,6 +469,9 @@ func (s *Server) confirm(ctx context.Context, request confirmRequest) (DeviceRec
 	}
 	if s.afterInstall != nil {
 		peer := TrustedPeer{DeviceID: request.DeviceID, PublicKey: append(ed25519.PublicKey(nil), session.descriptor.ClientPublicKey...)}
+		if len(request.RevocationProof) == RevocationProofSize {
+			peer.RevocationProofHash = sha256.Sum256(request.RevocationProof)
+		}
 		if err := s.afterInstall(ctx, peer); err != nil {
 			if s.installer != nil {
 				_ = s.installer.Revoke(ctx, request.DeviceID)

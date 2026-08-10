@@ -25,6 +25,12 @@ type confirmRequest struct {
 	ClientPublicKey []byte `json:"client_public_key"`
 	DeviceID        string `json:"device_id"`
 	AuthorizedKey   string `json:"authorized_key"`
+	RevocationProof []byte `json:"revocation_proof,omitempty"`
+}
+
+type revocationRequest struct {
+	DeviceID string `json:"device_id"`
+	Proof    []byte `json:"proof"`
 }
 
 type sessionControlRequest struct {
@@ -34,11 +40,12 @@ type sessionControlRequest struct {
 
 // Client confirms a descriptor after the user compares its visual code.
 type Client struct {
-	HTTPClient    *http.Client
-	BaseURL       string
-	Session       SessionDescriptor
-	DeviceID      string
-	AuthorizedKey string
+	HTTPClient      *http.Client
+	BaseURL         string
+	Session         SessionDescriptor
+	DeviceID        string
+	AuthorizedKey   string
+	RevocationProof []byte
 }
 
 // HTTPError reports a rejected pairing request.
@@ -266,6 +273,7 @@ func (c *Client) Confirm(ctx context.Context, code string) (DeviceRecord, []byte
 		ClientPublicKey: append([]byte(nil), c.Session.ClientPublicKey...),
 		DeviceID:        c.DeviceID,
 		AuthorizedKey:   c.AuthorizedKey,
+		RevocationProof: append([]byte(nil), c.RevocationProof...),
 	})
 	if err != nil {
 		return DeviceRecord{}, nil, fmt.Errorf("encode pairing request: %w", err)
@@ -307,6 +315,32 @@ func (c *Client) Confirm(ctx context.Context, code string) (DeviceRecord, []byte
 		return DeviceRecord{}, raw, fmt.Errorf("decode pairing response: %w", err)
 	}
 	return record, raw, nil
+}
+
+// Revoke removes one trust relationship through the pinned pairing service.
+// The high-entropy proof is separate from the operational tunnel identity.
+func (c *Client) Revoke(ctx context.Context, deviceID string, proof []byte) error {
+	baseURL, err := url.Parse(c.BaseURL)
+	if err != nil || baseURL.Scheme != "https" || baseURL.Host == "" || !validDeviceID(deviceID) || len(proof) != RevocationProofSize {
+		return ErrInvalidSession
+	}
+	payload, err := json.Marshal(revocationRequest{DeviceID: deviceID, Proof: append([]byte(nil), proof...)})
+	if err != nil {
+		return fmt.Errorf("encode pairing revocation: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.BaseURL, "/")+pairRevokePath, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("create pairing revocation request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, raw, err := c.doPinned(request, 16<<10)
+	if err != nil {
+		return err
+	}
+	if response.StatusCode != http.StatusOK {
+		return decodeHTTPError(response.StatusCode, raw)
+	}
+	return nil
 }
 
 func (c *Client) doPinned(request *http.Request, limit int64) (*http.Response, []byte, error) {

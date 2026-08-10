@@ -58,6 +58,32 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 }
 
+func TestStoreRoundTripsPendingRevocationWithoutMakingItTrusted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	store := Store{Path: path}
+	want := Config{
+		SchemaVersion: CurrentSchemaVersion,
+		PendingRevocations: map[string]PendingRevocation{
+			"old-pc": {
+				Device: Device{Name: "Old PC", Address: "192.168.1.20", TunnelPeerPublicKey: "PINNED"},
+				DockerContext: DockerContextChange{
+					Name: "remote-docker", CurrentHost: "ssh://remote-docker-device-old-pc", Created: true,
+				},
+			},
+		},
+	}
+	if err := store.Save(want); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	got, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !reflect.DeepEqual(got, want) || got.ActiveDevice != "" || len(got.Devices) != 0 {
+		t.Fatalf("Load() = %#v, want pending-only %#v", got, want)
+	}
+}
+
 func TestStoreMigratesSchemaV2WithoutSilentlyAddingTunnelTrust(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	legacy := `{"schemaVersion":2,"activeDevice":"pc-1","devices":{"pc-1":{"name":"Dev PC","address":"192.168.1.20","sshPort":49222}}}`

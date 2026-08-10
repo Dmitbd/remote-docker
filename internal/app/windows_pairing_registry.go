@@ -2,6 +2,9 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"strings"
 
@@ -51,10 +54,49 @@ func (r windowsPairingRegistry) Commit(_ context.Context, peer pairing.TrustedPe
 			deviceID: {
 				Name: "Mac", ClientDeviceID: deviceID, TunnelPort: tunnel.TunnelPort,
 				TunnelPeerPublicKey: encodedPeer, TransportVersion: tunnel.CurrentTransportVersion,
+				RevocationProofHash: encodeRevocationProofHash(peer.RevocationProofHash),
 			},
 		}
 		return r.store.Save(cfg)
 	})
+}
+
+func (r windowsPairingRegistry) RevokeWithProof(ctx context.Context, installer pairing.Installer, deviceID string, proof []byte) error {
+	if installer == nil || len(proof) != pairing.RevocationProofSize {
+		return errors.New("pairing revocation proof is invalid")
+	}
+	return r.runConfigTransaction(func() error {
+		cfg, err := loadAgentConfig(r.store)
+		if err != nil {
+			return err
+		}
+		if cfg.ActiveDevice != deviceID {
+			return nil
+		}
+		device, ok := cfg.Devices[deviceID]
+		if !ok {
+			return nil
+		}
+		want, err := hex.DecodeString(device.RevocationProofHash)
+		got := sha256.Sum256(proof)
+		if err != nil || len(want) != sha256.Size || subtle.ConstantTimeCompare(want, got[:]) != 1 {
+			return errors.New("pairing revocation proof is invalid")
+		}
+		if err := installer.Revoke(ctx, deviceID); err != nil {
+			return err
+		}
+		cfg.ActiveDevice = ""
+		cfg.Devices = nil
+		return r.store.Save(cfg)
+	})
+}
+
+func encodeRevocationProofHash(hash [32]byte) string {
+	var zero [32]byte
+	if subtle.ConstantTimeCompare(hash[:], zero[:]) == 1 {
+		return ""
+	}
+	return hex.EncodeToString(hash[:])
 }
 
 func (r windowsPairingRegistry) Forget(deviceID string) error {

@@ -66,6 +66,32 @@ func TestRestoreContextRevertsOnlyExpectedManagedEndpoint(t *testing.T) {
 	}
 }
 
+func TestRestoreContextIsIdempotentAfterCreatedContextWasRemoved(t *testing.T) {
+	executor := &recordingExecutor{results: []executorResult{{err: codedError{code: 1}}}}
+	change := ContextChange{
+		Name: "remote-docker", CurrentHost: "ssh://remote-docker-device-peer", Created: true,
+	}
+	if err := RestoreContext(context.Background(), executor, "docker-real", change); err != nil {
+		t.Fatalf("RestoreContext() error = %v", err)
+	}
+	if got := executor.args(); !reflect.DeepEqual(got, [][]string{{"context", "inspect", "remote-docker"}}) {
+		t.Fatalf("commands = %#v", got)
+	}
+}
+
+func TestRestoreContextIsIdempotentAfterPreviousEndpointWasRestored(t *testing.T) {
+	executor := &recordingExecutor{results: []executorResult{{stdout: `[{"Name":"remote-docker","Metadata":{"Description":"Managed by Remote Docker"},"Endpoints":{"docker":{"Host":"ssh://remote-docker-device-old"}}}]`}}}
+	change := ContextChange{
+		Name: "remote-docker", PreviousHost: "ssh://remote-docker-device-old", CurrentHost: "ssh://remote-docker-device-new",
+	}
+	if err := RestoreContext(context.Background(), executor, "docker-real", change); err != nil {
+		t.Fatalf("RestoreContext() error = %v", err)
+	}
+	if got := executor.args(); !reflect.DeepEqual(got, [][]string{{"context", "inspect", "remote-docker"}}) {
+		t.Fatalf("commands = %#v", got)
+	}
+}
+
 func TestEnsureContextKeepsMatchingManagedContext(t *testing.T) {
 	executor := &recordingExecutor{
 		results: []executorResult{{stdout: `[

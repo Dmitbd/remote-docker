@@ -120,6 +120,9 @@ func RestoreContext(ctx context.Context, executor Executor, cli string, change C
 		Stdout: &stdout,
 		Stderr: io.Discard,
 	}); err != nil {
+		if change.Created && ExitCode(err) == 1 {
+			return nil
+		}
 		return fmt.Errorf("inspect docker context %q for restore: %w", change.Name, err)
 	}
 	currentHost, err := managedContextHost(stdout.Bytes(), change.Name)
@@ -127,6 +130,9 @@ func RestoreContext(ctx context.Context, executor Executor, cli string, change C
 		return err
 	}
 	if currentHost != change.CurrentHost {
+		if !change.Created && currentHost == change.PreviousHost {
+			return nil
+		}
 		return fmt.Errorf("%w: %q changed before managed rollback", ErrContextCollision, change.Name)
 	}
 	if change.Created {

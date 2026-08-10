@@ -85,6 +85,7 @@ type AgentRuntime struct {
 	pairingHandler  localapi.Handler
 	pairingComplete func(context.Context, string) (localapi.PairingStatusResult, error)
 	pairingRollback func(context.Context, string) error
+	pairingCleanup  func(context.Context) error
 	pairingAbandon  func(string)
 	pairingAfter    func()
 	pairingRuntime  *pairingLifecycleReconciler
@@ -345,6 +346,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 		pairingHandler:  controller,
 		pairingComplete: controller.completePairing,
 		pairingRollback: controller.rollbackCompletedPairing,
+		pairingCleanup:  controller.reconcilePendingRevocations,
 		pairingAbandon:  controller.abandonPairing,
 		pairingAfter:    controller.notifyPairingCompleted,
 		windowsStopper: func() managedWindowsRuntimeStopper {
@@ -389,6 +391,7 @@ func (r *AgentRuntime) BindLifecycle(machine *lifecycle.Machine, appVersion stri
 		r.pairingRuntime = &pairingLifecycleReconciler{
 			machine: machine, handler: r.pairingHandler,
 			complete: r.pairingComplete, rollback: r.pairingRollback,
+			cleanup: r.pairingCleanup,
 			abandon: r.pairingAbandon, afterComplete: r.pairingAfter,
 		}
 	}
@@ -652,6 +655,7 @@ type pairingLifecycleReconciler struct {
 	handler       localapi.Handler
 	complete      func(context.Context, string) (localapi.PairingStatusResult, error)
 	rollback      func(context.Context, string) error
+	cleanup       func(context.Context) error
 	abandon       func(string)
 	afterComplete func()
 	now           func() time.Time
@@ -663,6 +667,15 @@ func (r *pairingLifecycleReconciler) Run(ctx context.Context, interval time.Dura
 	}
 	if interval <= 0 {
 		interval = time.Second
+	}
+	var cleanupDone chan struct{}
+	if r.cleanup != nil {
+		cleanupDone = make(chan struct{})
+		go func() {
+			defer close(cleanupDone)
+			r.runCleanup(ctx, interval)
+		}()
+		defer func() { <-cleanupDone }()
 	}
 	for {
 		if err := r.reconcile(ctx); err != nil && ctx.Err() != nil {
@@ -678,6 +691,24 @@ func (r *pairingLifecycleReconciler) Run(ctx context.Context, interval time.Dura
 				<-timer.C
 			}
 			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (r *pairingLifecycleReconciler) runCleanup(ctx context.Context, interval time.Duration) {
+	if interval < 5*time.Second {
+		interval = 5 * time.Second
+	}
+	for {
+		cleanupCtx, cancel := context.WithTimeout(ctx, pairingRollbackTimeout)
+		_ = r.cleanup(cleanupCtx)
+		cancel()
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			stopTimer(timer)
+			return
 		case <-timer.C:
 		}
 	}
@@ -1031,10 +1062,17 @@ func (c *productionAgentController) rollbackCompletedPairing(ctx context.Context
 	if c == nil || c.pairing == nil {
 		return unavailable("pairing rollback is unavailable")
 	}
-	if err := c.pairing.Unpair(ctx, deviceID, false); err == nil {
+	return c.pairing.Unpair(ctx, deviceID, false)
+}
+
+func (c *productionAgentController) reconcilePendingRevocations(ctx context.Context) error {
+	if c == nil || c.pairing == nil {
 		return nil
 	}
-	return c.pairing.Unpair(ctx, deviceID, true)
+	if reconciler, ok := c.pairing.(interface{ ReconcilePendingRevocations(context.Context) error }); ok {
+		return reconciler.ReconcilePendingRevocations(ctx)
+	}
+	return nil
 }
 
 func (c *productionAgentController) notifyPairingCompleted() {
@@ -1779,6 +1817,9 @@ func newWindowsPairingHostWithRegistryAndIdentity(installer pairing.Installer, r
 		options = append(options,
 			pairing.WithSessionGuard(registry.Allow),
 			pairing.WithAfterInstall(registry.Commit),
+			pairing.WithRevocation(func(ctx context.Context, deviceID string, proof []byte) error {
+				return registry.RevokeWithProof(ctx, installer, deviceID, proof)
+			}),
 		)
 	}
 	server, err := pairing.NewServer(

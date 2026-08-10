@@ -8,11 +8,9 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/hex"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -37,6 +35,8 @@ import (
 
 const pairingDiscoveryTimeout = 3 * time.Second
 
+const revocationProofCredential = "pairing-revocation-proof"
+
 type pairingTarget struct {
 	InstanceID           string
 	Name                 string
@@ -51,8 +51,8 @@ type pairingTransport interface {
 	Bootstrap(context.Context, string, ed25519.PublicKey) (pairingTarget, pairing.SessionDescriptor, error)
 	Status(context.Context, pairingTarget, pairing.SessionDescriptor) (pairing.SessionStatus, error)
 	Cancel(context.Context, pairingTarget, pairing.SessionDescriptor) error
-	Confirm(context.Context, pairingTarget, pairing.SessionDescriptor, string, string, string) (pairing.DeviceRecord, error)
-	Revoke(context.Context, config.Device, string) error
+	Confirm(context.Context, pairingTarget, pairing.SessionDescriptor, string, string, string, []byte) (pairing.DeviceRecord, error)
+	Revoke(context.Context, config.Device, string, []byte) error
 }
 
 type macPairingOptions struct {
@@ -76,14 +76,17 @@ type macPairingOptions struct {
 }
 
 type pendingPairing struct {
-	target         pairingTarget
-	descriptor     pairing.SessionDescriptor
-	clientDeviceID string
-	authorizedKey  string
-	privateKeyPEM  []byte
-	tunnelIdentity []byte
-	completing     bool
-	record         *pairing.DeviceRecord
+	target          pairingTarget
+	descriptor      pairing.SessionDescriptor
+	clientDeviceID  string
+	authorizedKey   string
+	privateKeyPEM   []byte
+	tunnelIdentity  []byte
+	revocationProof []byte
+	revocationOwner string
+	cleanupID       string
+	completing      bool
+	record          *pairing.DeviceRecord
 }
 
 type pendingCancellation struct {
@@ -98,6 +101,7 @@ type macPairingCoordinator struct {
 	cancellation       *pendingCancellation
 	starting           bool
 	previousDockerHost string
+	completingSession  string
 }
 
 func newMacPairingCoordinator(options macPairingOptions) *macPairingCoordinator {
@@ -177,11 +181,13 @@ func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (loc
 		return localapi.PairStartResult{}, unavailable("pairing infrastructure is unavailable")
 	}
 	c.mu.Lock()
+	var staleCleanupID string
 	if c.starting || c.pending != nil && time.Now().Before(c.pending.descriptor.ExpiresAt) {
 		c.mu.Unlock()
 		return localapi.PairStartResult{}, needsAction("a pairing session is already active")
 	}
 	if c.pending != nil {
+		staleCleanupID = c.pending.cleanupID
 		clearPendingSecrets(c.pending)
 		c.pending = nil
 	}
@@ -192,6 +198,9 @@ func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (loc
 	}
 	c.starting = true
 	c.mu.Unlock()
+	if staleCleanupID != "" {
+		_ = c.requestPendingCleanup(staleCleanupID)
+	}
 	defer func() {
 		c.mu.Lock()
 		c.starting = false
@@ -229,6 +238,12 @@ func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (loc
 		return localapi.PairStartResult{}, unavailable("cannot encode SSH pairing identity")
 	}
 	privateKeyPEM := pem.EncodeToMemory(privateBlock)
+	revocationProof := make([]byte, pairing.RevocationProofSize)
+	if _, err := rand.Read(revocationProof); err != nil {
+		clearSecret(privateKeyPEM)
+		clearSecret(tunnelIdentity)
+		return localapi.PairStartResult{}, unavailable("cannot create pairing revocation proof")
+	}
 	clientDeviceIDProvider := c.options.ClientDeviceID
 	if clientDeviceIDProvider == nil {
 		clientDeviceIDProvider = func(context.Context) (string, error) { return randomDeviceID() }
@@ -237,18 +252,21 @@ func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (loc
 	if err != nil || strings.TrimSpace(clientDeviceID) == "" {
 		clearSecret(privateKeyPEM)
 		clearSecret(tunnelIdentity)
+		clearSecret(revocationProof)
 		return localapi.PairStartResult{}, unavailable("cannot create client device identity")
 	}
 	target, descriptor, err := c.options.Transport.Bootstrap(ctx, selector, clientPublicKey)
 	if err != nil {
 		clearSecret(privateKeyPEM)
 		clearSecret(tunnelIdentity)
+		clearSecret(revocationProof)
 		return localapi.PairStartResult{}, unavailable("cannot start private-LAN pairing session")
 	}
 	code, err := pairing.Code(descriptor)
 	if err != nil {
 		clearSecret(privateKeyPEM)
 		clearSecret(tunnelIdentity)
+		clearSecret(revocationProof)
 		if cancelErr := c.cancelDetached(target, descriptor); cancelErr != nil {
 			c.mu.Lock()
 			c.cancellation = &pendingCancellation{target: target, descriptor: descriptor}
@@ -257,10 +275,31 @@ func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (loc
 		}
 		return localapi.PairStartResult{}, unavailable("pairing session is invalid")
 	}
+	cleanupID := pairing.InstanceIDFromPublicKey(descriptor.ServerPublicKey)
+	revocationOwner := "pairing-session-" + descriptor.ID
+	journalDevice := config.Device{
+		Name: target.Name, Address: target.Address, ClientDeviceID: clientDeviceID,
+		TunnelPort: tunnel.TunnelPort, TunnelPeerPublicKey: tunnel.EncodePublicKey(descriptor.ServerPublicKey),
+		TransportVersion: tunnel.CurrentTransportVersion, RevocationCredentialOwner: revocationOwner,
+	}
+	if cleanupID == "" || c.options.Secrets.Put(revocationOwner, revocationProofCredential, revocationProof) != nil {
+		clearPendingSecrets(&pendingPairing{privateKeyPEM: privateKeyPEM, tunnelIdentity: tunnelIdentity, revocationProof: revocationProof})
+		_ = c.cancelDetached(target, descriptor)
+		return localapi.PairStartResult{}, unavailable("cannot persist pairing rollback proof")
+	}
+	if err := c.persistPendingRevocation(cleanupID, config.PendingRevocation{
+		Device: journalDevice, SessionID: descriptor.ID,
+	}); err != nil {
+		_ = c.options.Secrets.Delete(revocationOwner, revocationProofCredential)
+		clearPendingSecrets(&pendingPairing{privateKeyPEM: privateKeyPEM, tunnelIdentity: tunnelIdentity, revocationProof: revocationProof})
+		_ = c.cancelDetached(target, descriptor)
+		return localapi.PairStartResult{}, err
+	}
 	pending := &pendingPairing{
 		target: target, descriptor: descriptor, clientDeviceID: clientDeviceID,
 		authorizedKey: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPublicKey))),
 		privateKeyPEM: privateKeyPEM, tunnelIdentity: tunnelIdentity,
+		revocationProof: revocationProof, revocationOwner: revocationOwner, cleanupID: cleanupID,
 	}
 	c.mu.Lock()
 	c.pending = pending
@@ -301,6 +340,7 @@ func (c *macPairingCoordinator) readStatus(ctx context.Context, sessionID string
 	pending := *c.pending
 	pending.privateKeyPEM = append([]byte(nil), c.pending.privateKeyPEM...)
 	pending.tunnelIdentity = append([]byte(nil), c.pending.tunnelIdentity...)
+	pending.revocationProof = append([]byte(nil), c.pending.revocationProof...)
 	defer clearPendingSecrets(&pending)
 	if c.pending.record != nil {
 		record := *c.pending.record
@@ -340,7 +380,15 @@ func (c *macPairingCoordinator) readStatus(ctx context.Context, sessionID string
 		return result, nil
 	}
 	c.pending.completing = true
+	c.completingSession = sessionID
 	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		if c.completingSession == sessionID {
+			c.completingSession = ""
+		}
+		c.mu.Unlock()
+	}()
 	device, err := c.complete(ctx, sessionID, pending)
 	if err != nil {
 		c.mu.Lock()
@@ -357,17 +405,29 @@ func (c *macPairingCoordinator) readStatus(ctx context.Context, sessionID string
 }
 
 func (c *macPairingCoordinator) complete(ctx context.Context, sessionID string, pending pendingPairing) (localapi.Device, error) {
+	fail := func(primary error, change dockercli.ContextChange) (localapi.Device, error) {
+		_ = c.requestPendingCleanup(pending.cleanupID)
+		if change.Name != "" {
+			_ = c.updatePendingContext(pending.cleanupID, contextChangeToConfig(change))
+		}
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), pairingRollbackTimeout)
+		defer cancel()
+		rollbackErr := c.cleanupPendingRevocation(rollbackCtx, pending.cleanupID, false, change)
+		clearPendingSecrets(&pending)
+		c.clearPending(sessionID)
+		return localapi.Device{}, errors.Join(primary, rollbackErr)
+	}
 	var record pairing.DeviceRecord
 	if pending.record == nil {
 		wantCode, err := pairing.Code(pending.descriptor)
 		if err != nil {
-			return localapi.Device{}, unavailable("pairing session is invalid")
+			return fail(unavailable("pairing session is invalid"), dockercli.ContextChange{})
 		}
 		record, err = c.options.Transport.Confirm(
-			ctx, pending.target, pending.descriptor, pending.clientDeviceID, pending.authorizedKey, wantCode,
+			ctx, pending.target, pending.descriptor, pending.clientDeviceID, pending.authorizedKey, wantCode, pending.revocationProof,
 		)
 		if err != nil {
-			return localapi.Device{}, unavailable("pairing confirmation failed")
+			return fail(unavailable("pairing confirmation failed"), dockercli.ContextChange{})
 		}
 		c.mu.Lock()
 		if c.pending != nil && c.pending.descriptor.ID == sessionID {
@@ -382,26 +442,34 @@ func (c *macPairingCoordinator) complete(ctx context.Context, sessionID string, 
 		record.AuthorizedKeys = append([]string(nil), pending.record.AuthorizedKeys...)
 		record.TunnelPublicKey = append(ed25519.PublicKey(nil), pending.record.TunnelPublicKey...)
 	}
-	remoteDeviceID, err := pairedRemoteDeviceID(record.SSHHostPublicKey)
-	if err != nil || strings.TrimSpace(record.SyncthingDeviceID) == "" ||
+	remoteDeviceID, deviceIDErr := pairedRemoteDeviceID(record.SSHHostPublicKey)
+	device := config.Device{
+		Name: pending.target.Name, Address: pending.target.Address,
+		SSHPort: record.SSHPort, SyncPort: record.SyncthingPort,
+		SSHHostPublicKey: record.SSHHostPublicKey, SyncthingDeviceID: record.SyncthingDeviceID,
+		ClientDeviceID: pending.clientDeviceID,
+		TunnelPort:     tunnel.TunnelPort, TunnelPeerPublicKey: tunnel.EncodePublicKey(pending.descriptor.ServerPublicKey),
+		TransportVersion: record.TransportVersion, RevocationCredentialOwner: pending.revocationOwner,
+	}
+	if err := c.updatePendingDevice(pending.cleanupID, remoteDeviceID, device); err != nil {
+		return fail(err, dockercli.ContextChange{})
+	}
+	if deviceIDErr != nil || strings.TrimSpace(record.SyncthingDeviceID) == "" ||
 		record.SSHPort < 1 || record.SSHPort > 65535 || record.SyncthingPort < 1 || record.SyncthingPort > 65535 ||
 		record.TunnelPort != tunnel.TunnelPort || record.TransportVersion != tunnel.CurrentTransportVersion ||
 		len(record.TunnelPublicKey) != ed25519.PublicKeySize ||
 		subtle.ConstantTimeCompare(record.TunnelPublicKey, pending.descriptor.ServerPublicKey) != 1 {
-		clearSecret(pending.privateKeyPEM)
-		return localapi.Device{}, unavailable("paired device returned invalid public metadata")
+		return fail(unavailable("paired device returned invalid public metadata"), dockercli.ContextChange{})
 	}
 	alias := "remote-docker-device-" + remoteDeviceID
 	if err := sshtransport.PinKnownHost(c.options.KnownHostsPath, alias, record.SSHHostPublicKey); err != nil {
-		clearSecret(pending.privateKeyPEM)
-		return localapi.Device{}, unavailable("cannot pin paired SSH identity")
+		return fail(unavailable("cannot pin paired SSH identity"), dockercli.ContextChange{})
 	}
 	if err := sshtransport.WriteConfig(c.options.SSHConfigPath, sshtransport.Config{
 		DeviceID: remoteDeviceID, HostName: "127.0.0.1", Port: tunnel.DockerRelayPort,
 		AgentSocket: c.options.AgentSocketPath, KnownHostsFile: c.options.KnownHostsPath, ControlDir: c.options.ControlDir,
 	}); err != nil {
-		clearSecret(pending.privateKeyPEM)
-		return localapi.Device{}, unavailable("cannot write managed SSH configuration")
+		return fail(unavailable("cannot write managed SSH configuration"), dockercli.ContextChange{})
 	}
 	c.mu.Lock()
 	expectedPreviousHost := c.previousDockerHost
@@ -410,44 +478,19 @@ func (c *macPairingCoordinator) complete(ctx context.Context, sessionID string, 
 		ctx, c.options.Docker, c.options.DockerCLI, c.options.DockerContext, "ssh://"+alias, expectedPreviousHost,
 	)
 	if err != nil {
-		clearSecret(pending.privateKeyPEM)
-		return localapi.Device{}, unavailable("cannot create managed Docker context")
+		return fail(unavailable("cannot create managed Docker context"), dockercli.ContextChange{})
 	}
-	rollbackContext := func() error {
-		rollbackCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		if err := dockercli.RestoreContext(rollbackCtx, c.options.Docker, c.options.DockerCLI, contextChange); err != nil {
-			return unavailable("managed Docker context could not be restored safely")
-		}
-		return nil
+	if err := c.updatePendingContext(pending.cleanupID, contextChangeToConfig(contextChange)); err != nil {
+		return fail(err, contextChange)
 	}
 	if err := c.options.Secrets.Put(remoteDeviceID, sshtransport.SSHPrivateKeyCredential, pending.privateKeyPEM); err != nil {
-		rollbackErr := rollbackContext()
-		clearSecret(pending.privateKeyPEM)
-		if rollbackErr != nil {
-			return localapi.Device{}, rollbackErr
-		}
-		return localapi.Device{}, unavailable("cannot store paired SSH identity")
+		return fail(unavailable("cannot store paired SSH identity"), contextChange)
 	}
 	if err := c.options.Secrets.Put(remoteDeviceID, tunnel.IdentityCredential, pending.tunnelIdentity); err != nil {
-		_ = c.options.Secrets.Delete(remoteDeviceID, sshtransport.SSHPrivateKeyCredential)
-		rollbackErr := rollbackContext()
-		clearPendingSecrets(&pending)
-		if rollbackErr != nil {
-			return localapi.Device{}, rollbackErr
-		}
-		return localapi.Device{}, unavailable("cannot store paired tunnel identity")
+		return fail(unavailable("cannot store paired tunnel identity"), contextChange)
 	}
-	clearPendingSecrets(&pending)
-
-	device := config.Device{
-		Name: pending.target.Name, Address: pending.target.Address,
-		SSHPort: record.SSHPort, SyncPort: record.SyncthingPort,
-		SSHHostPublicKey: record.SSHHostPublicKey, SyncthingDeviceID: record.SyncthingDeviceID,
-		ClientDeviceID: pending.clientDeviceID,
-		TunnelPort:     record.TunnelPort, TunnelPeerPublicKey: tunnel.EncodePublicKey(record.TunnelPublicKey),
-		TransportVersion: record.TransportVersion,
-	}
+	device.DockerContext = contextChangeToConfig(contextChange)
+	device.DockerContext.RemoveOnUnpair = contextChange.Created || !contextChange.Changed()
 	err = c.options.ConfigTransactions.Run(func() error {
 		cfg, err := loadAgentConfig(c.options.Store)
 		if err != nil {
@@ -459,25 +502,21 @@ func (c *macPairingCoordinator) complete(ctx context.Context, sessionID string, 
 		cfg.SchemaVersion = config.CurrentSchemaVersion
 		cfg.ActiveDevice = remoteDeviceID
 		cfg.Devices[remoteDeviceID] = device
+		delete(cfg.PendingRevocations, pending.cleanupID)
 		if err := c.options.SaveConfig(cfg); err != nil {
 			return unavailable("cannot save paired device configuration")
 		}
 		return nil
 	})
 	if err != nil {
-		_ = c.options.Secrets.Delete(remoteDeviceID, sshtransport.SSHPrivateKeyCredential)
-		_ = c.options.Secrets.Delete(remoteDeviceID, tunnel.IdentityCredential)
-		if rollbackErr := rollbackContext(); rollbackErr != nil {
-			return localapi.Device{}, rollbackErr
-		}
-		return localapi.Device{}, err
+		return fail(err, contextChange)
 	}
+	clearPendingSecrets(&pending)
 	c.mu.Lock()
 	if c.pending != nil {
 		clearPendingSecrets(c.pending)
 	}
 	c.pending = nil
-	c.previousDockerHost = ""
 	c.mu.Unlock()
 	return localapi.Device{ID: remoteDeviceID, Name: device.Name, Address: device.Address}, nil
 }
@@ -503,6 +542,7 @@ func (c *macPairingCoordinator) Cancel(ctx context.Context, sessionID string) (l
 	pending := *c.pending
 	pending.privateKeyPEM = append([]byte(nil), c.pending.privateKeyPEM...)
 	pending.tunnelIdentity = append([]byte(nil), c.pending.tunnelIdentity...)
+	pending.revocationProof = append([]byte(nil), c.pending.revocationProof...)
 	c.mu.Unlock()
 	cancelErr := c.options.Transport.Cancel(ctx, pending.target, pending.descriptor)
 	clearPendingSecrets(&pending)
@@ -517,10 +557,15 @@ func (c *macPairingCoordinator) Cancel(ctx context.Context, sessionID string) (l
 
 func (c *macPairingCoordinator) clearPending(sessionID string) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	var cleanupID string
 	if c.pending != nil && c.pending.descriptor.ID == sessionID {
+		cleanupID = c.pending.cleanupID
 		clearPendingSecrets(c.pending)
 		c.pending = nil
+	}
+	c.mu.Unlock()
+	if cleanupID != "" {
+		_ = c.requestPendingCleanup(cleanupID)
 	}
 }
 
@@ -550,77 +595,263 @@ func (c *macPairingCoordinator) Unpair(ctx context.Context, deviceID string, loc
 	}
 	device, exists := cfg.Devices[deviceID]
 	if !exists {
+		if _, pending := cfg.PendingRevocations[deviceID]; pending {
+			return c.cleanupPendingRevocation(ctx, deviceID, localOnly, dockercli.ContextChange{})
+		}
 		return needsAction("paired device was not found")
 	}
 	if !localOnly {
 		if strings.TrimSpace(device.ClientDeviceID) == "" {
 			return remoteRevokeUnavailable("remote pairing revocation is unavailable for this saved device")
 		}
-		if err := c.options.Transport.Revoke(ctx, device, device.ClientDeviceID); err != nil {
-			return remoteRevokeUnavailable("remote pairing revocation is unavailable")
+		proofOwner := device.RevocationCredentialOwner
+		if proofOwner == "" {
+			proofOwner = deviceID
+		}
+		if _, err := c.options.Secrets.Get(proofOwner, revocationProofCredential); err != nil {
+			return remoteRevokeUnavailable("remote pairing revocation is unavailable for this saved device")
 		}
 	}
-	return c.forgetLocal(deviceID)
+	if err := c.moveActiveToPending(deviceID, device); err != nil {
+		return err
+	}
+	return c.cleanupPendingRevocation(ctx, deviceID, localOnly, dockercli.ContextChange{})
 }
 
-func (c *macPairingCoordinator) forgetLocal(deviceID string) error {
-	cfg, err := loadAgentConfig(c.options.Store)
-	if err != nil {
-		return unavailable("cannot read paired device configuration")
-	}
-	if deviceID == "" {
-		deviceID = cfg.ActiveDevice
-	}
-	if _, exists := cfg.Devices[deviceID]; !exists {
-		return needsAction("paired device was not found")
-	}
-	alias := "remote-docker-device-" + deviceID
-	if err := c.options.RemovePinnedHost(c.options.KnownHostsPath, alias); err != nil {
-		return unavailable("cannot remove pinned SSH identity")
-	}
-	if err := c.options.RemoveSSHConfig(c.options.ManagedSSHRoot, c.options.SSHConfigPath); err != nil {
-		return unavailable("cannot remove managed SSH configuration")
-	}
-	if err := c.options.Secrets.Delete(deviceID, sshtransport.SSHPrivateKeyCredential); err != nil && !errors.Is(err, credentials.ErrNotFound) {
-		return unavailable("cannot delete paired SSH identity")
-	}
-	if err := c.options.Secrets.Delete(deviceID, tunnel.IdentityCredential); err != nil && !errors.Is(err, credentials.ErrNotFound) {
-		return unavailable("cannot delete paired tunnel identity")
+func (c *macPairingCoordinator) moveActiveToPending(deviceID string, device config.Device) error {
+	if device.DockerContext.Name == "" && c.options.Docker != nil && c.options.DockerContext != "" {
+		device.DockerContext = config.DockerContextChange{
+			Name: c.options.DockerContext, CurrentHost: "ssh://remote-docker-device-" + deviceID, Created: true,
+		}
 	}
 	if c.options.BeforeConfigTransaction != nil {
 		c.options.BeforeConfigTransaction()
 	}
-	err = c.options.ConfigTransactions.Run(func() error {
-		cfg, err = loadAgentConfig(c.options.Store)
+	return c.options.ConfigTransactions.Run(func() error {
+		cfg, err := loadAgentConfig(c.options.Store)
 		if err != nil {
 			return unavailable("cannot refresh paired device configuration")
 		}
-		if _, exists := cfg.Devices[deviceID]; !exists {
-			return nil
+		if cfg.ActiveDevice != deviceID {
+			return needsAction("paired device was not found")
+		}
+		if cfg.PendingRevocations == nil {
+			cfg.PendingRevocations = make(map[string]config.PendingRevocation)
+		}
+		cfg.PendingRevocations[deviceID] = config.PendingRevocation{
+			Device: device, DockerContext: device.DockerContext, LocalDeviceID: deviceID, CleanupRequested: true,
 		}
 		delete(cfg.Devices, deviceID)
-		if cfg.ActiveDevice == deviceID {
-			cfg.ActiveDevice = ""
+		cfg.ActiveDevice = ""
+		if err := c.options.SaveConfig(cfg); err != nil {
+			return unavailable("cannot save pending pairing removal")
+		}
+		return nil
+	})
+}
+
+func (c *macPairingCoordinator) cleanupPendingRevocation(ctx context.Context, deviceID string, localOnly bool, contextOverride dockercli.ContextChange) error {
+	cfg, err := loadAgentConfig(c.options.Store)
+	if err != nil {
+		return unavailable("cannot read pending pairing removal")
+	}
+	pending, exists := cfg.PendingRevocations[deviceID]
+	if !exists {
+		return nil
+	}
+	remoteRevoked := localOnly
+	localDeviceID := pending.LocalDeviceID
+	proofOwner := pending.Device.RevocationCredentialOwner
+	if proofOwner == "" {
+		proofOwner = deviceID
+	}
+	if !localOnly {
+		proof, proofErr := c.options.Secrets.Get(proofOwner, revocationProofCredential)
+		if proofErr == nil {
+			remoteRevoked = c.options.Transport.Revoke(ctx, pending.Device, pending.Device.ClientDeviceID, proof) == nil
+			clearSecret(proof)
+		}
+	}
+	change := contextOverride
+	if change.Name == "" {
+		change = contextChangeFromConfig(pending.DockerContext)
+	}
+	if change.Name != "" && c.options.Docker != nil {
+		if err := dockercli.RestoreContext(ctx, c.options.Docker, c.options.DockerCLI, change); err != nil {
+			return unavailable("managed Docker context could not be restored safely")
+		}
+	}
+	if localDeviceID != "" {
+		alias := "remote-docker-device-" + localDeviceID
+		if err := c.options.RemovePinnedHost(c.options.KnownHostsPath, alias); err != nil {
+			return unavailable("cannot remove pinned SSH identity")
+		}
+		if cfg.ActiveDevice == "" {
+			if err := c.options.RemoveSSHConfig(c.options.ManagedSSHRoot, c.options.SSHConfigPath); err != nil {
+				return unavailable("cannot remove managed SSH configuration")
+			}
+		}
+		if err := c.options.Secrets.Delete(localDeviceID, sshtransport.SSHPrivateKeyCredential); err != nil && !errors.Is(err, credentials.ErrNotFound) {
+			return unavailable("cannot delete paired SSH identity")
+		}
+		if err := c.options.Secrets.Delete(localDeviceID, tunnel.IdentityCredential); err != nil && !errors.Is(err, credentials.ErrNotFound) {
+			return unavailable("cannot delete paired tunnel identity")
+		}
+	}
+	if remoteRevoked {
+		if err := c.options.Secrets.Delete(proofOwner, revocationProofCredential); err != nil && !errors.Is(err, credentials.ErrNotFound) {
+			return unavailable("cannot delete pairing rollback proof")
+		}
+	}
+	err = c.options.ConfigTransactions.Run(func() error {
+		cfg, err := loadAgentConfig(c.options.Store)
+		if err != nil {
+			return unavailable("cannot refresh pending pairing removal")
+		}
+		current, exists := cfg.PendingRevocations[deviceID]
+		if !exists {
+			return nil
+		}
+		if remoteRevoked {
+			delete(cfg.PendingRevocations, deviceID)
+		} else {
+			current.DockerContext = config.DockerContextChange{}
+			current.Device.DockerContext = config.DockerContextChange{}
+			cfg.PendingRevocations[deviceID] = current
 		}
 		if err := c.options.SaveConfig(cfg); err != nil {
-			return unavailable("cannot save pairing removal")
+			return unavailable("cannot save pending pairing cleanup")
 		}
 		return nil
 	})
 	if err != nil {
 		return err
 	}
-	c.mu.Lock()
-	c.previousDockerHost = "ssh://" + alias
-	c.mu.Unlock()
 	return nil
+}
+
+func (c *macPairingCoordinator) persistPendingRevocation(deviceID string, pending config.PendingRevocation) error {
+	return c.options.ConfigTransactions.Run(func() error {
+		cfg, err := loadAgentConfig(c.options.Store)
+		if err != nil {
+			return unavailable("cannot read pairing rollback journal")
+		}
+		if cfg.PendingRevocations == nil {
+			cfg.PendingRevocations = make(map[string]config.PendingRevocation)
+		}
+		cfg.PendingRevocations[deviceID] = pending
+		if err := c.options.SaveConfig(cfg); err != nil {
+			return unavailable("cannot save pairing rollback journal")
+		}
+		return nil
+	})
+}
+
+func (c *macPairingCoordinator) updatePendingDevice(cleanupID, localDeviceID string, device config.Device) error {
+	return c.options.ConfigTransactions.Run(func() error {
+		cfg, err := loadAgentConfig(c.options.Store)
+		if err != nil {
+			return unavailable("cannot read pairing rollback journal")
+		}
+		pending, ok := cfg.PendingRevocations[cleanupID]
+		if !ok {
+			return unavailable("pairing rollback journal is missing")
+		}
+		pending.Device = device
+		pending.LocalDeviceID = localDeviceID
+		cfg.PendingRevocations[cleanupID] = pending
+		if err := c.options.SaveConfig(cfg); err != nil {
+			return unavailable("cannot update pairing rollback journal")
+		}
+		return nil
+	})
+}
+
+func (c *macPairingCoordinator) updatePendingContext(deviceID string, change config.DockerContextChange) error {
+	return c.options.ConfigTransactions.Run(func() error {
+		cfg, err := loadAgentConfig(c.options.Store)
+		if err != nil {
+			return unavailable("cannot read pairing rollback journal")
+		}
+		pending, ok := cfg.PendingRevocations[deviceID]
+		if !ok {
+			return unavailable("pairing rollback journal is missing")
+		}
+		pending.DockerContext = change
+		pending.Device.DockerContext = change
+		cfg.PendingRevocations[deviceID] = pending
+		if err := c.options.SaveConfig(cfg); err != nil {
+			return unavailable("cannot save managed Docker rollback")
+		}
+		return nil
+	})
+}
+
+func (c *macPairingCoordinator) requestPendingCleanup(deviceID string) error {
+	return c.options.ConfigTransactions.Run(func() error {
+		cfg, err := loadAgentConfig(c.options.Store)
+		if err != nil {
+			return unavailable("cannot read pairing rollback journal")
+		}
+		pending, ok := cfg.PendingRevocations[deviceID]
+		if !ok || pending.CleanupRequested {
+			return nil
+		}
+		pending.CleanupRequested = true
+		cfg.PendingRevocations[deviceID] = pending
+		if err := c.options.SaveConfig(cfg); err != nil {
+			return unavailable("cannot activate pairing rollback")
+		}
+		return nil
+	})
+}
+
+func (c *macPairingCoordinator) ReconcilePendingRevocations(ctx context.Context) error {
+	cfg, err := loadAgentConfig(c.options.Store)
+	if err != nil {
+		return err
+	}
+	ids := make([]string, 0, len(cfg.PendingRevocations))
+	for id, pending := range cfg.PendingRevocations {
+		if !pending.CleanupRequested {
+			c.mu.Lock()
+			leased := pending.SessionID != "" && (c.completingSession == pending.SessionID ||
+				c.pending != nil && c.pending.descriptor.ID == pending.SessionID)
+			c.mu.Unlock()
+			if leased {
+				continue
+			}
+			if err := c.requestPendingCleanup(id); err != nil {
+				return err
+			}
+		}
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if err := c.cleanupPendingRevocation(ctx, id, false, dockercli.ContextChange{}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func contextChangeToConfig(change dockercli.ContextChange) config.DockerContextChange {
+	return config.DockerContextChange{Name: change.Name, PreviousHost: change.PreviousHost, CurrentHost: change.CurrentHost, Created: change.Created}
+}
+
+func contextChangeFromConfig(change config.DockerContextChange) dockercli.ContextChange {
+	if change.RemoveOnUnpair {
+		change.PreviousHost = ""
+		change.Created = true
+	}
+	return dockercli.ContextChange{Name: change.Name, PreviousHost: change.PreviousHost, CurrentHost: change.CurrentHost, Created: change.Created}
 }
 
 type discoveryPairingTransport struct {
 	Store             config.Store
 	Secrets           credentials.Store
 	SSHConfigPath     string
-	SSHBinary         string
 	DialContext       systemtransport.DialContextFunc
 	TunnelDialContext systemtransport.DialContextFunc
 	discover          func(context.Context) ([]discovery.Peer, error)
@@ -841,11 +1072,11 @@ func (t discoveryPairingTransport) verifySavedPeer(ctx context.Context, peer dis
 	return pairingTarget{}, fmt.Errorf("verify saved tunnel peer: %w", lastErr)
 }
 
-func (t discoveryPairingTransport) Confirm(ctx context.Context, target pairingTarget, descriptor pairing.SessionDescriptor, clientDeviceID, authorizedKey, code string) (pairing.DeviceRecord, error) {
+func (t discoveryPairingTransport) Confirm(ctx context.Context, target pairingTarget, descriptor pairing.SessionDescriptor, clientDeviceID, authorizedKey, code string, revocationProof []byte) (pairing.DeviceRecord, error) {
 	endpoint := "https://" + net.JoinHostPort(target.Address, fmt.Sprintf("%d", target.PairingPort))
 	client := pairing.Client{
 		BaseURL: endpoint, Session: descriptor, DeviceID: clientDeviceID, AuthorizedKey: authorizedKey,
-		HTTPClient: pairing.NewPinnedHTTPClient(descriptor.ServerPublicKey, t.DialContext),
+		HTTPClient: pairing.NewPinnedHTTPClient(descriptor.ServerPublicKey, t.DialContext), RevocationProof: revocationProof,
 	}
 	record, _, err := client.Confirm(ctx, code)
 	return record, err
@@ -867,44 +1098,56 @@ func (t discoveryPairingTransport) Cancel(ctx context.Context, target pairingTar
 	return client.Cancel(ctx)
 }
 
-func (t discoveryPairingTransport) Revoke(ctx context.Context, device config.Device, clientDeviceID string) error {
-	alias, err := pairedRemoteDeviceID(device.SSHHostPublicKey)
+func (t discoveryPairingTransport) Revoke(ctx context.Context, device config.Device, clientDeviceID string, proof []byte) error {
+	serverPublicKey, err := tunnel.ParsePublicKey(device.TunnelPeerPublicKey)
 	if err != nil {
-		return err
+		return errors.New("saved pairing revocation endpoint is invalid")
 	}
-	controlAlias, err := sshtransport.ControlAlias(alias)
-	if err != nil {
-		return err
+	type endpoint struct {
+		address string
+		port    int
 	}
-	binary := t.SSHBinary
-	if binary == "" {
-		binary = "ssh"
+	endpoints := make([]endpoint, 0, 2)
+	if address := strings.TrimSpace(device.Address); net.ParseIP(address) != nil {
+		endpoints = append(endpoints, endpoint{address: address, port: tunnel.TunnelPort})
 	}
-	request := map[string]any{
-		"jsonrpc": "2.0", "id": 1, "method": "pairing.revoke",
-		"params": map[string]string{"device_id": clientDeviceID},
+	instanceID := pairing.InstanceIDFromPublicKey(serverPublicKey)
+	if peers, discoverErr := t.discoverPeers(ctx); discoverErr == nil {
+		for _, peer := range peers {
+			if peer.InstanceID != instanceID {
+				continue
+			}
+			for _, address := range peer.Addresses {
+				if address != nil && (address.IsPrivate() || address.IsLoopback()) && !address.IsUnspecified() {
+					endpoints = append(endpoints, endpoint{address: address.String(), port: peer.Port})
+				}
+			}
+		}
 	}
-	encoded, err := json.Marshal(request)
-	if err != nil {
-		return err
+	var lastErr error
+	seen := make(map[string]struct{})
+	for _, endpoint := range endpoints {
+		key := net.JoinHostPort(endpoint.address, fmt.Sprintf("%d", endpoint.port))
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		client := pairing.Client{
+			BaseURL:    "https://" + key,
+			Session:    pairing.SessionDescriptor{ServerPublicKey: serverPublicKey},
+			HTTPClient: pairing.NewPinnedHTTPClient(serverPublicKey, t.DialContext),
+		}
+		client.HTTPClient.Timeout = pairingDiscoveryTimeout
+		if err := client.Revoke(ctx, clientDeviceID, proof); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
 	}
-	var output bytes.Buffer
-	command := sshtransport.Command{
-		Binary: binary,
-		Args:   []string{"-F", t.SSHConfigPath, controlAlias, "remote-docker-remote", "rpc"},
-		Stdin:  bytes.NewReader(append(encoded, '\n')), Stdout: &output, Stderr: io.Discard,
+	if lastErr == nil {
+		lastErr = errors.New("saved pairing revocation endpoint is unavailable")
 	}
-	if err := runSSHCommand(ctx, command); err != nil {
-		return err
-	}
-	var response struct {
-		Result map[string]bool `json:"result"`
-		Error  json.RawMessage `json:"error"`
-	}
-	if err := json.NewDecoder(io.LimitReader(&output, 64<<10)).Decode(&response); err != nil || len(response.Error) != 0 || !response.Result["revoked"] {
-		return errors.New("managed pairing revocation was not acknowledged")
-	}
-	return nil
+	return lastErr
 }
 
 func selectPairingPeer(peers []discovery.Peer, selector string) (discovery.Peer, []net.IP, error) {
@@ -1012,6 +1255,7 @@ func clearPendingSecrets(pending *pendingPairing) {
 	}
 	clearSecret(pending.privateKeyPEM)
 	clearSecret(pending.tunnelIdentity)
+	clearSecret(pending.revocationProof)
 }
 
 func runSSHCommand(ctx context.Context, command sshtransport.Command) error {

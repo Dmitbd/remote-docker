@@ -15,8 +15,9 @@ import (
 
 const (
 	// MaxSessionTTL is the longest permitted pairing window.
-	MaxSessionTTL = 120 * time.Second
-	maxAttempts   = 5
+	MaxSessionTTL       = 120 * time.Second
+	maxAttempts         = 5
+	RevocationProofSize = 32
 )
 
 var (
@@ -109,8 +110,9 @@ type DeviceInfo struct {
 }
 
 type TrustedPeer struct {
-	DeviceID  string
-	PublicKey ed25519.PublicKey
+	DeviceID            string
+	PublicKey           ed25519.PublicKey
+	RevocationProofHash [32]byte
 }
 
 // DeviceRecord is the public result of a successful pairing.

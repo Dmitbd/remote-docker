@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -16,6 +18,59 @@ import (
 	"testing"
 	"time"
 )
+
+func TestPairingRevokesTrustWithPinnedCleanupProof(t *testing.T) {
+	var installed TrustedPeer
+	var revokedDevice string
+	server, err := NewServer(
+		newServerIdentity(t),
+		WithAfterInstall(func(_ context.Context, peer TrustedPeer) error {
+			installed = peer
+			return nil
+		}),
+		WithRevocation(func(_ context.Context, deviceID string, proof []byte) error {
+			if deviceID != installed.DeviceID || sha256.Sum256(proof) != installed.RevocationProofHash {
+				return errors.New("invalid revocation proof")
+			}
+			revokedDevice = deviceID
+			return nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	clientPublicKey, _, _ := ed25519.GenerateKey(nil)
+	descriptor, err := server.StartSession(clientPublicKey, MaxSessionTTL)
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+	if err := server.Approve(descriptor.ID); err != nil {
+		t.Fatalf("Approve() error = %v", err)
+	}
+	httpServer := newPairingTLSTestServer(t, server)
+	defer httpServer.Close()
+	proof := make([]byte, RevocationProofSize)
+	if _, err := rand.Read(proof); err != nil {
+		t.Fatalf("generate proof: %v", err)
+	}
+	client := Client{
+		BaseURL: httpServer.URL, Session: descriptor, DeviceID: "mac-studio",
+		AuthorizedKey: "ssh-ed25519 MANAGED-MAC-KEY", RevocationProof: proof,
+	}
+	code, _ := client.Code()
+	if _, _, err := client.Confirm(context.Background(), code); err != nil {
+		t.Fatalf("Confirm() error = %v", err)
+	}
+	if installed.RevocationProofHash != sha256.Sum256(proof) {
+		t.Fatalf("installed revocation hash = %x", installed.RevocationProofHash)
+	}
+	if err := client.Revoke(context.Background(), "mac-studio", proof); err != nil {
+		t.Fatalf("Revoke() error = %v", err)
+	}
+	if revokedDevice != "mac-studio" {
+		t.Fatalf("revoked device = %q", revokedDevice)
+	}
+}
 
 func TestPairingEndToEnd(t *testing.T) {
 	fixture := newPairingFixture(t)
