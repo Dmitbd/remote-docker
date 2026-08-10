@@ -24,6 +24,10 @@
   <string>__REMOTE_DOCKER_BUILD_VERSION__</string>
   <key>LSMinimumSystemVersion</key>
   <string>12.0</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSPrincipalClass</key>
+  <string>NSApplication</string>
   <key>NSBonjourServices</key>
   <array>
     <string>_remote-docker._tcp</string>

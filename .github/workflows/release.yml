@@ -85,7 +85,7 @@ jobs:
         shell: pwsh
         run: Invoke-Pester -Path tests/integration/windows_package.Tests.ps1 -CI
 
-      - name: Build unsigned Windows package
+      - name: Build unsigned Windows package with stable Wails UI
         shell: pwsh
         run: >-
           ./packaging/windows/build-installer.ps1
@@ -173,7 +173,7 @@ jobs:
           go-version: '1.26.5'
           cache: true
 
-      - name: Build unsigned macOS package
+      - name: Build unsigned macOS package with stable Wails UI
         run: REMOTE_DOCKER_VERSION="$RELEASE_VERSION" packaging/macos/build-pkg.sh --arch arm64 --output dist/macos
 
       - name: Verify unsigned macOS package

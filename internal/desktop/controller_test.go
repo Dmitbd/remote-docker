@@ -64,6 +64,27 @@ func TestControllerReconnectsTrustedDeviceWithoutPairStart(t *testing.T) {
 	}
 }
 
+func TestControllerRejectsEverySecondConnectionDuringOccupiedStates(t *testing.T) {
+	for _, state := range []lifecycle.State{
+		lifecycle.StatePairing, lifecycle.StateConnecting, lifecycle.StateConnected, lifecycle.StateReconnecting,
+	} {
+		for _, action := range []ActionID{ActionConnect, ActionConnectTrusted} {
+			t.Run(string(state)+"/"+string(action), func(t *testing.T) {
+				handler := &recordingHandler{}
+				controller := NewController(handler, func() lifecycle.Snapshot {
+					return lifecycle.Snapshot{State: state, TrustedPeers: 1, ConnectionLimit: 1}
+				})
+				if err := controller.Perform(context.Background(), action, "another-device"); !errors.Is(err, ErrConnectionLimit) {
+					t.Fatalf("Perform(%s) error = %v, want ErrConnectionLimit", action, err)
+				}
+				if handler.method != "" {
+					t.Fatalf("Perform(%s) delegated %q while %s", action, handler.method, state)
+				}
+			})
+		}
+	}
+}
+
 func TestControllerForgetsSelectedDeviceWithExplicitScope(t *testing.T) {
 	handler := &recordingHandler{}
 	controller := NewController(handler, func() lifecycle.Snapshot { return lifecycle.Snapshot{} })

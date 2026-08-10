@@ -2,9 +2,6 @@ package syncer
 
 import (
 	"errors"
-	"fmt"
-	"net"
-	"strconv"
 	"strings"
 )
 
@@ -59,22 +56,15 @@ type HardenedOptions struct {
 	UpgradeToPreReleases  bool `json:"upgradeToPreReleases"`
 }
 
-// NewDeviceConfig restricts the address to the paired private-network bridge.
-func NewDeviceConfig(deviceID, name, privateIP string, bridgePort int) (DeviceConfig, error) {
+// NewDeviceConfig restricts the remote to the authenticated local tunnel relay.
+func NewDeviceConfig(deviceID, name string) (DeviceConfig, error) {
 	if strings.TrimSpace(deviceID) == "" {
 		return DeviceConfig{}, errors.New("Syncthing device ID is empty")
-	}
-	address := net.ParseIP(privateIP)
-	if address == nil || !address.IsPrivate() {
-		return DeviceConfig{}, errors.New("Syncthing device address must be a literal private IP")
-	}
-	if bridgePort < 1 || bridgePort > 65535 {
-		return DeviceConfig{}, fmt.Errorf("invalid Syncthing bridge port: %d", bridgePort)
 	}
 	return DeviceConfig{
 		DeviceID:    deviceID,
 		Name:        name,
-		Addresses:   []string{"tcp://" + net.JoinHostPort(address.String(), strconv.Itoa(bridgePort))},
+		Addresses:   []string{"tcp://127.0.0.1:49220"},
 		Compression: "metadata",
 	}, nil
 }

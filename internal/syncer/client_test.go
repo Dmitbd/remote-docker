@@ -115,18 +115,18 @@ func TestClientDoesNotFollowRedirectsWithAPIKey(t *testing.T) {
 }
 
 func TestHardenedSyncthingConfig(t *testing.T) {
-	device, err := NewDeviceConfig("REMOTE", "Windows PC", "192.168.1.50", 49220)
+	device, err := NewDeviceConfig("REMOTE", "Windows PC")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"tcp://192.168.1.50:49220"}; !reflect.DeepEqual(device.Addresses, want) {
+	if want := []string{"tcp://127.0.0.1:49220"}; !reflect.DeepEqual(device.Addresses, want) {
 		t.Fatalf("Addresses = %#v, want %#v", device.Addresses, want)
 	}
 	if device.AutoAcceptFolders || device.Introducer {
 		t.Fatalf("unsafe device config = %#v", device)
 	}
-	if _, err := NewDeviceConfig("REMOTE", "Public", "203.0.113.4", 49220); err == nil {
-		t.Fatal("public device address accepted")
+	if _, err := NewDeviceConfig("", "Windows"); err == nil {
+		t.Fatal("empty device ID accepted")
 	}
 	passive, err := NewPassiveDeviceConfig("MAC", "Paired Mac")
 	if err != nil {

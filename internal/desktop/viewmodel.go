@@ -41,11 +41,12 @@ const (
 )
 
 type Action struct {
-	ID          ActionID
-	Label       string
-	Enabled     bool
-	Destructive bool
-	Icon        string
+	ID           ActionID
+	Label        string
+	PendingLabel string
+	Enabled      bool
+	Destructive  bool
+	Icon         string
 }
 
 type DeviceRow struct {
@@ -147,10 +148,10 @@ func BuildViewModel(snapshot lifecycle.Snapshot, selected Section, now time.Time
 		if snapshot.Role == lifecycle.RoleWindowsHost {
 			model.Actions = append(model.Actions,
 				enabledAction(ActionApprovePair, "Код совпадает — разрешить"),
-				Action{ID: ActionRejectPair, Label: "Отклонить", Enabled: true, Destructive: true},
+				viewAction(ActionRejectPair, "Отклонить", true, true),
 			)
 		} else {
-			model.Actions = append(model.Actions, Action{ID: ActionCancelPair, Label: "Отменить подключение", Enabled: true, Destructive: true})
+			model.Actions = append(model.Actions, viewAction(ActionCancelPair, "Отменить подключение", true, true))
 		}
 	case lifecycle.StatePairingCancellationPending:
 		model.Status = "Отмена нового подключения"
@@ -162,7 +163,7 @@ func BuildViewModel(snapshot lifecycle.Snapshot, selected Section, now time.Time
 		if snapshot.Problem != nil {
 			model.Notice = snapshot.Problem.Message
 		}
-		model.Actions = append(model.Actions, Action{ID: ActionCancelPair, Label: "Повторить отмену", Enabled: true, Destructive: true})
+		model.Actions = append(model.Actions, viewAction(ActionCancelPair, "Повторить отмену", true, true))
 	case lifecycle.StateConnecting:
 		model.Status = "Подключение"
 		model.Headline = "Настраиваем защищённое соединение"
@@ -199,6 +200,11 @@ func BuildViewModel(snapshot lifecycle.Snapshot, selected Section, now time.Time
 		model.Headline = "Remote Docker требует внимания"
 		if snapshot.Problem != nil {
 			model.Detail = snapshot.Problem.Message
+			if snapshot.Problem.Code == lifecycle.ProblemTransportUpgradeRequired {
+				model.Status = "Нужно обновить подключение"
+				model.Headline = "Повторите безопасное сопряжение"
+				model.Notice = snapshot.Problem.Action
+			}
 		}
 		model.Actions = append(model.Actions, enabledAction(ActionDiagnostics, "Открыть диагностику"))
 	default:
@@ -206,16 +212,49 @@ func BuildViewModel(snapshot lifecycle.Snapshot, selected Section, now time.Time
 		model.Headline = "Откройте диагностику"
 	}
 
-	model.Actions = append(model.Actions, Action{
-		ID: ActionQuit, Label: "Завершить работу",
-		Enabled:     !snapshot.ActionInProgress,
-		Destructive: true, Icon: "exit",
-	})
+	quit := viewAction(ActionQuit, "Завершить работу", !snapshot.ActionInProgress, true)
+	quit.Icon = "exit"
+	model.Actions = append(model.Actions, quit)
 	return model
 }
 
 func enabledAction(id ActionID, label string) Action {
-	return Action{ID: id, Label: label, Enabled: true}
+	return viewAction(id, label, true, false)
+}
+
+func viewAction(id ActionID, label string, enabled, destructive bool) Action {
+	return Action{ID: id, Label: label, PendingLabel: pendingActionLabel(id), Enabled: enabled, Destructive: destructive}
+}
+
+func pendingActionLabel(id ActionID) string {
+	switch id {
+	case ActionStartSearch:
+		return "Запускаем поиск…"
+	case ActionStopSearch:
+		return "Останавливаем поиск…"
+	case ActionConnect, ActionConnectTrusted:
+		return "Подключаемся…"
+	case ActionApprovePair:
+		return "Разрешаем…"
+	case ActionRejectPair:
+		return "Отклоняем…"
+	case ActionCancelPair:
+		return "Отменяем…"
+	case ActionPause:
+		return "Останавливаем…"
+	case ActionDisconnect:
+		return "Отключаем…"
+	case ActionForgetDevice:
+		return "Удаляем…"
+	case ActionAddWorkspace:
+		return "Добавляем…"
+	case ActionDiagnostics:
+		return "Проверяем…"
+	case ActionQuit:
+		return "Завершаем…"
+	default:
+		return "Запускаем…"
+	}
 }
 
 func BuildDeviceRows(snapshot lifecycle.Snapshot, candidates []localapi.PairingCandidate) []DeviceRow {
@@ -291,18 +330,18 @@ func buildDeviceRow(snapshot lifecycle.Snapshot, candidate localapi.PairingCandi
 	if !candidate.Trusted {
 		row.Status = "Новое устройство"
 		row.Kind = "new"
-		row.Actions = []Action{{ID: ActionConnect, Label: "Подключиться", Enabled: snapshot.State == lifecycle.StateSearching}}
+		row.Actions = []Action{viewAction(ActionConnect, "Подключиться", snapshot.State == lifecycle.StateSearching, false)}
 		return row
 	}
 	row.Kind = "saved"
-	forget := Action{ID: ActionForgetDevice, Label: "Забыть", Enabled: true, Destructive: true}
+	forget := viewAction(ActionForgetDevice, "Забыть", true, true)
 	if candidate.Available {
 		row.Status = "Сохранено · доступно"
 		row.Actions = []Action{enabledAction(ActionConnectTrusted, "Подключиться"), forget}
 		return row
 	}
 	row.Status = "Сохранено · недоступно"
-	row.Actions = []Action{{ID: ActionConnectTrusted, Label: "Подключиться", Enabled: false}, forget}
+	row.Actions = []Action{viewAction(ActionConnectTrusted, "Подключиться", false, false), forget}
 	return row
 }
 

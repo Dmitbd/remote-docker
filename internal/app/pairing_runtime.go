@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -30,6 +31,7 @@ import (
 	"github.com/Dmitbd/remote-docker/internal/pairing"
 	"github.com/Dmitbd/remote-docker/internal/sshtransport"
 	"github.com/Dmitbd/remote-docker/internal/systemtransport"
+	"github.com/Dmitbd/remote-docker/internal/tunnel"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -79,6 +81,7 @@ type pendingPairing struct {
 	clientDeviceID string
 	authorizedKey  string
 	privateKeyPEM  []byte
+	tunnelIdentity []byte
 	completing     bool
 	record         *pairing.DeviceRecord
 }
@@ -179,7 +182,7 @@ func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (loc
 		return localapi.PairStartResult{}, needsAction("a pairing session is already active")
 	}
 	if c.pending != nil {
-		clearSecret(c.pending.privateKeyPEM)
+		clearPendingSecrets(c.pending)
 		c.pending = nil
 	}
 	cancellation := c.cancellation
@@ -214,9 +217,15 @@ func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (loc
 		clearSecret(clientPrivateKey)
 		return localapi.PairStartResult{}, unavailable("cannot create SSH pairing identity")
 	}
+	tunnelIdentity, err := tunnel.EncodeIdentity(tunnel.Identity{PrivateKey: clientPrivateKey, PublicKey: clientPublicKey})
+	if err != nil {
+		clearSecret(clientPrivateKey)
+		return localapi.PairStartResult{}, unavailable("cannot encode tunnel pairing identity")
+	}
 	privateBlock, err := ssh.MarshalPrivateKey(clientPrivateKey, "remote-docker managed key")
 	clearSecret(clientPrivateKey)
 	if err != nil {
+		clearSecret(tunnelIdentity)
 		return localapi.PairStartResult{}, unavailable("cannot encode SSH pairing identity")
 	}
 	privateKeyPEM := pem.EncodeToMemory(privateBlock)
@@ -227,16 +236,19 @@ func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (loc
 	clientDeviceID, err := clientDeviceIDProvider(ctx)
 	if err != nil || strings.TrimSpace(clientDeviceID) == "" {
 		clearSecret(privateKeyPEM)
+		clearSecret(tunnelIdentity)
 		return localapi.PairStartResult{}, unavailable("cannot create client device identity")
 	}
 	target, descriptor, err := c.options.Transport.Bootstrap(ctx, selector, clientPublicKey)
 	if err != nil {
 		clearSecret(privateKeyPEM)
+		clearSecret(tunnelIdentity)
 		return localapi.PairStartResult{}, unavailable("cannot start private-LAN pairing session")
 	}
 	code, err := pairing.Code(descriptor)
 	if err != nil {
 		clearSecret(privateKeyPEM)
+		clearSecret(tunnelIdentity)
 		if cancelErr := c.cancelDetached(target, descriptor); cancelErr != nil {
 			c.mu.Lock()
 			c.cancellation = &pendingCancellation{target: target, descriptor: descriptor}
@@ -248,7 +260,7 @@ func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (loc
 	pending := &pendingPairing{
 		target: target, descriptor: descriptor, clientDeviceID: clientDeviceID,
 		authorizedKey: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPublicKey))),
-		privateKeyPEM: privateKeyPEM,
+		privateKeyPEM: privateKeyPEM, tunnelIdentity: tunnelIdentity,
 	}
 	c.mu.Lock()
 	c.pending = pending
@@ -288,9 +300,12 @@ func (c *macPairingCoordinator) readStatus(ctx context.Context, sessionID string
 	}
 	pending := *c.pending
 	pending.privateKeyPEM = append([]byte(nil), c.pending.privateKeyPEM...)
+	pending.tunnelIdentity = append([]byte(nil), c.pending.tunnelIdentity...)
+	defer clearPendingSecrets(&pending)
 	if c.pending.record != nil {
 		record := *c.pending.record
 		record.AuthorizedKeys = append([]string(nil), c.pending.record.AuthorizedKeys...)
+		record.TunnelPublicKey = append(ed25519.PublicKey(nil), c.pending.record.TunnelPublicKey...)
 		pending.record = &record
 	}
 	c.mu.Unlock()
@@ -358,16 +373,21 @@ func (c *macPairingCoordinator) complete(ctx context.Context, sessionID string, 
 		if c.pending != nil && c.pending.descriptor.ID == sessionID {
 			stored := record
 			stored.AuthorizedKeys = append([]string(nil), record.AuthorizedKeys...)
+			stored.TunnelPublicKey = append(ed25519.PublicKey(nil), record.TunnelPublicKey...)
 			c.pending.record = &stored
 		}
 		c.mu.Unlock()
 	} else {
 		record = *pending.record
 		record.AuthorizedKeys = append([]string(nil), pending.record.AuthorizedKeys...)
+		record.TunnelPublicKey = append(ed25519.PublicKey(nil), pending.record.TunnelPublicKey...)
 	}
 	remoteDeviceID, err := pairedRemoteDeviceID(record.SSHHostPublicKey)
 	if err != nil || strings.TrimSpace(record.SyncthingDeviceID) == "" ||
-		record.SSHPort < 1 || record.SSHPort > 65535 || record.SyncthingPort < 1 || record.SyncthingPort > 65535 {
+		record.SSHPort < 1 || record.SSHPort > 65535 || record.SyncthingPort < 1 || record.SyncthingPort > 65535 ||
+		record.TunnelPort != tunnel.TunnelPort || record.TransportVersion != tunnel.CurrentTransportVersion ||
+		len(record.TunnelPublicKey) != ed25519.PublicKeySize ||
+		subtle.ConstantTimeCompare(record.TunnelPublicKey, pending.descriptor.ServerPublicKey) != 1 {
 		clearSecret(pending.privateKeyPEM)
 		return localapi.Device{}, unavailable("paired device returned invalid public metadata")
 	}
@@ -377,7 +397,7 @@ func (c *macPairingCoordinator) complete(ctx context.Context, sessionID string, 
 		return localapi.Device{}, unavailable("cannot pin paired SSH identity")
 	}
 	if err := sshtransport.WriteConfig(c.options.SSHConfigPath, sshtransport.Config{
-		DeviceID: remoteDeviceID, HostName: pending.target.Address, Port: record.SSHPort,
+		DeviceID: remoteDeviceID, HostName: "127.0.0.1", Port: tunnel.DockerRelayPort,
 		AgentSocket: c.options.AgentSocketPath, KnownHostsFile: c.options.KnownHostsPath, ControlDir: c.options.ControlDir,
 	}); err != nil {
 		clearSecret(pending.privateKeyPEM)
@@ -409,13 +429,24 @@ func (c *macPairingCoordinator) complete(ctx context.Context, sessionID string, 
 		}
 		return localapi.Device{}, unavailable("cannot store paired SSH identity")
 	}
-	clearSecret(pending.privateKeyPEM)
+	if err := c.options.Secrets.Put(remoteDeviceID, tunnel.IdentityCredential, pending.tunnelIdentity); err != nil {
+		_ = c.options.Secrets.Delete(remoteDeviceID, sshtransport.SSHPrivateKeyCredential)
+		rollbackErr := rollbackContext()
+		clearPendingSecrets(&pending)
+		if rollbackErr != nil {
+			return localapi.Device{}, rollbackErr
+		}
+		return localapi.Device{}, unavailable("cannot store paired tunnel identity")
+	}
+	clearPendingSecrets(&pending)
 
 	device := config.Device{
 		Name: pending.target.Name, Address: pending.target.Address,
 		SSHPort: record.SSHPort, SyncPort: record.SyncthingPort,
 		SSHHostPublicKey: record.SSHHostPublicKey, SyncthingDeviceID: record.SyncthingDeviceID,
 		ClientDeviceID: pending.clientDeviceID,
+		TunnelPort:     record.TunnelPort, TunnelPeerPublicKey: tunnel.EncodePublicKey(record.TunnelPublicKey),
+		TransportVersion: record.TransportVersion,
 	}
 	err = c.options.ConfigTransactions.Run(func() error {
 		cfg, err := loadAgentConfig(c.options.Store)
@@ -435,6 +466,7 @@ func (c *macPairingCoordinator) complete(ctx context.Context, sessionID string, 
 	})
 	if err != nil {
 		_ = c.options.Secrets.Delete(remoteDeviceID, sshtransport.SSHPrivateKeyCredential)
+		_ = c.options.Secrets.Delete(remoteDeviceID, tunnel.IdentityCredential)
 		if rollbackErr := rollbackContext(); rollbackErr != nil {
 			return localapi.Device{}, rollbackErr
 		}
@@ -442,7 +474,7 @@ func (c *macPairingCoordinator) complete(ctx context.Context, sessionID string, 
 	}
 	c.mu.Lock()
 	if c.pending != nil {
-		clearSecret(c.pending.privateKeyPEM)
+		clearPendingSecrets(c.pending)
 	}
 	c.pending = nil
 	c.previousDockerHost = ""
@@ -470,9 +502,10 @@ func (c *macPairingCoordinator) Cancel(ctx context.Context, sessionID string) (l
 	}
 	pending := *c.pending
 	pending.privateKeyPEM = append([]byte(nil), c.pending.privateKeyPEM...)
+	pending.tunnelIdentity = append([]byte(nil), c.pending.tunnelIdentity...)
 	c.mu.Unlock()
 	cancelErr := c.options.Transport.Cancel(ctx, pending.target, pending.descriptor)
-	clearSecret(pending.privateKeyPEM)
+	clearPendingSecrets(&pending)
 	if cancelErr != nil {
 		return localapi.PairingStatusResult{}, unavailable("cannot cancel the pairing request")
 	}
@@ -486,7 +519,7 @@ func (c *macPairingCoordinator) clearPending(sessionID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.pending != nil && c.pending.descriptor.ID == sessionID {
-		clearSecret(c.pending.privateKeyPEM)
+		clearPendingSecrets(c.pending)
 		c.pending = nil
 	}
 }
@@ -551,6 +584,9 @@ func (c *macPairingCoordinator) forgetLocal(deviceID string) error {
 	if err := c.options.Secrets.Delete(deviceID, sshtransport.SSHPrivateKeyCredential); err != nil && !errors.Is(err, credentials.ErrNotFound) {
 		return unavailable("cannot delete paired SSH identity")
 	}
+	if err := c.options.Secrets.Delete(deviceID, tunnel.IdentityCredential); err != nil && !errors.Is(err, credentials.ErrNotFound) {
+		return unavailable("cannot delete paired tunnel identity")
+	}
 	if c.options.BeforeConfigTransaction != nil {
 		c.options.BeforeConfigTransaction()
 	}
@@ -581,12 +617,16 @@ func (c *macPairingCoordinator) forgetLocal(deviceID string) error {
 }
 
 type discoveryPairingTransport struct {
-	SSHConfigPath string
-	SSHBinary     string
-	DialContext   systemtransport.DialContextFunc
-	discover      func(context.Context) ([]discovery.Peer, error)
-	inspect       func(context.Context, string, string) (pairing.Info, error)
-	bootstrap     func(context.Context, string, ed25519.PublicKey) (pairing.SessionDescriptor, error)
+	Store             config.Store
+	Secrets           credentials.Store
+	SSHConfigPath     string
+	SSHBinary         string
+	DialContext       systemtransport.DialContextFunc
+	TunnelDialContext systemtransport.DialContextFunc
+	discover          func(context.Context) ([]discovery.Peer, error)
+	inspect           func(context.Context, string, string) (pairing.Info, error)
+	bootstrap         func(context.Context, string, ed25519.PublicKey) (pairing.SessionDescriptor, error)
+	verifySaved       func(context.Context, discovery.Peer) (pairingTarget, error)
 }
 
 func (t discoveryPairingTransport) Candidates(ctx context.Context) ([]pairingTarget, error) {
@@ -600,13 +640,14 @@ func (t discoveryPairingTransport) Candidates(ctx context.Context) ([]pairingTar
 			continue
 		}
 		if !peer.Pairing {
-			if strings.TrimSpace(peer.DeviceID) == "" {
-				continue
+			verify := t.verifySaved
+			if verify == nil {
+				verify = t.verifySavedPeer
 			}
-			targets = append(targets, pairingTarget{
-				InstanceID: peer.DeviceID, Address: peer.Addresses[0].String(), PairingPort: peer.Port,
-				TrustedAdvertisement: true,
-			})
+			target, verifyErr := verify(ctx, peer)
+			if verifyErr == nil {
+				targets = append(targets, target)
+			}
 			continue
 		}
 		target, inspectErr := t.inspectPeer(ctx, peer, peer.Addresses)
@@ -621,17 +662,39 @@ func (t discoveryPairingTransport) Bootstrap(ctx context.Context, selector strin
 	if strings.TrimSpace(selector) == "" {
 		return pairingTarget{}, pairing.SessionDescriptor{}, errors.New("select a pairing peer before starting")
 	}
-	peers, err := t.discoverPeers(ctx)
-	if err != nil {
-		return pairingTarget{}, pairing.SessionDescriptor{}, err
-	}
-	peer, addresses, err := selectPairingPeer(peers, selector)
-	if err != nil {
-		return pairingTarget{}, pairing.SessionDescriptor{}, err
-	}
-	target, err := t.inspectPeer(ctx, peer, addresses)
-	if err != nil {
-		return pairingTarget{}, pairing.SessionDescriptor{}, err
+	var target pairingTarget
+	selectorIP := net.ParseIP(selector)
+	if selectorIP != nil {
+		if !selectorIP.IsPrivate() || selectorIP.IsLoopback() || selectorIP.IsUnspecified() {
+			return pairingTarget{}, pairing.SessionDescriptor{}, errors.New("manual pairing requires a private IP address")
+		}
+		inspect := t.inspect
+		if inspect == nil {
+			inspect = func(ctx context.Context, endpoint, instanceID string) (pairing.Info, error) {
+				return pairing.Inspect(ctx, endpoint, instanceID, pairing.NewDiscoveryHTTPClient(5*time.Second, t.DialContext))
+			}
+		}
+		manual := pairingTarget{Address: selectorIP.String(), PairingPort: tunnel.TunnelPort}
+		info, err := inspect(ctx, pairingEndpoint(manual), "")
+		if err != nil {
+			return pairingTarget{}, pairing.SessionDescriptor{}, fmt.Errorf("inspect manual pairing peer: %w", err)
+		}
+		manual.InstanceID, manual.Name = info.InstanceID, info.DisplayName
+		manual.ServerPublicKey = append(ed25519.PublicKey(nil), info.ServerPublicKey...)
+		target = manual
+	} else {
+		peers, err := t.discoverPeers(ctx)
+		if err != nil {
+			return pairingTarget{}, pairing.SessionDescriptor{}, err
+		}
+		peer, addresses, err := selectPairingPeer(peers, selector)
+		if err != nil {
+			return pairingTarget{}, pairing.SessionDescriptor{}, err
+		}
+		target, err = t.inspectPeer(ctx, peer, addresses)
+		if err != nil {
+			return pairingTarget{}, pairing.SessionDescriptor{}, err
+		}
 	}
 	bootstrap := t.bootstrap
 	if bootstrap == nil {
@@ -683,12 +746,99 @@ func (t discoveryPairingTransport) discoverPeers(ctx context.Context) ([]discove
 		return t.discover(ctx)
 	}
 	browser, err := discovery.NewBrowser()
-	if err != nil {
-		return nil, err
-	}
 	discoveryCtx, cancel := context.WithTimeout(ctx, pairingDiscoveryTimeout)
 	defer cancel()
-	return (discovery.Service{Browser: browser}).Discover(discoveryCtx)
+	service := discovery.Service{UDP: discovery.DiscoverUDP, Saved: t.savedPeers()}
+	if err == nil {
+		service.Browser = browser
+	}
+	return service.Discover(discoveryCtx)
+}
+
+func (t discoveryPairingTransport) savedPeers() []discovery.Peer {
+	if strings.TrimSpace(t.Store.Path) == "" {
+		return nil
+	}
+	cfg, err := loadAgentConfig(t.Store)
+	if err != nil || cfg.ActiveDevice == "" {
+		return nil
+	}
+	device, ok := cfg.Devices[cfg.ActiveDevice]
+	address := net.ParseIP(device.Address)
+	peerPublicKey, keyErr := tunnel.ParsePublicKey(device.TunnelPeerPublicKey)
+	if !ok || address == nil || !address.IsPrivate() || address.IsLoopback() ||
+		device.TunnelPort != tunnel.TunnelPort || device.TransportVersion != tunnel.CurrentTransportVersion || keyErr != nil {
+		return nil
+	}
+	return []discovery.Peer{{
+		InstanceID: pairing.InstanceIDFromPublicKey(peerPublicKey), DeviceID: cfg.ActiveDevice, Port: tunnel.TunnelPort,
+		Addresses: []net.IP{address},
+	}}
+}
+
+func (t discoveryPairingTransport) verifySavedPeer(ctx context.Context, peer discovery.Peer) (pairingTarget, error) {
+	deviceID := strings.TrimSpace(peer.DeviceID)
+	if deviceID == "" || peer.Port != tunnel.TunnelPort || len(peer.Addresses) == 0 || t.Secrets == nil {
+		return pairingTarget{}, errors.New("saved tunnel peer is incomplete")
+	}
+	cfg, err := loadAgentConfig(t.Store)
+	if err != nil {
+		return pairingTarget{}, errors.New("cannot load saved tunnel peer")
+	}
+	device, ok := cfg.Devices[deviceID]
+	if !ok || device.TunnelPort != tunnel.TunnelPort || device.TransportVersion != tunnel.CurrentTransportVersion {
+		return pairingTarget{}, errors.New("saved tunnel peer is no longer trusted")
+	}
+	serverPublicKey, err := tunnel.ParsePublicKey(device.TunnelPeerPublicKey)
+	if err != nil || pairing.InstanceIDFromPublicKey(serverPublicKey) != peer.InstanceID {
+		return pairingTarget{}, errors.New("saved tunnel identity does not match discovery")
+	}
+	encodedIdentity, err := t.Secrets.Get(deviceID, tunnel.IdentityCredential)
+	if err != nil {
+		return pairingTarget{}, errors.New("saved tunnel client identity is unavailable")
+	}
+	defer clearSecret(encodedIdentity)
+	clientIdentity, err := tunnel.IdentityFromPKCS8(encodedIdentity)
+	if err != nil {
+		return pairingTarget{}, errors.New("saved tunnel client identity is invalid")
+	}
+	tlsConfig, err := tunnel.ClientTLSConfig(clientIdentity, serverPublicKey)
+	if err != nil {
+		return pairingTarget{}, errors.New("saved tunnel TLS configuration is invalid")
+	}
+	dialContext := t.TunnelDialContext
+	if dialContext == nil {
+		dialContext = systemtransport.TunnelDialContext()
+	}
+	var lastErr error
+	for _, address := range peer.Addresses {
+		if address == nil || (!address.IsPrivate() && !address.IsLoopback()) || address.IsUnspecified() {
+			continue
+		}
+		endpoint := net.JoinHostPort(address.String(), fmt.Sprintf("%d", tunnel.TunnelPort))
+		connection, dialErr := dialContext(ctx, "tcp", endpoint)
+		if dialErr != nil {
+			lastErr = dialErr
+			continue
+		}
+		secured := tls.Client(connection, tlsConfig.Clone())
+		handshakeErr := secured.HandshakeContext(ctx)
+		_ = secured.Close()
+		if handshakeErr == nil {
+			return pairingTarget{
+				InstanceID: deviceID, Name: device.Name, Address: address.String(), PairingPort: tunnel.TunnelPort,
+				TrustedAdvertisement: true,
+			}, nil
+		}
+		lastErr = handshakeErr
+		if ctx.Err() != nil {
+			return pairingTarget{}, ctx.Err()
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("saved tunnel peer has no safe address")
+	}
+	return pairingTarget{}, fmt.Errorf("verify saved tunnel peer: %w", lastErr)
 }
 
 func (t discoveryPairingTransport) Confirm(ctx context.Context, target pairingTarget, descriptor pairing.SessionDescriptor, clientDeviceID, authorizedKey, code string) (pairing.DeviceRecord, error) {
@@ -722,6 +872,10 @@ func (t discoveryPairingTransport) Revoke(ctx context.Context, device config.Dev
 	if err != nil {
 		return err
 	}
+	controlAlias, err := sshtransport.ControlAlias(alias)
+	if err != nil {
+		return err
+	}
 	binary := t.SSHBinary
 	if binary == "" {
 		binary = "ssh"
@@ -737,7 +891,7 @@ func (t discoveryPairingTransport) Revoke(ctx context.Context, device config.Dev
 	var output bytes.Buffer
 	command := sshtransport.Command{
 		Binary: binary,
-		Args:   []string{"-F", t.SSHConfigPath, "remote-docker-device-" + alias, "remote-docker-remote", "rpc"},
+		Args:   []string{"-F", t.SSHConfigPath, controlAlias, "remote-docker-remote", "rpc"},
 		Stdin:  bytes.NewReader(append(encoded, '\n')), Stdout: &output, Stderr: io.Discard,
 	}
 	if err := runSSHCommand(ctx, command); err != nil {
@@ -850,6 +1004,14 @@ func clearSecret(value []byte) {
 	for index := range value {
 		value[index] = 0
 	}
+}
+
+func clearPendingSecrets(pending *pendingPairing) {
+	if pending == nil {
+		return
+	}
+	clearSecret(pending.privateKeyPEM)
+	clearSecret(pending.tunnelIdentity)
 }
 
 func runSSHCommand(ctx context.Context, command sshtransport.Command) error {

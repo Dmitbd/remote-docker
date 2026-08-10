@@ -20,12 +20,15 @@ func TestStoreRoundTrip(t *testing.T) {
 		LocalSyncthingIdentity: []byte("encrypted-identity"),
 		Devices: map[string]Device{
 			"pc-1": {
-				Name:              "Dev PC",
-				Address:           "192.168.1.20",
-				SSHPort:           2222,
-				SyncPort:          22000,
-				SSHHostPublicKey:  "ssh-ed25519 AAAAhost",
-				SyncthingDeviceID: "SYNC-DEVICE",
+				Name:                "Dev PC",
+				Address:             "192.168.1.20",
+				SSHPort:             2222,
+				SyncPort:            22000,
+				SSHHostPublicKey:    "ssh-ed25519 AAAAhost",
+				SyncthingDeviceID:   "SYNC-DEVICE",
+				TunnelPort:          49221,
+				TunnelPeerPublicKey: "WINDOWS-TUNNEL-KEY",
+				TransportVersion:    1,
 			},
 		},
 		Workspaces: map[string]Workspace{
@@ -52,6 +55,23 @@ func TestStoreRoundTrip(t *testing.T) {
 		if got := info.Mode().Perm(); got != 0o600 {
 			t.Fatalf("config mode = %o, want 600", got)
 		}
+	}
+}
+
+func TestStoreMigratesSchemaV2WithoutSilentlyAddingTunnelTrust(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	legacy := `{"schemaVersion":2,"activeDevice":"pc-1","devices":{"pc-1":{"name":"Dev PC","address":"192.168.1.20","sshPort":49222}}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write schema v2 config: %v", err)
+	}
+	got, migration, err := (Store{Path: path}).LoadWithMigration()
+	if err != nil {
+		t.Fatalf("LoadWithMigration() error = %v", err)
+	}
+	device := got.Devices["pc-1"]
+	if got.SchemaVersion != CurrentSchemaVersion || migration.FromVersion != 2 ||
+		device.TunnelPort != 0 || device.TunnelPeerPublicKey != "" || device.TransportVersion != 0 {
+		t.Fatalf("schema-v2 migration silently created tunnel trust: cfg=%#v migration=%#v", got, migration)
 	}
 }
 

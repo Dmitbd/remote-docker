@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Dmitbd/remote-docker/internal/tunnel"
 )
 
 func TestProxyPrefersIPv6LoopbackWithoutResolvingWSLAddress(t *testing.T) {
@@ -120,6 +122,38 @@ func TestProxyRejectsUnsupportedServices(t *testing.T) {
 	_, err := NewProxy(Service("docker-api"), &sequenceResolver{}, staticProfile(true), &net.Dialer{})
 	if !errors.Is(err, ErrUnsupportedService) {
 		t.Fatalf("NewProxy() error = %v, want ErrUnsupportedService", err)
+	}
+}
+
+func TestTunnelServiceDialerMapsOnlyFourKindsToFixedWSLServices(t *testing.T) {
+	for _, test := range []struct {
+		kind tunnel.StreamKind
+		port string
+	}{
+		{tunnel.StreamDockerSSH, "22"},
+		{tunnel.StreamControl, "22"},
+		{tunnel.StreamMetrics, "22"},
+		{tunnel.StreamWorkspaceSync, "22000"},
+	} {
+		t.Run(test.kind.String(), func(t *testing.T) {
+			dialer := &scriptedDialer{failures: 3}
+			serviceDialer := &ServiceDialer{
+				Resolver: &sequenceResolver{addresses: []net.IP{net.ParseIP("172.30.1.10")}}, Dialer: dialer,
+			}
+			_, _ = serviceDialer.DialService(context.Background(), test.kind)
+			want := []string{"[::1]:" + test.port, "127.0.0.1:" + test.port, "172.30.1.10:" + test.port}
+			if got := dialer.addresses(); !reflect.DeepEqual(got, want) {
+				t.Fatalf("DialService(%s) addresses = %#v, want %#v", test.kind, got, want)
+			}
+		})
+	}
+	dialer := &recordingDialer{}
+	serviceDialer := &ServiceDialer{Resolver: &sequenceResolver{}, Dialer: dialer}
+	if _, err := serviceDialer.DialService(context.Background(), 99); !errors.Is(err, ErrUnsupportedService) {
+		t.Fatalf("DialService(unknown) error = %v", err)
+	}
+	if len(dialer.addresses()) != 0 {
+		t.Fatal("unknown tunnel kind dialed WSL")
 	}
 }
 

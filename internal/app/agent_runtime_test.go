@@ -20,7 +20,6 @@ import (
 
 	"github.com/Dmitbd/remote-docker/internal/config"
 	"github.com/Dmitbd/remote-docker/internal/credentials"
-	"github.com/Dmitbd/remote-docker/internal/diagnostics"
 	"github.com/Dmitbd/remote-docker/internal/discovery"
 	"github.com/Dmitbd/remote-docker/internal/dockercli"
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
@@ -28,6 +27,7 @@ import (
 	"github.com/Dmitbd/remote-docker/internal/pairing"
 	"github.com/Dmitbd/remote-docker/internal/portrelay"
 	"github.com/Dmitbd/remote-docker/internal/sshtransport"
+	"github.com/Dmitbd/remote-docker/internal/tunnel"
 	"github.com/Dmitbd/remote-docker/internal/windowsbridge"
 	"golang.org/x/crypto/ssh"
 )
@@ -464,19 +464,17 @@ func (p *recordingDockerPreparer) Prepare(_ context.Context, params localapi.Pre
 }
 
 func TestProductionDiagnosticsReturnsOrderedSafeChecks(t *testing.T) {
-	checks := newProductionDiagnosticsWithOptions(productionDiagnosticsOptions{
+	options := productionDiagnosticsOptions{
 		Observe: func(context.Context) AgentStatus {
 			return AgentStatus{State: AgentReady, Message: "Bearer not-a-secret-in-output"}
 		},
-		Remote: staticRemoteDiagnostics{status: remoteDiagnosticStatus{
-			WSLRunning: true, SystemdTarget: true, DiskAvailable: true,
-		}},
-		PortRelays: diagnostics.CheckFunc(func(context.Context) error { return nil }),
-		Platform:   "darwin",
-	}).Doctor(context.Background()).Checks
+		Platform: "darwin",
+	}
+	setTestDiagnosticChecks(&options, func(context.Context) error { return nil })
+	checks := newProductionDiagnosticsWithOptions(options).Doctor(context.Background()).Checks
 	wantNames := []string{
-		"lan_reachability", "ssh_identity", "wsl_running", "systemd_target",
-		"docker_socket", "disk", "syncthing", "port_relays",
+		"lan_reachability", "tunnel_identity", "tunnel_session",
+		"local_relays", "docker_channel", "sync_channel", "managed_wsl",
 	}
 	if len(checks) != len(wantNames) {
 		t.Fatalf("check count = %d, want %d", len(checks), len(wantNames))
@@ -542,12 +540,20 @@ func TestMacPairingCoordinatorPersistsPinnedDeviceAndRevokesBeforeLocalRemoval(t
 	device := cfg.Devices[confirmed.ID]
 	if cfg.ActiveDevice != confirmed.ID || device.SSHHostPublicKey != transport.hostKey ||
 		device.SyncthingDeviceID != "WINDOWS-SYNC" || device.ClientDeviceID != "LOCAL-SYNC" ||
-		device.SSHPort != 49222 || device.SyncPort != 49220 {
+		device.SSHPort != 49222 || device.SyncPort != 49220 || device.TunnelPort != tunnel.TunnelPort ||
+		device.TransportVersion != tunnel.CurrentTransportVersion || device.TunnelPeerPublicKey == "" {
 		t.Fatalf("persisted device = %#v config=%#v", device, cfg)
 	}
 	privateKey, err := secrets.Get(confirmed.ID, sshtransport.SSHPrivateKeyCredential)
 	if err != nil || len(privateKey) == 0 {
 		t.Fatalf("stored private key length=%d error=%v", len(privateKey), err)
+	}
+	encodedTunnelIdentity, err := secrets.Get(confirmed.ID, tunnel.IdentityCredential)
+	if err != nil {
+		t.Fatalf("stored tunnel identity error = %v", err)
+	}
+	if _, err := tunnel.IdentityFromPKCS8(encodedTunnelIdentity); err != nil {
+		t.Fatalf("stored tunnel identity is invalid: %v", err)
 	}
 	knownHosts, _ := os.ReadFile(filepath.Join(root, "known_hosts"))
 	if !strings.Contains(string(knownHosts), transport.hostKey) {
@@ -1588,6 +1594,8 @@ func (t *runtimePairingTransport) Confirm(_ context.Context, _ pairingTarget, de
 		DeviceID: clientDeviceID, AuthorizedKeys: []string{authorizedKey},
 		SSHHostPublicKey: t.hostKey, SyncthingDeviceID: "WINDOWS-SYNC",
 		SSHPort: 49222, SyncthingPort: 49220,
+		TunnelPublicKey: append(ed25519.PublicKey(nil), descriptor.ServerPublicKey...),
+		TunnelPort:      tunnel.TunnelPort, TransportVersion: tunnel.CurrentTransportVersion,
 	}, nil
 }
 
@@ -1989,4 +1997,32 @@ type recordingManagedSSHAgent struct{ closes atomic.Int32 }
 func (a *recordingManagedSSHAgent) Close() error {
 	a.closes.Add(1)
 	return nil
+}
+
+func TestLegacyPairRequiresExplicitUpgradeWithoutRawLANFallback(t *testing.T) {
+	store := config.Store{Path: filepath.Join(t.TempDir(), "config.json")}
+	legacy := config.Device{
+		Name: "Windows", Address: "192.168.1.20", SSHPort: 49222, SyncPort: 49220,
+		SSHHostPublicKey: "legacy-host-key", SyncthingDeviceID: "legacy-sync",
+	}
+	seed := config.Config{
+		SchemaVersion: config.CurrentSchemaVersion, ActiveDevice: "legacy-windows",
+		Devices: map[string]config.Device{"legacy-windows": legacy},
+	}
+	if err := store.Save(seed); err != nil {
+		t.Fatalf("seed legacy config: %v", err)
+	}
+	problem := transportUpgradeProblem(store)
+	if problem == nil || problem.Code != lifecycle.ProblemTransportUpgradeRequired ||
+		problem.Message != lifecycle.TransportUpgradeMessage || problem.Action != lifecycle.TransportUpgradeAction {
+		t.Fatalf("transport upgrade problem = %#v", problem)
+	}
+	client := newProductionTunnelClient(store, credentials.NewMemoryStore(), nil)
+	if _, err := client.Dial(context.Background()); err == nil || !strings.Contains(err.Error(), "tunnel metadata") {
+		t.Fatalf("legacy tunnel Dial() error = %v, want metadata rejection before network fallback", err)
+	}
+	after, err := store.Load()
+	if err != nil || !reflect.DeepEqual(after, seed) {
+		t.Fatalf("legacy trust changed without explicit forget: config=%#v err=%v", after, err)
+	}
 }

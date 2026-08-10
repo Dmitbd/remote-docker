@@ -44,23 +44,40 @@ type Browser interface {
 type Service struct {
 	Browser         Browser
 	ProtocolVersion string
+	UDP             func(context.Context) ([]Peer, error)
+	Saved           []Peer
 }
 
 // Discover collects valid records until the browser closes or ctx expires.
 func (s Service) Discover(ctx context.Context) ([]Peer, error) {
-	if s.Browser == nil {
-		return nil, errors.New("discovery browser is required")
-	}
 	version := s.ProtocolVersion
 	if version == "" {
 		version = DefaultProtocolVersion
 	}
-	records, err := s.Browser.Browse(ctx, ServiceType)
-	if err != nil {
-		return nil, fmt.Errorf("browse remote Docker services: %w", err)
+	var records <-chan Record
+	if s.Browser != nil {
+		var err error
+		records, err = s.Browser.Browse(ctx, ServiceType)
+		if err != nil && s.UDP == nil && len(s.Saved) == 0 {
+			return nil, fmt.Errorf("browse remote Docker services: %w", err)
+		}
+	}
+	if records == nil {
+		closed := make(chan Record)
+		close(closed)
+		records = closed
 	}
 
 	peersByID := make(map[string]*Peer)
+	for _, peer := range s.Saved {
+		mergePeer(peersByID, peer)
+	}
+	if s.UDP != nil {
+		udpPeers, _ := s.UDP(ctx)
+		for _, peer := range udpPeers {
+			mergePeer(peersByID, peer)
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -73,18 +90,35 @@ func (s Service) Discover(ctx context.Context) ([]Peer, error) {
 			if !ok {
 				continue
 			}
-			existing, found := peersByID[peer.InstanceID]
-			if !found {
-				copy := peer
-				peersByID[peer.InstanceID] = &copy
-				continue
-			}
-			if existing.Port != peer.Port || existing.Pairing != peer.Pairing || existing.DeviceID != peer.DeviceID {
-				continue
-			}
-			existing.Addresses = mergeAddresses(existing.Addresses, peer.Addresses)
+			mergePeer(peersByID, peer)
 		}
 	}
+}
+
+func mergePeer(peers map[string]*Peer, peer Peer) {
+	if validateOpaqueID(peer.InstanceID) != nil || !validPort(peer.Port) {
+		return
+	}
+	existing, found := peers[peer.InstanceID]
+	if !found {
+		copy := peer
+		copy.Addresses = mergeAddresses(nil, peer.Addresses)
+		peers[peer.InstanceID] = &copy
+		return
+	}
+	if existing.DeviceID == "" && peer.DeviceID != "" {
+		existing.DeviceID = peer.DeviceID
+		existing.Pairing = false
+	} else if existing.DeviceID != "" && peer.DeviceID != "" && existing.DeviceID != peer.DeviceID {
+		return
+	}
+	if existing.Port == 0 {
+		existing.Port = peer.Port
+	}
+	if existing.Port != peer.Port {
+		return
+	}
+	existing.Addresses = mergeAddresses(existing.Addresses, peer.Addresses)
 }
 
 // Advertisement contains the only data published over mDNS.

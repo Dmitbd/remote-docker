@@ -107,7 +107,7 @@ func TestSSHRemoteSyncUsesOnlyPinnedTypedRPC(t *testing.T) {
 		store: store, sshConfigPath: filepath.Join(root, "ssh_config"), sshBinary: "managed-ssh",
 		run: func(_ context.Context, command sshtransport.Command) error {
 			if command.Binary != "managed-ssh" || !reflect.DeepEqual(command.Args, []string{
-				"-F", filepath.Join(root, "ssh_config"), "remote-docker-device-pc-1", "remote-docker-remote", "rpc",
+				"-F", filepath.Join(root, "ssh_config"), "remote-docker-device-pc-1-control", "remote-docker-remote", "rpc",
 			}) {
 				t.Fatalf("SSH command = %#v", command)
 			}

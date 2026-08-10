@@ -14,8 +14,8 @@ import (
 func TestRenderConfigGolden(t *testing.T) {
 	config := Config{
 		DeviceID:       "A1B2C3",
-		HostName:       "192.168.1.20",
-		Port:           2222,
+		HostName:       "127.0.0.1",
+		Port:           49222,
 		AgentSocket:    "/tmp/rd-agent.sock",
 		KnownHostsFile: "/tmp/rd-known-hosts",
 		ControlDir:     "/tmp/rd-control",
@@ -26,8 +26,38 @@ func TestRenderConfigGolden(t *testing.T) {
 		t.Fatalf("RenderConfig() error = %v", err)
 	}
 	want := `Host remote-docker-device-A1B2C3
-  HostName 192.168.1.20
-  Port 2222
+  HostName 127.0.0.1
+  Port 49222
+  User remote-docker
+  IdentityAgent /tmp/rd-agent.sock
+  IdentityFile none
+  StrictHostKeyChecking yes
+  UserKnownHostsFile /tmp/rd-known-hosts
+  HostKeyAlias remote-docker-device-A1B2C3
+  PasswordAuthentication no
+  KbdInteractiveAuthentication no
+  BatchMode yes
+  ControlMaster auto
+  ControlPersist 60
+  ControlPath /tmp/rd-control/%C
+Host remote-docker-device-A1B2C3-control
+  HostName 127.0.0.1
+  Port 49223
+  User remote-docker
+  IdentityAgent /tmp/rd-agent.sock
+  IdentityFile none
+  StrictHostKeyChecking yes
+  UserKnownHostsFile /tmp/rd-known-hosts
+  HostKeyAlias remote-docker-device-A1B2C3
+  PasswordAuthentication no
+  KbdInteractiveAuthentication no
+  BatchMode yes
+  ControlMaster auto
+  ControlPersist 60
+  ControlPath /tmp/rd-control/%C
+Host remote-docker-device-A1B2C3-metrics
+  HostName 127.0.0.1
+  Port 49224
   User remote-docker
   IdentityAgent /tmp/rd-agent.sock
   IdentityFile none
@@ -61,8 +91,8 @@ func TestWriteConfigCreatesPrivateAtomicFile(t *testing.T) {
 	path := filepath.Join(directory, "ssh_config")
 	config := Config{
 		DeviceID:       "device-1",
-		HostName:       "10.0.0.20",
-		Port:           22,
+		HostName:       "127.0.0.1",
+		Port:           49222,
 		AgentSocket:    filepath.Join(directory, "agent.sock"),
 		KnownHostsFile: filepath.Join(directory, "known_hosts"),
 		ControlDir:     filepath.Join(directory, "control"),

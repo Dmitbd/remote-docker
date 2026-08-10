@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Dmitbd/remote-docker/internal/tunnel"
 )
 
 // Service identifies one of the only two protocols the Windows bridge exposes.
@@ -89,6 +91,34 @@ func (commandOutputRunner) Output(ctx context.Context, name string, args ...stri
 	command := exec.CommandContext(ctx, name, args...)
 	configureHiddenProcess(command)
 	return command.Output()
+}
+
+// ServiceDialer maps the four authenticated tunnel streams to two fixed WSL
+// loopback services. It cannot accept a caller-provided destination or port.
+type ServiceDialer struct {
+	Resolver AddressResolver
+	Dialer   Dialer
+}
+
+func NewProductionServiceDialer() *ServiceDialer {
+	return &ServiceDialer{Resolver: WSLResolver{Distro: managedDistroName}, Dialer: &net.Dialer{}}
+}
+
+func (d *ServiceDialer) DialService(ctx context.Context, kind tunnel.StreamKind) (net.Conn, error) {
+	if d == nil || d.Resolver == nil || d.Dialer == nil {
+		return nil, ErrDialerUnavailable
+	}
+	port := 0
+	switch kind {
+	case tunnel.StreamDockerSSH, tunnel.StreamControl, tunnel.StreamMetrics:
+		port = 22
+	case tunnel.StreamWorkspaceSync:
+		port = 22000
+	default:
+		return nil, ErrUnsupportedService
+	}
+	proxy := &Proxy{targetPort: port, resolver: d.Resolver, dialer: d.Dialer}
+	return proxy.dialUpstream(ctx)
 }
 
 // Proxy forwards one fixed, authenticated service without inspecting its bytes.

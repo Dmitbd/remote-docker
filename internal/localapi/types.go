@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 
 	"github.com/Dmitbd/remote-docker/internal/metrics"
 )
@@ -180,9 +181,12 @@ type ResourceStatusParams struct {
 type ResourceStatusResult = metrics.Sample
 
 type Device struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Address string `json:"address,omitempty"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Address   string `json:"address,omitempty"`
+	Role      string `json:"role,omitempty"`
+	Trusted   bool   `json:"trusted,omitempty"`
+	Available bool   `json:"available,omitempty"`
 }
 
 type ListDevicesResult struct {
@@ -202,7 +206,33 @@ type PairCandidatesResult struct {
 }
 
 type PairStartParams struct {
-	Device string `json:"device,omitempty"`
+	Device  string `json:"device,omitempty"`
+	Address string `json:"address,omitempty"`
+	Port    int    `json:"port,omitempty"`
+}
+
+func (p PairStartParams) Target() (string, error) {
+	if p.Address == "" {
+		if p.Port != 0 {
+			return "", fmt.Errorf("manual pairing port requires an address")
+		}
+		return p.Device, nil
+	}
+	if p.Device != "" {
+		return "", fmt.Errorf("choose either a discovered device or a manual address")
+	}
+	ip := net.ParseIP(p.Address)
+	if ip == nil || !ip.IsPrivate() || ip.IsLoopback() || ip.IsUnspecified() {
+		return "", fmt.Errorf("manual pairing requires a literal private IP address")
+	}
+	port := p.Port
+	if port == 0 {
+		port = 49221
+	}
+	if port != 49221 {
+		return "", fmt.Errorf("manual pairing requires TCP 49221")
+	}
+	return ip.String(), nil
 }
 
 type ReplaceDeviceParams struct {
@@ -239,6 +269,7 @@ type UnpairParams struct {
 
 type Workspace struct {
 	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
 	Path string `json:"path"`
 }
 
@@ -258,6 +289,8 @@ type SyncFolderStatus struct {
 	WorkspaceID string `json:"workspace_id"`
 	State       string `json:"state"`
 	Connected   bool   `json:"connected"`
+	LastSuccess string `json:"last_success,omitempty"`
+	Message     string `json:"message,omitempty"`
 }
 
 type SyncStatusResult struct {
@@ -291,7 +324,9 @@ type PrepareDockerResult struct {
 type DoctorCheck struct {
 	Name    string `json:"name"`
 	OK      bool   `json:"ok"`
+	Status  string `json:"status,omitempty"`
 	Message string `json:"message,omitempty"`
+	Action  string `json:"action,omitempty"`
 }
 
 type DoctorResult struct {

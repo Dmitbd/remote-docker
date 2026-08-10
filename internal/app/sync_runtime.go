@@ -58,9 +58,7 @@ func (r productionSyncReadiness) EnsureFolder(ctx context.Context, requested wor
 	if err := waitLocalSyncthingAPI(ctx, client, interval); err != nil {
 		return errors.New("local Syncthing API is not ready")
 	}
-	remoteDevice, err := syncer.NewDeviceConfig(
-		device.SyncthingDeviceID, device.Name, device.Address, device.SyncPort,
-	)
+	remoteDevice, err := syncer.NewDeviceConfig(device.SyncthingDeviceID, device.Name)
 	if err != nil {
 		return errors.New("paired Syncthing bridge is invalid")
 	}
@@ -243,6 +241,10 @@ func (c sshRemoteSync) call(ctx context.Context, method remoteSyncMethod, params
 	if _, ok := cfg.Devices[cfg.ActiveDevice]; !ok {
 		return errors.New("managed sync device is unavailable")
 	}
+	alias, err := sshtransport.ControlAlias(cfg.ActiveDevice)
+	if err != nil {
+		return errors.New("managed sync device is invalid")
+	}
 	request, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": string(method), "params": params,
 	})
@@ -257,7 +259,7 @@ func (c sshRemoteSync) call(ctx context.Context, method remoteSyncMethod, params
 	command := sshtransport.Command{
 		Binary: binary,
 		Args: []string{
-			"-F", c.sshConfigPath, "remote-docker-device-" + cfg.ActiveDevice,
+			"-F", c.sshConfigPath, alias,
 			"remote-docker-remote", "rpc",
 		},
 		Stdin: bytes.NewReader(append(request, '\n')), Stdout: &output, Stderr: io.Discard,

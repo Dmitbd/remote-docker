@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/Dmitbd/remote-docker/internal/config"
+	"github.com/Dmitbd/remote-docker/internal/sshtransport"
 )
 
 const maxPresenceRPCMessage = 64 << 10
@@ -71,7 +72,10 @@ func newProductionSSHPresenceTransport(store config.Store, sshConfigPath string)
 		if err != nil || strings.TrimSpace(cfg.ActiveDevice) == "" {
 			return nil, errors.New("trusted presence peer is unavailable")
 		}
-		alias := "remote-docker-device-" + cfg.ActiveDevice
+		alias, err := sshtransport.ControlAlias(cfg.ActiveDevice)
+		if err != nil {
+			return nil, errors.New("trusted presence peer is invalid")
+		}
 		command := exec.CommandContext(ctx, "/usr/bin/ssh", presenceSSHArgs(sshConfigPath, alias)...)
 		command.Env = os.Environ()
 		command.Stderr = io.Discard

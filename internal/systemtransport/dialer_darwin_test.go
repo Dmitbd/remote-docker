@@ -80,6 +80,16 @@ func TestNetcatDialerHonorsAlreadyCancelledContext(t *testing.T) {
 	}
 }
 
+func TestTunnelDialerRejectsEveryPortExcept49221(t *testing.T) {
+	dial := TunnelDialContext()
+	if _, err := dial(context.Background(), "tcp", "192.168.1.68:49220"); err == nil {
+		t.Fatal("TunnelDialContext accepted raw Syncthing port")
+	}
+	if _, err := dial(context.Background(), "tcp", "192.168.1.68:49222"); err == nil {
+		t.Fatal("TunnelDialContext accepted raw SSH port")
+	}
+}
+
 func TestNetcatHelperProcess(t *testing.T) {
 	if os.Getenv("REMOTE_DOCKER_NETCAT_HELPER") != "1" {
 		return

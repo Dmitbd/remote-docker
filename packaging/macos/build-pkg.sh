@@ -205,6 +205,14 @@ build_payload() {
   env \
     GOROOT="${go_root}/go" \
     PATH="${go_root}/go/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    MACOSX_DEPLOYMENT_TARGET=12.0 \
+    CGO_LDFLAGS='-framework UniformTypeIdentifiers -mmacosx-version-min=12.0' \
+    GOOS=darwin GOARCH="${target_arch}" CGO_ENABLED=1 \
+    "${go_root}/go/bin/go" -C "${repo_root}" build -trimpath -buildvcs=false -tags=desktop,production -ldflags='-s -w' \
+    -o "${app_contents}/MacOS/remote-docker-ui" ./cmd/remote-docker-ui
+  env \
+    GOROOT="${go_root}/go" \
+    PATH="${go_root}/go/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
     GOOS=darwin GOARCH="${target_arch}" CGO_ENABLED=0 \
     "${go_root}/go/bin/go" -C "${repo_root}" build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \
     -o "${libexec}/ssh-bin/ssh" ./cmd/remote-docker-ssh
@@ -217,6 +225,7 @@ build_payload() {
   chmod 755 \
     "${payload}/usr/local/bin/remote-docker" \
     "${app_contents}/MacOS/remote-docker-desktop" \
+    "${app_contents}/MacOS/remote-docker-ui" \
     "${app_contents}/libexec/remote-docker/docker-real" \
     "${app_contents}/libexec/remote-docker/ssh-bin/ssh" \
     "${libexec}/docker-real" \
@@ -237,6 +246,7 @@ sign_app() {
     for target in \
       "${payload}/usr/local/bin/remote-docker" \
       "${app_contents}/MacOS/remote-docker-desktop" \
+      "${app_contents}/MacOS/remote-docker-ui" \
       "${app_contents}/libexec/remote-docker/docker-real" \
       "${app_contents}/libexec/remote-docker/ssh-bin/ssh" \
       "${libexec}/docker-real" \
@@ -261,6 +271,7 @@ if [[ "${layout_only}" == "true" ]]; then
   [[ ! -e "${layout_output}" ]] || { printf 'layout output already exists: %s\n' "${layout_output}" >&2; exit 1; }
   write_layout_placeholder "${payload}/usr/local/bin/remote-docker" "remote-docker layout placeholder"
   write_layout_placeholder "${app_contents}/MacOS/remote-docker-desktop" "desktop layout placeholder"
+  write_layout_placeholder "${app_contents}/MacOS/remote-docker-ui" "Wails UI layout placeholder"
   write_layout_placeholder "${app_contents}/libexec/remote-docker/docker-real" "application Docker CLI layout placeholder"
   write_layout_placeholder "${app_contents}/libexec/remote-docker/ssh-bin/ssh" "application SSH adapter layout placeholder"
   write_layout_placeholder "${libexec}/docker-real" "Docker CLI layout placeholder"

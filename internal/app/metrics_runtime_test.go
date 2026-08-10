@@ -25,7 +25,7 @@ func TestSSHRemoteMetricsUsesOnePinnedReadOnlyRPC(t *testing.T) {
 		store: store, sshConfigPath: filepath.Join(root, "ssh_config"),
 		run: func(_ context.Context, command sshtransport.Command) error {
 			if !reflect.DeepEqual(command.Args, []string{
-				"-F", filepath.Join(root, "ssh_config"), "remote-docker-device-pc-1", "remote-docker-remote", "rpc",
+				"-F", filepath.Join(root, "ssh_config"), "remote-docker-device-pc-1-metrics", "remote-docker-remote", "rpc",
 			}) {
 				t.Fatalf("SSH args = %#v", command.Args)
 			}

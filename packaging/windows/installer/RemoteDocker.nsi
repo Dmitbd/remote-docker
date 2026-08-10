@@ -17,6 +17,9 @@ SetCompressorDictSize 32
 !ifndef OUTPUT_FILE
   !error "OUTPUT_FILE is required"
 !endif
+!ifndef UI_SOURCE
+  !error "UI_SOURCE is required"
+!endif
 
 Name "Remote Docker"
 Caption "Установка Remote Docker"
@@ -37,6 +40,7 @@ Var ProvisionExit
 Var ProvisionOutput
 Var ProgressPath
 Var LogPath
+Var WebView2Version
 
 !include "remote-docker-pages.nsh"
 
@@ -75,6 +79,25 @@ Function .onInit
     Abort
   ${EndIf}
   SetRegView 64
+  ReadRegStr $WebView2Version HKLM "Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "pv"
+  ${If} $WebView2Version == ""
+    ReadRegStr $WebView2Version HKCU "Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "pv"
+  ${EndIf}
+  ${If} $WebView2Version == ""
+    SetRegView 32
+    ReadRegStr $WebView2Version HKLM "Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "pv"
+    ${If} $WebView2Version == ""
+      ReadRegStr $WebView2Version HKCU "Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "pv"
+    ${EndIf}
+    SetRegView 64
+  ${EndIf}
+  ${If} $WebView2Version == ""
+    MessageBox MB_YESNO|MB_ICONEXCLAMATION "Для интерфейса Remote Docker требуется Microsoft Edge WebView2 Runtime. Открыть официальный загрузчик Microsoft?" IDYES open_webview2 IDNO no_webview2
+open_webview2:
+    ExecShell "open" "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+no_webview2:
+    Abort
+  ${EndIf}
   SetShellVarContext all
   StrCpy $ExistingInstall "0"
   StrCpy $CreateDesktopShortcut ${BST_CHECKED}
@@ -117,6 +140,7 @@ Section "Основные файлы и Docker-среда" CoreSection
   Pop $1
   SetOutPath "$INSTDIR"
   File /oname=RemoteDocker.exe "${APP_SOURCE}"
+  File /oname=remote-docker-ui.exe "${UI_SOURCE}"
   File /oname=remote-docker.ico "${ICON_SOURCE}"
   SetOutPath "$INSTDIR\assets"
   File /oname=remote-docker-rootfs.tar.zst "${ROOTFS_SOURCE}"
@@ -208,6 +232,7 @@ Section "Uninstall"
   RMDir "$SMPROGRAMS\Remote Docker"
   Delete "$DataDirectory\installer-reboot.pending"
   Delete "$INSTDIR\RemoteDocker.exe"
+  Delete "$INSTDIR\remote-docker-ui.exe"
   Delete "$INSTDIR\remote-docker.ico"
   Delete "$INSTDIR\assets\remote-docker-rootfs.tar.zst"
   Delete "$INSTDIR\assets\remote-docker-rootfs.tar.zst.sha256"

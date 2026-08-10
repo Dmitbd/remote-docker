@@ -239,6 +239,9 @@ func TestPairingConfirmInstallsOnlyManagedClientKeyAndReturnsInstallerMetadata(t
 	if record.SSHPort != 49222 || record.SyncthingPort != 49220 {
 		t.Fatalf("record ports = %#v", record)
 	}
+	if record.TunnelPort != 49221 || record.TransportVersion != 1 || !bytes.Equal(record.TunnelPublicKey, identity.PublicKey()) {
+		t.Fatalf("record tunnel metadata = %#v", record)
+	}
 	if bytes.Contains(bytes.ToLower(raw), []byte("private")) {
 		t.Fatalf("pair response contains private material: %s", raw)
 	}
@@ -248,7 +251,7 @@ func TestPairingRollsBackManagedKeyWhenPublicTrustMetadataCannotBeSaved(t *testi
 	installer := &recordingPairInstaller{device: DeviceInfo{
 		SSHHostPublicKey: "ssh-ed25519 HOST", SyncthingDeviceID: "SYNC", SSHPort: 49222, SyncthingPort: 49220,
 	}}
-	server, err := NewServer(newServerIdentity(t), WithInstaller(installer), WithAfterInstall(func(context.Context, string) error {
+	server, err := NewServer(newServerIdentity(t), WithInstaller(installer), WithAfterInstall(func(context.Context, TrustedPeer) error {
 		return errors.New("disk unavailable")
 	}))
 	if err != nil {

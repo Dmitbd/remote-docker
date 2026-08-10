@@ -9,12 +9,14 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Dmitbd/remote-docker/internal/config"
 	"github.com/Dmitbd/remote-docker/internal/diagnostics"
 	"github.com/Dmitbd/remote-docker/internal/localapi"
 	"github.com/Dmitbd/remote-docker/internal/sshtransport"
+	"github.com/Dmitbd/remote-docker/internal/tunnel"
 	"github.com/Dmitbd/remote-docker/internal/windowsbridge"
 )
 
@@ -22,7 +24,7 @@ func TestProductionRecoveryUsesOneOrchestrationPathAndFreshReadiness(t *testing.
 	observations := 0
 	reconnects := 0
 	userProcessRestarts := 0
-	controller := &productionAgentController{diagnostics: newProductionDiagnosticsWithOptions(productionDiagnosticsOptions{
+	options := productionDiagnosticsOptions{
 		Observe: func(context.Context) AgentStatus {
 			observations++
 			if observations == 1 {
@@ -38,12 +40,15 @@ func TestProductionRecoveryUsesOneOrchestrationPathAndFreshReadiness(t *testing.
 			userProcessRestarts++
 			return nil
 		},
-		Remote: staticRemoteDiagnostics{status: remoteDiagnosticStatus{
-			WSLRunning: true, SystemdTarget: true, DiskAvailable: true,
-		}},
-		PortRelays: diagnostics.CheckFunc(func(context.Context) error { return nil }),
-		Platform:   "darwin",
-	})}
+		Platform: "darwin",
+	}
+	setTestDiagnosticChecks(&options, func(context.Context) error {
+		if observations < 2 {
+			return errors.New("not ready")
+		}
+		return nil
+	})
+	controller := &productionAgentController{diagnostics: newProductionDiagnosticsWithOptions(options)}
 
 	raw, err := controller.Handle(context.Background(), localapi.MethodRecover, nil)
 	if err != nil {
@@ -75,7 +80,7 @@ func TestProductionRecoveryUsesOneOrchestrationPathAndFreshReadiness(t *testing.
 }
 
 func TestProductionRecoveryReturnsPublicAttemptsAndNoRawFailureDetail(t *testing.T) {
-	controller := &productionAgentController{diagnostics: newProductionDiagnosticsWithOptions(productionDiagnosticsOptions{
+	options := productionDiagnosticsOptions{
 		Observe: func(context.Context) AgentStatus {
 			return AgentStatus{State: AgentNeedsAction, Message: "ORDINARY_SETTING=quoted secret with spaces"}
 		},
@@ -83,7 +88,9 @@ func TestProductionRecoveryReturnsPublicAttemptsAndNoRawFailureDetail(t *testing
 			return errors.New("pairing_token=internal-pairing-secret")
 		},
 		Platform: "darwin",
-	})}
+	}
+	setTestDiagnosticChecks(&options, func(context.Context) error { return errors.New("still unhealthy") })
+	controller := &productionAgentController{diagnostics: newProductionDiagnosticsWithOptions(options)}
 
 	raw, err := controller.Handle(context.Background(), localapi.MethodRecover, nil)
 	if err != nil {
@@ -135,12 +142,6 @@ func TestMacRepairStepsReconcileInfrastructureOnceBeforeReadiness(t *testing.T) 
 					return errors.New("initial reconnect did not repair the root cause")
 				},
 				Remote: remote,
-				PortRelays: diagnostics.CheckFunc(func(context.Context) error {
-					if !ready {
-						return diagnostics.NewPublicError(diagnostics.ReasonPortRelaysNotReady)
-					}
-					return nil
-				}),
 				ReconcileAfterRepair: func(context.Context) error {
 					reconciles++
 					ready = true
@@ -148,6 +149,12 @@ func TestMacRepairStepsReconcileInfrastructureOnceBeforeReadiness(t *testing.T) 
 				},
 				Platform: "darwin",
 			}
+			setTestDiagnosticChecks(&options, func(context.Context) error {
+				if !ready {
+					return diagnostics.NewPublicError(diagnostics.ReasonPortRelaysNotReady)
+				}
+				return nil
+			})
 			if tt.restartUser {
 				options.RestartUserProcess = func(context.Context) error {
 					userRepairs++
@@ -184,14 +191,14 @@ func TestWindowsRecoveryRequiresFreshDockerAndSyncthingHealth(t *testing.T) {
 			status: windowsbridge.ManagedWSLStatus{
 				Running: true, SystemdTarget: true, DiskAvailable: true, SyncthingService: true,
 			},
-			failedCheck: "docker_socket",
+			failedCheck: "docker_channel",
 		},
 		{
 			name: "Syncthing unhealthy",
 			status: windowsbridge.ManagedWSLStatus{
 				Running: true, SystemdTarget: true, DockerSocket: true, DiskAvailable: true,
 			},
-			failedCheck: "syncthing",
+			failedCheck: "sync_channel",
 		},
 		{
 			name: "all managed host checks healthy",
@@ -205,11 +212,25 @@ func TestWindowsRecoveryRequiresFreshDockerAndSyncthingHealth(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			windows := &recordingWindowsDiagnostics{status: tt.status}
-			diagnosticsRuntime := newProductionDiagnosticsWithOptions(productionDiagnosticsOptions{
+			options := productionDiagnosticsOptions{
 				Observe:  func(context.Context) AgentStatus { return AgentStatus{State: AgentUnpaired} },
 				Windows:  windows,
 				Platform: "windows",
+			}
+			setTestDiagnosticChecks(&options, func(context.Context) error { return nil })
+			options.DockerChannel = diagnostics.CheckFunc(func(context.Context) error {
+				if !tt.status.DockerSocket {
+					return diagnostics.NewPublicError(diagnostics.ReasonWSLUnavailable)
+				}
+				return nil
 			})
+			options.SyncChannel = diagnostics.CheckFunc(func(context.Context) error {
+				if !tt.status.SyncthingService {
+					return diagnostics.NewPublicError(diagnostics.ReasonWSLUnavailable)
+				}
+				return nil
+			})
+			diagnosticsRuntime := newProductionDiagnosticsWithOptions(options)
 			doctor := diagnosticsRuntime.Doctor(context.Background())
 			if tt.failedCheck != "" {
 				found := false
@@ -314,6 +335,147 @@ func TestSSHRemoteDiagnosticsDoesNotPublishRemoteErrorOrOutput(t *testing.T) {
 			t.Fatalf("Observe() error retained secret %q: %v", secret, err)
 		}
 	}
+}
+
+func TestTunnelDiagnosticsMapOnlyStableFailureClassesAndRedactInternals(t *testing.T) {
+	unsafe := func(reason diagnostics.Reason, detail string) diagnostics.Check {
+		return diagnostics.CheckFunc(func(context.Context) error {
+			if reason == "" {
+				return errors.New(detail)
+			}
+			return diagnostics.NewPublicError(reason)
+		})
+	}
+	doctor := newProductionDiagnosticsWithOptions(productionDiagnosticsOptions{
+		LANReachability: unsafe(diagnostics.ReasonHostUnreachable, ""),
+		TunnelIdentity:  unsafe(diagnostics.ReasonTunnelIdentityMismatch, ""),
+		TunnelSession:   unsafe(diagnostics.ReasonPeerBusy, ""),
+		LocalRelays:     unsafe(diagnostics.ReasonLocalPortOccupied, ""),
+		DockerChannel:   unsafe(diagnostics.ReasonLocalPortOccupied, ""),
+		SyncChannel:     unsafe(diagnostics.ReasonLANBlocked, ""),
+		ManagedWSL:      unsafe("", "private-key signed-nonce ORDINARY_SETTING=value docker --host secret"),
+		Platform:        "darwin",
+	}).Doctor(context.Background())
+	want := []string{
+		string(diagnostics.ReasonHostUnreachable), string(diagnostics.ReasonTunnelIdentityMismatch),
+		string(diagnostics.ReasonPeerBusy), string(diagnostics.ReasonLocalPortOccupied), string(diagnostics.ReasonLocalPortOccupied),
+		string(diagnostics.ReasonLANBlocked), string(diagnostics.ReasonCheckFailed),
+	}
+	if len(doctor.Checks) != len(want) {
+		t.Fatalf("Doctor checks = %#v", doctor.Checks)
+	}
+	for index := range want {
+		if doctor.Checks[index].OK || doctor.Checks[index].Message != want[index] {
+			t.Fatalf("check[%d] = %#v, want reason %q", index, doctor.Checks[index], want[index])
+		}
+	}
+	encoded, _ := json.Marshal(doctor)
+	for _, secret := range []string{"private-key", "signed-nonce", "ORDINARY_SETTING", "--host"} {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("diagnostics report leaked %q: %s", secret, encoded)
+		}
+	}
+}
+
+func TestMacDiagnosticsPreserveActualLocalRelayOwnershipFailure(t *testing.T) {
+	ready := &atomic.Bool{}
+	occupied := &atomic.Bool{}
+	occupied.Store(true)
+	err := (macDiagnosticProbe{tunnelReady: ready, localPortOccupied: occupied}).checkLocalRelays(context.Background())
+	if got := diagnostics.ReasonForError(err, diagnostics.ReasonCheckFailed); got != string(diagnostics.ReasonLocalPortOccupied) {
+		t.Fatalf("local relay failure = %q, want occupied-port reason", got)
+	}
+}
+
+func TestTunnelSessionReasonRequiresConfirmedBusyState(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		connected     bool
+		confirmedBusy bool
+		want          diagnostics.Reason
+	}{
+		{name: "waiting", want: diagnostics.ReasonRemoteConnectionNotReady},
+		{name: "connected", connected: true},
+		{name: "confirmed server busy", confirmedBusy: true, want: diagnostics.ReasonPeerBusy},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := tunnelSessionStateError(test.connected, test.confirmedBusy)
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("connected session error = %v", err)
+				}
+				return
+			}
+			if got := diagnostics.ReasonForError(err, diagnostics.ReasonCheckFailed); got != string(test.want) {
+				t.Fatalf("session reason = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestMacTunnelDiagnosticStateRetainsProtocolBusyUntilConfirmedOutcome(t *testing.T) {
+	ready := &atomic.Bool{}
+	busy := &atomic.Bool{}
+	portOccupied := &atomic.Bool{}
+	updateMacTunnelDiagnosticState(ready, busy, portOccupied, tunnel.ClientDisconnected, tunnel.ErrPeerBusy)
+	if !busy.Load() || ready.Load() || portOccupied.Load() {
+		t.Fatalf("busy state = ready:%t busy:%t occupied:%t", ready.Load(), busy.Load(), portOccupied.Load())
+	}
+	updateMacTunnelDiagnosticState(ready, busy, portOccupied, tunnel.ClientReconnecting, nil)
+	if !busy.Load() {
+		t.Fatal("reconnecting cleared the confirmed peer-busy signal")
+	}
+	probe := macDiagnosticProbe{tunnelReady: ready, confirmedPeerBusy: busy}
+	if got := diagnostics.ReasonForError(probe.checkSession(context.Background()), diagnostics.ReasonCheckFailed); got != string(diagnostics.ReasonPeerBusy) {
+		t.Fatalf("Mac session reason = %q, want peer busy", got)
+	}
+	updateMacTunnelDiagnosticState(ready, busy, portOccupied, tunnel.ClientConnected, nil)
+	if busy.Load() || !ready.Load() {
+		t.Fatalf("connected state = ready:%t busy:%t", ready.Load(), busy.Load())
+	}
+	updateMacTunnelDiagnosticState(ready, busy, portOccupied, tunnel.ClientDisconnected, errors.New("host unreachable"))
+	if busy.Load() || ready.Load() {
+		t.Fatalf("non-busy failure retained stale state = ready:%t busy:%t", ready.Load(), busy.Load())
+	}
+}
+
+func TestWindowsLANReachabilityRequiresAuthenticatedNetworkActivity(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		state int32
+		want  diagnostics.Reason
+	}{
+		{name: "waiting", state: tunnelServerStateWaiting, want: diagnostics.ReasonRemoteConnectionNotReady},
+		{name: "authenticated client connected", state: tunnelServerStateConnected},
+		{name: "authenticated second client rejected busy", state: tunnelServerStateBusy},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := &atomic.Int32{}
+			state.Store(test.state)
+			check := (windowsDiagnosticProbe{serverState: state}).checks().LANReachability
+			err := check.Check(context.Background())
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("LAN check error = %v", err)
+				}
+				return
+			}
+			if got := diagnostics.ReasonForError(err, diagnostics.ReasonCheckFailed); got != string(test.want) {
+				t.Fatalf("LAN reason = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func setTestDiagnosticChecks(options *productionDiagnosticsOptions, check func(context.Context) error) {
+	operation := diagnostics.CheckFunc(check)
+	options.LANReachability = operation
+	options.TunnelIdentity = operation
+	options.TunnelSession = operation
+	options.LocalRelays = operation
+	options.DockerChannel = operation
+	options.SyncChannel = operation
+	options.ManagedWSL = operation
 }
 
 func TestManagedSSHRestartClosesAndReplacesHealthyUserProcess(t *testing.T) {

@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/Dmitbd/remote-docker/internal/config"
+	"github.com/Dmitbd/remote-docker/internal/pairing"
+	"github.com/Dmitbd/remote-docker/internal/tunnel"
 )
 
 // windowsPairingRegistry persists only public metadata needed to enforce and
@@ -26,10 +28,14 @@ func (r windowsPairingRegistry) Allow(context.Context) error {
 	return nil
 }
 
-func (r windowsPairingRegistry) Commit(_ context.Context, deviceID string) error {
-	deviceID = strings.TrimSpace(deviceID)
+func (r windowsPairingRegistry) Commit(_ context.Context, peer pairing.TrustedPeer) error {
+	deviceID := strings.TrimSpace(peer.DeviceID)
 	if deviceID == "" {
 		return errors.New("trusted device ID is required")
+	}
+	encodedPeer := tunnel.EncodePublicKey(peer.PublicKey)
+	if encodedPeer == "" {
+		return errors.New("trusted tunnel public key is invalid")
 	}
 	return r.runConfigTransaction(func() error {
 		cfg, err := loadAgentConfig(r.store)
@@ -42,7 +48,10 @@ func (r windowsPairingRegistry) Commit(_ context.Context, deviceID string) error
 		cfg.SchemaVersion = config.CurrentSchemaVersion
 		cfg.ActiveDevice = deviceID
 		cfg.Devices = map[string]config.Device{
-			deviceID: {Name: "Mac", ClientDeviceID: deviceID},
+			deviceID: {
+				Name: "Mac", ClientDeviceID: deviceID, TunnelPort: tunnel.TunnelPort,
+				TunnelPeerPublicKey: encodedPeer, TransportVersion: tunnel.CurrentTransportVersion,
+			},
 		}
 		return r.store.Save(cfg)
 	})

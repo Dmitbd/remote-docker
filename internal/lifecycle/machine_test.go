@@ -487,6 +487,29 @@ func TestForgetReservationCommitsTrustRemovalAtomically(t *testing.T) {
 	}
 }
 
+func TestTransportUpgradeProblemKeepsTrustUntilExplicitForget(t *testing.T) {
+	machine, err := NewMachine(RoleMacClient, "MacBook", WithTrustedPeer(Peer{ID: "legacy-windows", Name: "Windows"}))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	problem := &Problem{
+		Code: ProblemTransportUpgradeRequired, Device: InitiatorSystem,
+		Message: TransportUpgradeMessage, Action: TransportUpgradeAction,
+	}
+	blocked := mustApply(t, machine, Event{Type: EventProblemDetected, Problem: problem})
+	if blocked.State != StateNeedsAction || blocked.TrustedPeers != 1 || blocked.Peer == nil || !machine.Allowed(CommandForget) || machine.Allowed(CommandConnect) {
+		t.Fatalf("legacy transport snapshot = %#v", blocked)
+	}
+	reserved := mustApply(t, machine, Event{Type: EventTrustForgetStarted, Peer: &Peer{ID: "legacy-windows"}})
+	if reserved.TrustedPeers != 1 || reserved.Peer == nil {
+		t.Fatalf("forget reservation removed trust early: %#v", reserved)
+	}
+	forgotten := mustApply(t, machine, Event{Type: EventTrustForgotten})
+	if forgotten.TrustedPeers != 0 || forgotten.Peer != nil || forgotten.State != StateNeedsAction {
+		t.Fatalf("explicit forget result = %#v", forgotten)
+	}
+}
+
 func TestConnectionStartReservationAbortsThroughStoppingBeforeReturningPaused(t *testing.T) {
 	machine, err := NewMachine(RoleMacClient, "MacBook", WithTrustedPeer(Peer{ID: "windows", Name: "Windows"}))
 	if err != nil {

@@ -126,10 +126,37 @@ func TestBuildViewModelExplainsWhoEndedTheConnection(t *testing.T) {
 	}
 }
 
+func TestBuildViewModelExplainsSecureTransportRepair(t *testing.T) {
+	model := BuildViewModel(lifecycle.Snapshot{
+		Role: lifecycle.RoleMacClient, State: lifecycle.StateNeedsAction, TrustedPeers: 1,
+		Peer: &lifecycle.Peer{ID: "legacy", Name: "Windows"},
+		Problem: &lifecycle.Problem{
+			Code: lifecycle.ProblemTransportUpgradeRequired, Message: lifecycle.TransportUpgradeMessage,
+			Action: lifecycle.TransportUpgradeAction,
+		},
+	}, SectionConnection, time.Now())
+	if model.Status != "Нужно обновить подключение" || model.Headline != "Повторите безопасное сопряжение" ||
+		model.Detail != lifecycle.TransportUpgradeMessage || model.Notice != lifecycle.TransportUpgradeAction {
+		t.Fatalf("transport upgrade model = %#v", model)
+	}
+}
+
 func TestResourceRoleLabelsExplainWhereDockerRuns(t *testing.T) {
 	roles := ResourceRoleLabels()
 	if roles.Mac != "Mac передаёт исходники и команды" || roles.Windows != "Windows выполняет Docker-нагрузку" {
 		t.Fatalf("ResourceRoleLabels() = %#v", roles)
+	}
+}
+
+func TestViewActionsExposeFinitePendingLabels(t *testing.T) {
+	for _, id := range []ActionID{
+		ActionEnableClient, ActionStartSearch, ActionConnect, ActionApprovePair,
+		ActionPause, ActionDisconnect, ActionForgetDevice, ActionAddWorkspace,
+		ActionDiagnostics, ActionQuit,
+	} {
+		if label := pendingActionLabel(id); label == "" {
+			t.Fatalf("pendingActionLabel(%q) is empty", id)
+		}
 	}
 }
 
@@ -145,7 +172,7 @@ func TestBuildDeviceRowsShowsActionsByDeviceKind(t *testing.T) {
 		t.Fatalf("row order = %#v", got)
 	}
 	if got := deviceRowByID(t, rows, "new"); got.Status != "Новое устройство" || got.Kind != "new" ||
-		!reflect.DeepEqual(got.Actions, []Action{{ID: ActionConnect, Label: "Подключиться", Enabled: false}}) {
+		!reflect.DeepEqual(got.Actions, []Action{viewAction(ActionConnect, "Подключиться", false, false)}) {
 		t.Fatalf("new row = %#v", got)
 	}
 	searching := BuildDeviceRows(lifecycle.Snapshot{State: lifecycle.StateSearching}, []localapi.PairingCandidate{newDevice})
@@ -155,14 +182,14 @@ func TestBuildDeviceRowsShowsActionsByDeviceKind(t *testing.T) {
 	if got := deviceRowByID(t, rows, "saved"); got.Status != "Сохранено · доступно" || got.Kind != "saved" ||
 		!reflect.DeepEqual(got.Actions, []Action{
 			enabledAction(ActionConnectTrusted, "Подключиться"),
-			{ID: ActionForgetDevice, Label: "Забыть", Enabled: true, Destructive: true},
+			viewAction(ActionForgetDevice, "Забыть", true, true),
 		}) {
 		t.Fatalf("saved available row = %#v", got)
 	}
 	if got := deviceRowByID(t, rows, "offline"); got.Status != "Сохранено · недоступно" || got.Kind != "saved" ||
 		!reflect.DeepEqual(got.Actions, []Action{
-			{ID: ActionConnectTrusted, Label: "Подключиться", Enabled: false},
-			{ID: ActionForgetDevice, Label: "Забыть", Enabled: true, Destructive: true},
+			viewAction(ActionConnectTrusted, "Подключиться", false, false),
+			viewAction(ActionForgetDevice, "Забыть", true, true),
 		}) {
 		t.Fatalf("saved unavailable row = %#v", got)
 	}
