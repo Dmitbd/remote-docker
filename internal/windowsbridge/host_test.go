@@ -41,7 +41,7 @@ func TestPrivateNetworkDecodesPowerShellUTF16WithoutBOM(t *testing.T) {
 	}
 }
 
-func TestHostBindsOnlyAllowlistedServicesToLiteralPrivateAddresses(t *testing.T) {
+func TestHostDoesNotOpenLegacyLANBridgeListeners(t *testing.T) {
 	provider := staticAddressProvider{net.ParseIP("192.168.1.68")}
 	listeners := &recordingListenerFactory{}
 	host, err := NewHost(provider, &sequenceResolver{}, &net.Dialer{})
@@ -54,14 +54,9 @@ func TestHostBindsOnlyAllowlistedServicesToLiteralPrivateAddresses(t *testing.T)
 	done := make(chan error, 1)
 	go func() { done <- host.Run(ctx, time.Millisecond) }()
 
-	deadline := time.Now().Add(time.Second)
-	for len(listeners.Addresses()) < 2 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	got := listeners.Addresses()
-	want := []string{"192.168.1.68:49220", "192.168.1.68:49222"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("listen addresses = %#v, want %#v", got, want)
+	time.Sleep(10 * time.Millisecond)
+	if got := listeners.Addresses(); len(got) != 0 {
+		t.Fatalf("legacy LAN listeners were opened: %#v", got)
 	}
 
 	cancel()
@@ -70,7 +65,7 @@ func TestHostBindsOnlyAllowlistedServicesToLiteralPrivateAddresses(t *testing.T)
 	}
 }
 
-func TestHostRetriesPrivateAddressDiscoveryWithoutStoppingAgent(t *testing.T) {
+func TestHostDoesNotProbeLANAddressesWhileTunnelOwnsNetwork(t *testing.T) {
 	provider := &sequenceAddressProvider{results: []addressResult{
 		{err: errors.New("network profile unavailable")},
 		{addresses: []net.IP{net.ParseIP("192.168.1.68")}},
@@ -86,12 +81,9 @@ func TestHostRetriesPrivateAddressDiscoveryWithoutStoppingAgent(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- host.Run(ctx, time.Millisecond) }()
 
-	deadline := time.Now().Add(time.Second)
-	for len(listeners.Addresses()) < 2 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if len(listeners.Addresses()) != 2 || provider.Calls() < 2 {
-		t.Fatalf("listeners=%#v provider calls=%d, want retry then both services", listeners.Addresses(), provider.Calls())
+	time.Sleep(10 * time.Millisecond)
+	if len(listeners.Addresses()) != 0 || provider.Calls() != 0 {
+		t.Fatalf("listeners=%#v provider calls=%d, want no raw LAN bridge activity", listeners.Addresses(), provider.Calls())
 	}
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {

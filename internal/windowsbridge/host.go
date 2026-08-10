@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net"
 	"sort"
-	"strconv"
 	"sync"
 	"time"
 	"unicode/utf16"
@@ -146,9 +145,8 @@ func cloneIPs(addresses []net.IP) []net.IP {
 	return result
 }
 
-// Host owns the only two LAN listeners that can bridge into the managed WSL
-// distribution. It retries network-profile and listener changes without
-// stopping the Windows Agent.
+// Host is retained as a lifecycle-compatible fixed WSL service dialer. It
+// deliberately owns no LAN listeners; TCP 49221 is owned by the TLS router.
 type Host struct {
 	Addresses AddressProvider
 	Resolver  AddressResolver
@@ -178,79 +176,19 @@ func NewProductionHost() (*Host, error) {
 }
 
 func (h *Host) Run(ctx context.Context, retryDelay time.Duration) error {
-	if retryDelay <= 0 {
-		retryDelay = time.Second
+	if h == nil || h.Resolver == nil || h.Dialer == nil {
+		return errors.New("Windows bridge host is incomplete")
 	}
-	for {
-		err := h.serve(ctx)
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if err == nil {
-			return nil
-		}
-		timer := time.NewTimer(retryDelay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
-	}
+	<-ctx.Done()
+	return ctx.Err()
 }
 
 func (h *Host) serve(ctx context.Context) error {
 	if h == nil || h.Addresses == nil || h.Resolver == nil || h.Dialer == nil {
 		return errors.New("Windows bridge host is incomplete")
 	}
-	addresses, err := h.Addresses.Addresses(ctx)
-	if err != nil {
-		return err
-	}
-	listen := h.Listen
-	if listen == nil {
-		listen = net.Listen
-	}
-	type binding struct {
-		service Service
-		port    int
-	}
-	bindings := []binding{{ServiceSSH, SSHBridgePort}, {ServiceSyncthing, SyncthingBridgePort}}
-	listeners := make([]net.Listener, 0, len(addresses)*len(bindings))
-	closeListeners := func() {
-		for _, listener := range listeners {
-			_ = listener.Close()
-		}
-	}
-	defer closeListeners()
-	errorsOut := make(chan error, len(addresses)*len(bindings))
-	for _, address := range addresses {
-		if address == nil || address.To4() == nil || !address.IsPrivate() {
-			continue
-		}
-		profile := boundAddressProfile{addresses: h.Addresses, address: append(net.IP(nil), address...)}
-		for _, item := range bindings {
-			proxy, proxyErr := NewProxy(item.service, h.Resolver, profile, h.Dialer)
-			if proxyErr != nil {
-				return proxyErr
-			}
-			listener, listenErr := listen("tcp", net.JoinHostPort(address.String(), strconv.Itoa(item.port)))
-			if listenErr != nil {
-				return listenErr
-			}
-			listeners = append(listeners, listener)
-			go func() { errorsOut <- proxy.Serve(ctx, listener) }()
-		}
-	}
-	if len(listeners) == 0 {
-		return ErrNoPrivateListenAddress
-	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-errorsOut:
-		return err
-	}
+	<-ctx.Done()
+	return ctx.Err()
 }
 
 type boundAddressProfile struct {

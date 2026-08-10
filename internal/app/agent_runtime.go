@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
@@ -151,17 +152,47 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 			return nil, err
 		}
 		pairHost = host
+		tunnelTLSConfig, tunnelTLSErr := tunnel.ServerTLSConfig(identity, func(publicKey ed25519.PublicKey) bool {
+			cfg, loadErr := loadAgentConfig(store)
+			if loadErr != nil || cfg.ActiveDevice == "" {
+				return false
+			}
+			device, ok := cfg.Devices[cfg.ActiveDevice]
+			if !ok || device.TransportVersion != tunnel.CurrentTransportVersion {
+				return false
+			}
+			pinned, parseErr := tunnel.ParsePublicKey(device.TunnelPeerPublicKey)
+			return parseErr == nil && subtle.ConstantTimeCompare(pinned, publicKey) == 1
+		})
+		if tunnelTLSErr != nil {
+			return nil, tunnelTLSErr
+		}
+		serviceDialer := windowsbridge.NewProductionServiceDialer()
+		pairHost.tunnelTLSConfig = tunnelTLSConfig
+		pairHost.serveTunnel = func(ctx context.Context, listener net.Listener) error {
+			server := tunnel.Server{
+				Accept: func(context.Context) (tunnel.Session, error) {
+					connection, acceptErr := listener.Accept()
+					if acceptErr != nil {
+						return nil, acceptErr
+					}
+					session, sessionErr := tunnel.NewServerSession(connection)
+					if sessionErr != nil {
+						_ = connection.Close()
+						return nil, sessionErr
+					}
+					return session, nil
+				},
+				Dialer: serviceDialer,
+			}
+			return server.Run(ctx)
+		}
 		pairingCoordinator = windowsPairingCoordinator{server: host.server, installer: installer, registry: &registry}
 		managedRuntime, runtimeErr := provision.NewManagedWSLRuntime(executablePath, secrets)
 		if runtimeErr != nil {
 			return nil, runtimeErr
 		}
 		localSync = managedRuntime
-		bridge, bridgeErr := windowsbridge.NewProductionHost()
-		if bridgeErr != nil {
-			return nil, bridgeErr
-		}
-		windowsBridge = bridge
 	} else {
 		syncthingExecutable := options.SyncthingExecutable
 		if syncthingExecutable == "" {
