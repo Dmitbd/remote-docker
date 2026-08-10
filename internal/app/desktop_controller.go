@@ -36,7 +36,9 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 	case localapi.MethodStatus:
 		return statusFromLifecycle(c.supervisor.Snapshot()), nil
 	case localapi.MethodEnable:
-		c.operations.Lock()
+		if !c.operations.TryLock() {
+			return nil, needsAction("wait for the active lifecycle operation to finish")
+		}
 		defer c.operations.Unlock()
 		if snapshot := c.supervisor.Snapshot(); snapshot.TrustedPeers == 1 && snapshot.Peer != nil {
 			if _, err := c.startTrustedConnection(ctx, nil); err != nil {
@@ -49,23 +51,43 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 		}
 		return c.actionResult(), nil
 	case localapi.MethodPause:
+		if !c.operations.TryLock() {
+			return nil, needsAction("wait for the active lifecycle operation to finish")
+		}
+		defer c.operations.Unlock()
 		if err := c.supervisor.Pause(ctx); err != nil {
 			return nil, unavailable("Remote Docker could not be paused safely")
 		}
 		return c.actionResult(), nil
 	case localapi.MethodSearchStart:
+		if !c.operations.TryLock() {
+			return nil, needsAction("wait for the active lifecycle operation to finish")
+		}
+		defer c.operations.Unlock()
 		if _, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventSearchStarted}); err != nil {
 			return nil, needsAction("enable the Mac client before starting search")
 		}
 		return c.actionResult(), nil
 	case localapi.MethodSearchStop:
+		if !c.operations.TryLock() {
+			return nil, needsAction("wait for the active lifecycle operation to finish")
+		}
+		defer c.operations.Unlock()
 		if _, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventSearchStopped}); err != nil {
 			return nil, needsAction("device search is not active")
 		}
 		return c.actionResult(), nil
 	case localapi.MethodPairStart:
+		if !c.operations.TryLock() {
+			return nil, needsAction("wait for the active lifecycle operation to finish")
+		}
+		defer c.operations.Unlock()
 		if connectionLimitOccupied(c.supervisor.Snapshot()) {
 			return nil, needsAction("the trusted-device limit is occupied")
+		}
+		if snapshot := c.supervisor.Snapshot(); snapshot.Role != lifecycle.RoleMacClient ||
+			snapshot.State != lifecycle.StateSearching || snapshot.Pairing != nil {
+			return nil, needsAction("the device is not ready to start pairing")
 		}
 		result, err := c.delegate(ctx, method, raw)
 		if err != nil {
@@ -76,17 +98,27 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 			return nil, unavailable("pairing returned an invalid response")
 		}
 		if err := c.startPairing(started); err != nil {
+			cancelRaw, _ := json.Marshal(localapi.PairSessionParams{SessionID: started.SessionID})
+			if _, cancelErr := c.delegate(ctx, localapi.MethodPairCancel, cancelRaw); cancelErr != nil {
+				return nil, unavailable("pairing rollback could not cancel the created remote session")
+			}
 			return nil, err
 		}
 		return started, nil
 	case localapi.MethodConnect:
-		c.operations.Lock()
+		if !c.operations.TryLock() {
+			return nil, needsAction("wait for the active lifecycle operation to finish")
+		}
 		defer c.operations.Unlock()
 		if snapshot := c.supervisor.Snapshot(); snapshot.TrustedPeers < 1 || snapshot.Peer == nil {
 			return nil, needsAction("trusted device was not found")
 		}
 		return c.startTrustedConnection(ctx, func() (any, error) { return c.delegate(ctx, method, raw) })
 	case localapi.MethodPairStatus, localapi.MethodPairApprove, localapi.MethodPairReject, localapi.MethodPairCancel:
+		if !c.operations.TryLock() {
+			return nil, needsAction("wait for the active lifecycle operation to finish")
+		}
+		defer c.operations.Unlock()
 		result, err := c.delegate(ctx, method, raw)
 		if err != nil {
 			return nil, err
@@ -100,6 +132,10 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 		}
 		return status, nil
 	case localapi.MethodDisconnect:
+		if !c.operations.TryLock() {
+			return nil, needsAction("wait for the active lifecycle operation to finish")
+		}
+		defer c.operations.Unlock()
 		params := localapi.DisconnectParams{}
 		if err := decodeOptionalControlParams(raw, &params); err != nil {
 			return nil, err
@@ -149,6 +185,10 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 	case localapi.MethodUnpair:
 		return nil, &localapi.PublicError{Code: localapi.ErrorInvalidRequest, Message: "Unpair is an internal cleanup operation"}
 	case localapi.MethodShutdown:
+		if !c.operations.TryLock() {
+			return nil, needsAction("wait for the active lifecycle operation to finish")
+		}
+		defer c.operations.Unlock()
 		if err := c.supervisor.Shutdown(ctx); err != nil {
 			return nil, unavailable("Remote Docker could not stop every owned process")
 		}

@@ -17,7 +17,7 @@ func TestEnsureContextCreatesMissingManagedContext(t *testing.T) {
 		},
 	}
 
-	err := EnsureContext(
+	change, err := EnsureContext(
 		context.Background(),
 		executor,
 		"docker-real",
@@ -26,6 +26,9 @@ func TestEnsureContextCreatesMissingManagedContext(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatalf("EnsureContext() error = %v", err)
+	}
+	if !change.Created || !change.Changed() {
+		t.Fatalf("EnsureContext() change = %#v, want created context", change)
 	}
 
 	want := [][]string{
@@ -36,6 +39,27 @@ func TestEnsureContextCreatesMissingManagedContext(t *testing.T) {
 			"--docker", "host=ssh://remote-docker@remote-host",
 			"remote-docker",
 		},
+	}
+	if !reflect.DeepEqual(executor.args(), want) {
+		t.Fatalf("commands = %#v, want %#v", executor.args(), want)
+	}
+}
+
+func TestRestoreContextRevertsOnlyExpectedManagedEndpoint(t *testing.T) {
+	executor := &recordingExecutor{results: []executorResult{
+		{stdout: `[{"Name":"remote-docker","Metadata":{"Description":"Managed by Remote Docker"},"Endpoints":{"docker":{"Host":"ssh://remote-docker-device-new"}}}]`},
+		{},
+	}}
+	change := ContextChange{
+		Name: "remote-docker", PreviousHost: "ssh://remote-docker-device-old", CurrentHost: "ssh://remote-docker-device-new",
+	}
+
+	if err := RestoreContext(context.Background(), executor, "docker-real", change); err != nil {
+		t.Fatalf("RestoreContext() error = %v", err)
+	}
+	want := [][]string{
+		{"context", "inspect", "remote-docker"},
+		{"context", "update", "--docker", "host=ssh://remote-docker-device-old", "remote-docker"},
 	}
 	if !reflect.DeepEqual(executor.args(), want) {
 		t.Fatalf("commands = %#v, want %#v", executor.args(), want)
@@ -53,7 +77,7 @@ func TestEnsureContextKeepsMatchingManagedContext(t *testing.T) {
 ]`}},
 	}
 
-	err := EnsureContext(
+	change, err := EnsureContext(
 		context.Background(),
 		executor,
 		"docker-real",
@@ -63,8 +87,37 @@ func TestEnsureContextKeepsMatchingManagedContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureContext() error = %v", err)
 	}
+	if change.Changed() {
+		t.Fatalf("EnsureContext() change = %#v, want no change", change)
+	}
 
 	want := [][]string{{"context", "inspect", "remote-docker"}}
+	if !reflect.DeepEqual(executor.args(), want) {
+		t.Fatalf("commands = %#v, want %#v", executor.args(), want)
+	}
+}
+
+func TestEnsureContextUpdatesExistingManagedEndpoint(t *testing.T) {
+	executor := &recordingExecutor{
+		results: []executorResult{
+			{stdout: `[{"Name":"remote-docker","Metadata":{"Description":"Managed by Remote Docker"},"Endpoints":{"docker":{"Host":"ssh://remote-docker-device-old"}}}]`},
+			{},
+		},
+	}
+
+	change, err := EnsureContext(
+		context.Background(), executor, "docker-real", "remote-docker", "ssh://remote-docker-device-new",
+	)
+	if err != nil {
+		t.Fatalf("EnsureContext() error = %v", err)
+	}
+	if change.PreviousHost != "ssh://remote-docker-device-old" || change.CurrentHost != "ssh://remote-docker-device-new" {
+		t.Fatalf("EnsureContext() change = %#v", change)
+	}
+	want := [][]string{
+		{"context", "inspect", "remote-docker"},
+		{"context", "update", "--docker", "host=ssh://remote-docker-device-new", "remote-docker"},
+	}
 	if !reflect.DeepEqual(executor.args(), want) {
 		t.Fatalf("commands = %#v, want %#v", executor.args(), want)
 	}
@@ -84,12 +137,8 @@ func TestEnsureContextRejectsContextCollision(t *testing.T) {
 }]`,
 		},
 		{
-			name: "different endpoint",
-			stdout: `[{
-  "Name": "remote-docker",
-  "Metadata": {"Description": "Managed by Remote Docker"},
-  "Endpoints": {"docker": {"Host": "ssh://someone@other-host"}}
-}]`,
+			name:   "different exact name",
+			stdout: `[{"Name":"remote-docker-other","Metadata":{"Description":"Managed by Remote Docker"},"Endpoints":{"docker":{"Host":"ssh://remote-docker@remote-host"}}}]`,
 		},
 	}
 
@@ -99,7 +148,7 @@ func TestEnsureContextRejectsContextCollision(t *testing.T) {
 				results: []executorResult{{stdout: tt.stdout}},
 			}
 
-			err := EnsureContext(
+			_, err := EnsureContext(
 				context.Background(),
 				executor,
 				"docker-real",
@@ -123,7 +172,7 @@ func TestEnsureContextDoesNotCreateAfterUnexpectedInspectFailure(t *testing.T) {
 		results: []executorResult{{err: codedError{code: 2}}},
 	}
 
-	err := EnsureContext(
+	_, err := EnsureContext(
 		context.Background(),
 		executor,
 		"docker-real",

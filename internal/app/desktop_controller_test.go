@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
 	"github.com/Dmitbd/remote-docker/internal/localapi"
+	"github.com/Dmitbd/remote-docker/internal/pairing"
 )
 
 func TestDesktopControllerPublishesPausedLifecycleSnapshot(t *testing.T) {
@@ -128,6 +130,91 @@ func TestDesktopControllerStartsDisplayOnlyPairingFromMacSearch(t *testing.T) {
 	if snapshot.State != lifecycle.StatePairing || snapshot.Pairing == nil || snapshot.Pairing.Code != "123456" ||
 		snapshot.Pairing.Peer.Name != "Windows PC" {
 		t.Fatalf("pairing snapshot = %#v", snapshot)
+	}
+}
+
+func TestDesktopControllerAllowsOnlyOneConcurrentPairStart(t *testing.T) {
+	machine := newLifecycleMachine(t, lifecycle.RoleMacClient)
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := newBlockingPairStartHandler()
+	controller, _ := NewDesktopController(supervisor, fallback)
+	_, _ = controller.Handle(context.Background(), localapi.MethodEnable, nil)
+	_, _ = controller.Handle(context.Background(), localapi.MethodSearchStart, nil)
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := controller.Handle(context.Background(), localapi.MethodPairStart, json.RawMessage(`{"device":"windows"}`))
+		firstDone <- err
+	}()
+	waitForTestSignal(t, fallback.started, "first pair bootstrap")
+
+	_, secondErr := controller.Handle(context.Background(), localapi.MethodPairStart, json.RawMessage(`{"device":"windows"}`))
+	if secondErr == nil {
+		t.Fatal("second concurrent PairStart error = nil")
+	}
+	if fallback.StartCalls() != 1 {
+		t.Fatalf("PairStart delegate calls = %d, want one", fallback.StartCalls())
+	}
+	close(fallback.release)
+	if err := waitForTestError(t, firstDone, "first PairStart completion"); err != nil {
+		t.Fatalf("first PairStart error = %v", err)
+	}
+}
+
+func TestDesktopControllerPairStartExcludesSearchStopAndPause(t *testing.T) {
+	for _, method := range []localapi.Method{localapi.MethodSearchStop, localapi.MethodPause} {
+		t.Run(string(method), func(t *testing.T) {
+			machine := newLifecycleMachine(t, lifecycle.RoleMacClient)
+			runtime := newRecordingSessionRuntime()
+			supervisor, _ := NewSupervisor(machine, runtime)
+			fallback := newBlockingPairStartHandler()
+			controller, _ := NewDesktopController(supervisor, fallback)
+			_, _ = controller.Handle(context.Background(), localapi.MethodEnable, nil)
+			_, _ = controller.Handle(context.Background(), localapi.MethodSearchStart, nil)
+
+			pairDone := make(chan error, 1)
+			go func() {
+				_, err := controller.Handle(context.Background(), localapi.MethodPairStart, json.RawMessage(`{"device":"windows"}`))
+				pairDone <- err
+			}()
+			waitForTestSignal(t, fallback.started, "pair bootstrap")
+
+			if _, err := controller.Handle(context.Background(), method, nil); err == nil {
+				t.Fatalf("concurrent %s error = nil", method)
+			}
+			if got := supervisor.Snapshot(); got.State != lifecycle.StateSearching || got.Pairing != nil {
+				t.Fatalf("snapshot during reserved PairStart = %#v", got)
+			}
+			if runtime.stopCalls != 0 {
+				t.Fatalf("runtime stops during reserved PairStart = %d", runtime.stopCalls)
+			}
+			close(fallback.release)
+			if err := waitForTestError(t, pairDone, "PairStart completion"); err != nil {
+				t.Fatalf("PairStart error = %v", err)
+			}
+		})
+	}
+}
+
+func TestDesktopControllerCancelsCreatedRemotePairWhenLifecycleCommitFails(t *testing.T) {
+	machine := newLifecycleMachine(t, lifecycle.RoleMacClient)
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := newBlockingPairStartHandler()
+	fallback.release = closedSignal()
+	fallback.expiresAt = "invalid-expiry"
+	controller, _ := NewDesktopController(supervisor, fallback)
+	_, _ = controller.Handle(context.Background(), localapi.MethodEnable, nil)
+	_, _ = controller.Handle(context.Background(), localapi.MethodSearchStart, nil)
+
+	_, err := controller.Handle(context.Background(), localapi.MethodPairStart, json.RawMessage(`{"device":"windows"}`))
+	if err == nil {
+		t.Fatal("PairStart lifecycle commit error = nil")
+	}
+	if fallback.StartCalls() != 1 || fallback.CancelledSession() != "session-1" {
+		t.Fatalf("pair rollback starts=%d cancelled=%q", fallback.StartCalls(), fallback.CancelledSession())
+	}
+	if got := supervisor.Snapshot(); got.State != lifecycle.StateSearching || got.Pairing != nil {
+		t.Fatalf("snapshot after PairStart rollback = %#v", got)
 	}
 }
 
@@ -490,6 +577,66 @@ type blockingLocalHandler struct {
 	started chan struct{}
 	release chan struct{}
 	calls   int
+}
+
+type blockingPairStartHandler struct {
+	mu        sync.Mutex
+	started   chan struct{}
+	release   chan struct{}
+	startOnce sync.Once
+	starts    int
+	cancelled string
+	expiresAt string
+}
+
+func newBlockingPairStartHandler() *blockingPairStartHandler {
+	return &blockingPairStartHandler{
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+		expiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func (h *blockingPairStartHandler) Handle(_ context.Context, method localapi.Method, raw json.RawMessage) (any, error) {
+	switch method {
+	case localapi.MethodPairStart:
+		h.mu.Lock()
+		h.starts++
+		h.mu.Unlock()
+		h.startOnce.Do(func() { close(h.started) })
+		<-h.release
+		return localapi.PairStartResult{
+			SessionID: "session-1", Code: "123456", ExpiresAt: h.expiresAt,
+			Peer: localapi.LifecyclePeer{ID: "windows", Name: "Windows PC", OS: "windows"},
+		}, nil
+	case localapi.MethodPairCancel:
+		var params localapi.PairSessionParams
+		_ = json.Unmarshal(raw, &params)
+		h.mu.Lock()
+		h.cancelled = params.SessionID
+		h.mu.Unlock()
+		return localapi.PairingStatusResult{SessionID: params.SessionID, Status: string(pairing.SessionCancelled)}, nil
+	default:
+		return nil, nil
+	}
+}
+
+func (h *blockingPairStartHandler) StartCalls() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.starts
+}
+
+func (h *blockingPairStartHandler) CancelledSession() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.cancelled
+}
+
+func closedSignal() chan struct{} {
+	signal := make(chan struct{})
+	close(signal)
+	return signal
 }
 
 func (h *blockingLocalHandler) Handle(context.Context, localapi.Method, json.RawMessage) (any, error) {

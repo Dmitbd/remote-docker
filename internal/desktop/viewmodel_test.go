@@ -143,6 +143,31 @@ func TestBuildDeviceRowsShowsConnectedPeerWithoutCandidates(t *testing.T) {
 	}
 }
 
+func TestBuildDeviceRowsShowsActivePeerWithoutForgetDuringBusyStates(t *testing.T) {
+	for _, tt := range []struct {
+		state       lifecycle.State
+		status      string
+		wantActions []Action
+	}{
+		{state: lifecycle.StateConnecting, status: "Подключение"},
+		{state: lifecycle.StateReconnecting, status: "Восстановление связи", wantActions: []Action{enabledAction(ActionDisconnect, "Отключиться")}},
+		{state: lifecycle.StateStopping, status: "Завершение работы"},
+	} {
+		t.Run(string(tt.state), func(t *testing.T) {
+			rows := BuildDeviceRows(lifecycle.Snapshot{
+				State: tt.state, Peer: &lifecycle.Peer{ID: "saved", Name: "Saved Windows"},
+			}, []localapi.PairingCandidate{{ID: "saved", Name: "Saved Windows", Trusted: true, Available: true}})
+			if len(rows) != 1 {
+				t.Fatalf("row count = %d, want one: %#v", len(rows), rows)
+			}
+			if got := rows[0]; got.Kind != "active" || got.Status != tt.status || !reflect.DeepEqual(got.Actions, tt.wantActions) ||
+				hasViewAction(got.Actions, ActionForgetDevice) {
+				t.Fatalf("busy active row = %#v, want status=%q actions=%#v", got, tt.status, tt.wantActions)
+			}
+		})
+	}
+}
+
 func deviceRowByID(t *testing.T, rows []DeviceRow, id string) DeviceRow {
 	t.Helper()
 	for _, row := range rows {

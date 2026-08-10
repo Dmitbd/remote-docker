@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -35,19 +37,19 @@ func TestApplicationKeepsSafeActionErrorUntilNextAction(t *testing.T) {
 	}
 }
 
-func TestApplicationIgnoresSupersededActionCompletion(t *testing.T) {
+func TestApplicationRejectsOverlappingAction(t *testing.T) {
 	application := &Application{}
-	slowAction := application.beginAction()
-	newerAction := application.beginAction()
+	firstAction := application.beginAction()
+	overlappingAction := application.beginAction()
 
-	if !application.completeAction(newerAction, nil) {
-		t.Fatal("newer action completion was ignored")
+	if overlappingAction != 0 {
+		t.Fatalf("overlapping action sequence = %d, want rejected", overlappingAction)
 	}
-	if application.completeAction(slowAction, errors.New("token at /private/keys/remote-docker")) {
-		t.Fatal("superseded action restored an error")
+	if !application.completeAction(firstAction, nil) {
+		t.Fatal("first action completion was ignored")
 	}
-	if application.actionError != "" {
-		t.Fatalf("superseded completion changed error = %q", application.actionError)
+	if application.actionBusy {
+		t.Fatal("application remained busy after first action completed")
 	}
 }
 
@@ -121,6 +123,53 @@ func TestReplaceWaitsForTrustRemovalBeforeStartingPair(t *testing.T) {
 	}
 }
 
+func TestReplaceIsOneSerializedOperationDespiteOverlappingAction(t *testing.T) {
+	var snapshot lifecycle.Snapshot
+	snapshot = lifecycle.Snapshot{
+		State: lifecycle.StateSearching, TrustedPeers: 1, ConnectionLimit: 1,
+		Peer: &lifecycle.Peer{ID: "saved-windows", Name: "Saved Windows"},
+	}
+	handler := &confirmationRecordingHandler{
+		forgetStarted: make(chan struct{}),
+		forgetRelease: make(chan struct{}),
+	}
+	handler.afterForget = func() {
+		snapshot.TrustedPeers = 0
+		snapshot.Peer = nil
+	}
+	application, confirm := newConfirmationApplication(handler, snapshotProvider(&snapshot))
+
+	application.showReplaceConfirmation(DeviceRow{ID: "new-windows", Name: "New Windows"})
+	(<-confirm)(true)
+	waitForTestSignal(t, handler.forgetStarted, "replacement forget")
+	application.perform(ActionStopSearch, "")
+	if calls := handler.Calls(); len(calls) != 1 || calls[0].Method != localapi.MethodForgetDevice {
+		t.Fatalf("overlap reached controller during replacement: %#v", calls)
+	}
+	close(handler.forgetRelease)
+	calls := handler.WaitForCalls(t, 2)
+	if got := []localapi.Method{calls[0].Method, calls[1].Method}; !reflect.DeepEqual(got, []localapi.Method{
+		localapi.MethodForgetDevice, localapi.MethodPairStart,
+	}) {
+		t.Fatalf("serialized replacement calls = %#v", got)
+	}
+}
+
+func TestReplaceConfirmationExplainsKeyRemovalAutomaticPairingAndCode(t *testing.T) {
+	application := &Application{snapshot: snapshotProvider(&lifecycle.Snapshot{
+		Peer: &lifecycle.Peer{ID: "saved-windows", Name: "Saved Windows"},
+	})}
+	var message string
+	application.confirm = func(_, got, _ string, _ func(bool)) { message = got }
+
+	application.showReplaceConfirmation(DeviceRow{ID: "new-windows", Name: "New Windows"})
+	for _, phrase := range []string{"закрытый ключ", "автоматически", "шестизначного кода"} {
+		if !strings.Contains(message, phrase) {
+			t.Fatalf("replacement confirmation %q does not contain %q", message, phrase)
+		}
+	}
+}
+
 type confirmationCall struct {
 	Method localapi.Method
 	Forget localapi.ForgetDeviceParams
@@ -128,11 +177,14 @@ type confirmationCall struct {
 }
 
 type confirmationRecordingHandler struct {
-	mu          sync.Mutex
-	calls       []confirmationCall
-	updates     chan struct{}
-	forgetError error
-	afterForget func()
+	mu            sync.Mutex
+	calls         []confirmationCall
+	updates       chan struct{}
+	forgetError   error
+	afterForget   func()
+	forgetStarted chan struct{}
+	forgetRelease chan struct{}
+	forgetOnce    sync.Once
 }
 
 func (h *confirmationRecordingHandler) Handle(_ context.Context, method localapi.Method, raw json.RawMessage) (any, error) {
@@ -154,6 +206,10 @@ func (h *confirmationRecordingHandler) Handle(_ context.Context, method localapi
 	}
 	if method == localapi.MethodForgetDevice && forgetError != nil {
 		return nil, forgetError
+	}
+	if method == localapi.MethodForgetDevice && h.forgetStarted != nil {
+		h.forgetOnce.Do(func() { close(h.forgetStarted) })
+		<-h.forgetRelease
 	}
 	if method == localapi.MethodForgetDevice && afterForget != nil {
 		afterForget()
@@ -202,4 +258,13 @@ func newConfirmationApplication(handler *confirmationRecordingHandler, snapshot 
 
 func snapshotProvider(snapshot *lifecycle.Snapshot) SnapshotProvider {
 	return func() lifecycle.Snapshot { return snapshot.Clone() }
+}
+
+func waitForTestSignal(t *testing.T, signal <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(time.Second):
+		t.Fatalf("timeout waiting for %s", name)
+	}
 }

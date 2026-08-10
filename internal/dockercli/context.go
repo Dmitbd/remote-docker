@@ -31,6 +31,20 @@ type inspectedContext struct {
 	} `json:"Endpoints"`
 }
 
+// ContextChange records an ownership-checked managed context mutation so a
+// caller can restore the previous endpoint if a later local commit fails.
+type ContextChange struct {
+	Name         string
+	PreviousHost string
+	CurrentHost  string
+	Created      bool
+}
+
+// Changed reports whether EnsureContext mutated Docker CLI state.
+func (c ContextChange) Changed() bool {
+	return c.Created || c.PreviousHost != c.CurrentHost
+}
+
 // EnsureContext creates the managed context or verifies its ownership.
 func EnsureContext(
 	ctx context.Context,
@@ -38,7 +52,8 @@ func EnsureContext(
 	cli string,
 	name string,
 	host string,
-) error {
+) (ContextChange, error) {
+	change := ContextChange{Name: name, CurrentHost: host}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	inspectErr := executor.Run(ctx, Invocation{
@@ -48,10 +63,21 @@ func EnsureContext(
 		Stderr: &stderr,
 	})
 	if inspectErr == nil {
-		return verifyManagedContext(stdout.Bytes(), name, host)
+		previousHost, err := managedContextHost(stdout.Bytes(), name)
+		if err != nil {
+			return ContextChange{}, err
+		}
+		change.PreviousHost = previousHost
+		if previousHost == host {
+			return change, nil
+		}
+		if err := updateContext(ctx, executor, cli, name, host); err != nil {
+			return ContextChange{}, err
+		}
+		return change, nil
 	}
 	if ExitCode(inspectErr) != 1 {
-		return fmt.Errorf("inspect docker context %q: %w", name, inspectErr)
+		return ContextChange{}, fmt.Errorf("inspect docker context %q: %w", name, inspectErr)
 	}
 
 	createErr := executor.Run(ctx, Invocation{
@@ -66,31 +92,74 @@ func EnsureContext(
 		Stderr: &stderr,
 	})
 	if createErr != nil {
-		return fmt.Errorf("create docker context %q: %w", name, createErr)
+		return ContextChange{}, fmt.Errorf("create docker context %q: %w", name, createErr)
 	}
 
-	return nil
+	change.Created = true
+	return change, nil
 }
 
-func verifyManagedContext(data []byte, name, host string) error {
+// RestoreContext rolls back a change only while the exact managed context
+// still points to the endpoint written by EnsureContext.
+func RestoreContext(ctx context.Context, executor Executor, cli string, change ContextChange) error {
+	if !change.Changed() {
+		return nil
+	}
+	var stdout bytes.Buffer
+	if err := executor.Run(ctx, Invocation{
+		Binary: cli,
+		Args:   []string{"context", "inspect", change.Name},
+		Stdout: &stdout,
+		Stderr: io.Discard,
+	}); err != nil {
+		return fmt.Errorf("inspect docker context %q for restore: %w", change.Name, err)
+	}
+	currentHost, err := managedContextHost(stdout.Bytes(), change.Name)
+	if err != nil {
+		return err
+	}
+	if currentHost != change.CurrentHost {
+		return fmt.Errorf("%w: %q changed before managed rollback", ErrContextCollision, change.Name)
+	}
+	if change.Created {
+		if err := executor.Run(ctx, Invocation{
+			Binary: cli,
+			Args:   []string{"context", "rm", "--force", change.Name},
+			Stdout: io.Discard,
+			Stderr: io.Discard,
+		}); err != nil {
+			return fmt.Errorf("remove newly created docker context %q: %w", change.Name, err)
+		}
+		return nil
+	}
+	return updateContext(ctx, executor, cli, change.Name, change.PreviousHost)
+}
+
+func managedContextHost(data []byte, name string) (string, error) {
 	var contexts []inspectedContext
 	if err := json.Unmarshal(data, &contexts); err != nil {
-		return fmt.Errorf("decode docker context %q: %w", name, err)
+		return "", fmt.Errorf("decode docker context %q: %w", name, err)
 	}
 	if len(contexts) != 1 {
-		return fmt.Errorf("inspect docker context %q: expected one context, got %d", name, len(contexts))
+		return "", fmt.Errorf("inspect docker context %q: expected one context, got %d", name, len(contexts))
 	}
 
 	context := contexts[0]
 	if context.Name != name ||
-		context.Metadata.Description != managedContextDescription ||
-		context.Endpoints.Docker.Host != host {
-		return fmt.Errorf(
-			"%w: %q is not owned by Remote Docker or points to another endpoint",
-			ErrContextCollision,
-			name,
-		)
+		context.Metadata.Description != managedContextDescription {
+		return "", fmt.Errorf("%w: %q is not owned by Remote Docker", ErrContextCollision, name)
 	}
+	return context.Endpoints.Docker.Host, nil
+}
 
+func updateContext(ctx context.Context, executor Executor, cli, name, host string) error {
+	if err := executor.Run(ctx, Invocation{
+		Binary: cli,
+		Args:   []string{"context", "update", "--docker", "host=" + host, name},
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	}); err != nil {
+		return fmt.Errorf("update docker context %q: %w", name, err)
+	}
 	return nil
 }

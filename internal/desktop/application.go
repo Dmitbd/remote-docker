@@ -55,6 +55,7 @@ type Application struct {
 	lastDiagnosticsPoll  time.Time
 	actionError          string
 	actionSequence       uint64
+	actionBusy           bool
 	confirm              func(title, message, confirmText string, response func(bool))
 }
 
@@ -226,6 +227,9 @@ func (a *Application) render(snapshot lifecycle.Snapshot) {
 		if section == model.Selected {
 			button.Importance = widget.HighImportance
 		}
+		if a.actionBusy {
+			button.Disable()
+		}
 		navigation.Add(button)
 	}
 
@@ -250,7 +254,7 @@ func (a *Application) render(snapshot lifecycle.Snapshot) {
 
 	quitButton := widget.NewButtonWithIcon(quit.Label, theme.LogoutIcon(), func() { a.perform(ActionQuit, "") })
 	quitButton.Importance = widget.DangerImportance
-	if !quit.Enabled {
+	if !quit.Enabled || a.actionBusy {
 		quitButton.Disable()
 	}
 	footer := container.NewBorder(nil, nil, nil, quitButton, layout.NewSpacer())
@@ -296,7 +300,7 @@ func (a *Application) connectionBody(model ViewModel, snapshot lifecycle.Snapsho
 		for _, action := range row.Actions {
 			action := action
 			button := widget.NewButton(action.Label, func() { a.performRowAction(snapshot, row, action) })
-			if !action.Enabled {
+			if !action.Enabled || a.actionBusy {
 				button.Disable()
 			}
 			if action.Destructive {
@@ -327,7 +331,7 @@ func (a *Application) connectionBody(model ViewModel, snapshot lifecycle.Snapsho
 		}
 		action := action
 		button := widget.NewButton(action.Label, func() { a.perform(action.ID, "") })
-		if !action.Enabled {
+		if !action.Enabled || a.actionBusy {
 			button.Disable()
 		}
 		if action.Destructive {
@@ -392,6 +396,9 @@ func (a *Application) diagnosticsBody() *fyne.Container {
 
 func (a *Application) perform(action ActionID, value string) {
 	sequence := a.beginAction()
+	if sequence == 0 {
+		return
+	}
 	a.refreshCurrent()
 	go func() {
 		err := a.controller.Perform(context.Background(), action, value)
@@ -412,6 +419,9 @@ func (a *Application) perform(action ActionID, value string) {
 }
 
 func (a *Application) performRowAction(snapshot lifecycle.Snapshot, row DeviceRow, action Action) {
+	if a.isActionBusy() {
+		return
+	}
 	switch action.ID {
 	case ActionForgetDevice:
 		a.showForgetConfirmation(row)
@@ -447,58 +457,75 @@ func (a *Application) showReplaceConfirmation(row DeviceRow) {
 	}
 	a.showConfirmation(
 		"Подключить новое устройство?",
-		"Старая доверенная связь будет удалена перед подключением к «"+nonEmpty(row.Name, "новому Windows-компьютеру")+"». Проекты, Docker-данные, WSL и исходники останутся без изменений.",
+		"Старая локальная доверенная связь и её закрытый ключ будут удалены с Mac. Затем автоматически начнётся подключение к «"+nonEmpty(row.Name, "новому Windows-компьютеру")+"» с проверкой шестизначного кода на обоих устройствах. Проекты, Docker-данные, WSL и исходники останутся без изменений; старое доверие на Windows при необходимости удаляется отдельно.",
 		"Забыть старую связь и подключиться к новому устройству",
 		func(confirmed bool) {
 			if confirmed {
-				a.forgetDevice(DeviceRow{ID: snapshot.Peer.ID, Name: snapshot.Peer.Name}, false, func() {
-					a.perform(ActionConnect, row.ID)
-				})
+				a.replaceDevice(DeviceRow{ID: snapshot.Peer.ID, Name: snapshot.Peer.Name}, row)
 			}
 		},
 	)
 }
 
-func (a *Application) showLocalForgetConfirmation(row DeviceRow, after func()) {
+func (a *Application) showLocalForgetConfirmation(row DeviceRow, after func() error, sequence uint64, previousErr error) {
 	a.showConfirmation(
 		"Забыть только на этом компьютере?",
 		"Удалённый отзыв сейчас недоступен. Связь будет удалена только на этом компьютере. Проекты, Docker-данные, WSL и исходники останутся без изменений; на другом компьютере доверие может потребовать отдельного удаления.",
 		"Забыть только здесь",
 		func(confirmed bool) {
 			if confirmed {
-				a.forgetDevice(row, true, after)
+				a.continueForget(sequence, row, true, after)
+				return
 			}
+			a.completeAction(sequence, previousErr)
+			a.refreshCurrent()
 		},
 	)
 }
 
-func (a *Application) forgetDevice(row DeviceRow, localOnly bool, after func()) {
+func (a *Application) forgetDevice(row DeviceRow, localOnly bool, after func() error) {
 	sequence := a.beginAction()
+	if sequence == 0 {
+		return
+	}
 	a.refreshCurrent()
+	a.continueForget(sequence, row, localOnly, after)
+}
+
+func (a *Application) replaceDevice(oldRow, newRow DeviceRow) {
+	sequence := a.beginAction()
+	if sequence == 0 {
+		return
+	}
+	a.refreshCurrent()
+	a.continueForget(sequence, oldRow, false, func() error {
+		return a.controller.Perform(context.Background(), ActionConnect, newRow.ID)
+	})
+}
+
+func (a *Application) continueForget(sequence uint64, row DeviceRow, localOnly bool, after func() error) {
 	go func() {
 		err := a.controller.ForgetDevice(context.Background(), row.ID, localOnly)
+		if err != nil && !localOnly && remoteUnavailable(err) {
+			a.offerLocalForgetConfirmation(row, after, sequence, err)
+			return
+		}
+		if err == nil && after != nil {
+			err = after()
+		}
 		if !a.completeAction(sequence, err) {
 			return
 		}
 		a.refreshCurrent()
-		if err != nil {
-			if !localOnly && remoteUnavailable(err) {
-				a.offerLocalForgetConfirmation(row, after)
-			}
-			return
-		}
-		if after != nil {
-			after()
-		}
 	}()
 }
 
-func (a *Application) offerLocalForgetConfirmation(row DeviceRow, after func()) {
+func (a *Application) offerLocalForgetConfirmation(row DeviceRow, after func() error, sequence uint64, previousErr error) {
 	if a.confirm != nil {
-		a.showLocalForgetConfirmation(row, after)
+		a.showLocalForgetConfirmation(row, after, sequence, previousErr)
 		return
 	}
-	fyne.Do(func() { a.showLocalForgetConfirmation(row, after) })
+	fyne.Do(func() { a.showLocalForgetConfirmation(row, after, sequence, previousErr) })
 }
 
 func (a *Application) showConfirmation(title, message, confirmText string, response func(bool)) {
@@ -525,8 +552,12 @@ func (a *Application) refreshCurrent() {
 func (a *Application) beginAction() uint64 {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.actionBusy {
+		return 0
+	}
 	a.actionSequence++
 	a.actionError = ""
+	a.actionBusy = true
 	return a.actionSequence
 }
 
@@ -536,12 +567,19 @@ func (a *Application) completeAction(sequence uint64, err error) bool {
 	if sequence != a.actionSequence {
 		return false
 	}
+	a.actionBusy = false
 	if err != nil {
 		a.actionError = safeActionMessage(err)
 	} else {
 		a.actionError = ""
 	}
 	return true
+}
+
+func (a *Application) isActionBusy() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.actionBusy
 }
 
 func safeActionMessage(err error) string {

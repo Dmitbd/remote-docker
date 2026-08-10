@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -1061,6 +1062,197 @@ func TestMacPairingCoordinatorCancelsWithoutManualCodeAndClearsPendingSecret(t *
 	}
 }
 
+func TestMacPairingCoordinatorClearsLocalPendingWhenRemoteCancelFails(t *testing.T) {
+	root := t.TempDir()
+	transport := &runtimePairingTransport{
+		hostKey: testAuthorizedKey(t), status: pairing.SessionPending, cancelErr: errors.New("remote unavailable"),
+	}
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Store: config.Store{Path: filepath.Join(root, "config.json")}, Secrets: credentials.NewMemoryStore(),
+		Transport: transport, Docker: &runtimeDockerExecutor{}, DockerCLI: "docker-real", DockerContext: "remote-docker",
+		ClientDeviceID: func(context.Context) (string, error) { return "LOCAL-SYNC", nil },
+	})
+	started, err := coordinator.Start(context.Background(), "windows-peer")
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if _, err := coordinator.Cancel(context.Background(), started.SessionID); err == nil {
+		t.Fatal("Cancel() error = nil, want remote failure")
+	}
+	coordinator.mu.Lock()
+	pending := coordinator.pending
+	starting := coordinator.starting
+	coordinator.mu.Unlock()
+	if pending != nil || starting {
+		t.Fatalf("local pairing reservation survived failed remote cancel: pending=%#v starting=%t", pending, starting)
+	}
+}
+
+func TestMacPairingCoordinatorReservesStartBeforeRemoteBootstrap(t *testing.T) {
+	root := t.TempDir()
+	transport := &blockingBootstrapPairingTransport{
+		runtimePairingTransport: &runtimePairingTransport{hostKey: testAuthorizedKey(t)},
+		started:                 make(chan struct{}),
+		release:                 make(chan struct{}),
+	}
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Store: config.Store{Path: filepath.Join(root, "config.json")}, Secrets: credentials.NewMemoryStore(),
+		Transport: transport, Docker: &runtimeDockerExecutor{}, DockerCLI: "docker-real", DockerContext: "remote-docker",
+		ClientDeviceID: func(context.Context) (string, error) { return "LOCAL-SYNC", nil },
+	})
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := coordinator.Start(context.Background(), "windows-peer")
+		firstDone <- err
+	}()
+	waitForTestSignal(t, transport.started, "remote bootstrap")
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := coordinator.Start(context.Background(), "windows-peer")
+		secondDone <- err
+	}()
+	if err := waitForTestError(t, secondDone, "reserved concurrent start"); err == nil {
+		t.Fatal("second Start() error = nil")
+	}
+	if transport.BootstrapCalls() != 1 {
+		t.Fatalf("remote bootstrap calls = %d, want one", transport.BootstrapCalls())
+	}
+	close(transport.release)
+	if err := waitForTestError(t, firstDone, "first start"); err != nil {
+		t.Fatalf("first Start() error = %v", err)
+	}
+}
+
+func TestMacPairingReplacementUpdatesExistingManagedDockerContext(t *testing.T) {
+	root := t.TempDir()
+	store := config.Store{Path: filepath.Join(root, "config.json")}
+	oldID := "old-device"
+	if err := store.Save(config.Config{
+		SchemaVersion: config.CurrentSchemaVersion, ActiveDevice: oldID,
+		Devices: map[string]config.Device{oldID: {
+			Name: "Old Windows", ClientDeviceID: "LOCAL-SYNC", SSHHostPublicKey: testAuthorizedKey(t),
+		}},
+	}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	secrets := credentials.NewMemoryStore()
+	if err := secrets.Put(oldID, sshtransport.SSHPrivateKeyCredential, []byte("old-private-key")); err != nil {
+		t.Fatalf("seed old private key: %v", err)
+	}
+	transport := &runtimePairingTransport{hostKey: testAuthorizedKey(t)}
+	newID, err := pairedRemoteDeviceID(transport.hostKey)
+	if err != nil {
+		t.Fatalf("new paired device ID: %v", err)
+	}
+	docker := &managedContextExecutor{host: "ssh://remote-docker-device-" + oldID}
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Store: store, Secrets: secrets, Transport: transport, Docker: docker,
+		DockerCLI: "docker-real", DockerContext: "remote-docker",
+		ClientDeviceID:  func(context.Context) (string, error) { return "LOCAL-SYNC", nil },
+		SSHConfigPath:   filepath.Join(root, "ssh_config"),
+		ManagedSSHRoot:  testManagedSSHRoot(t, root),
+		KnownHostsPath:  filepath.Join(root, "known_hosts"),
+		AgentSocketPath: filepath.Join(root, "ssh-agent.sock"),
+		ControlDir:      filepath.Join(root, "control"),
+	})
+
+	if err := coordinator.Unpair(context.Background(), oldID, true); err != nil {
+		t.Fatalf("forget old device: %v", err)
+	}
+	started, err := coordinator.Start(context.Background(), "windows-peer")
+	if err != nil {
+		t.Fatalf("start replacement: %v", err)
+	}
+	status, err := coordinator.Status(context.Background(), started.SessionID)
+	if err != nil {
+		t.Fatalf("complete replacement: %v", err)
+	}
+	if status.Device == nil || status.Device.ID != newID {
+		t.Fatalf("replacement device = %#v, want %q", status.Device, newID)
+	}
+	if got := docker.Commands(); !reflect.DeepEqual(got, [][]string{
+		{"context", "inspect", "remote-docker"},
+		{"context", "update", "--docker", "host=ssh://remote-docker-device-" + newID, "remote-docker"},
+	}) {
+		t.Fatalf("Docker context commands = %#v", got)
+	}
+	if _, err := secrets.Get(oldID, sshtransport.SSHPrivateKeyCredential); !errors.Is(err, credentials.ErrNotFound) {
+		t.Fatalf("old private key survived replacement: %v", err)
+	}
+}
+
+func TestMacPairingReplacementNeverChangesForeignDockerContext(t *testing.T) {
+	root := t.TempDir()
+	store := config.Store{Path: filepath.Join(root, "config.json")}
+	transport := &runtimePairingTransport{hostKey: testAuthorizedKey(t)}
+	docker := &managedContextExecutor{host: "ssh://user-owned-host", description: "Created by user"}
+	secrets := credentials.NewMemoryStore()
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Store: store, Secrets: secrets, Transport: transport, Docker: docker,
+		DockerCLI: "docker-real", DockerContext: "remote-docker",
+		ClientDeviceID:  func(context.Context) (string, error) { return "LOCAL-SYNC", nil },
+		SSHConfigPath:   filepath.Join(root, "ssh_config"),
+		ManagedSSHRoot:  testManagedSSHRoot(t, root),
+		KnownHostsPath:  filepath.Join(root, "known_hosts"),
+		AgentSocketPath: filepath.Join(root, "ssh-agent.sock"),
+		ControlDir:      filepath.Join(root, "control"),
+	})
+
+	started, err := coordinator.Start(context.Background(), "windows-peer")
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if _, err := coordinator.Status(context.Background(), started.SessionID); err == nil {
+		t.Fatal("Status() error = nil, want foreign context collision")
+	}
+	if got := docker.Commands(); !reflect.DeepEqual(got, [][]string{{"context", "inspect", "remote-docker"}}) {
+		t.Fatalf("foreign Docker context was mutated: %#v", got)
+	}
+	cfg, err := loadAgentConfig(store)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.ActiveDevice != "" || len(cfg.Devices) != 0 {
+		t.Fatalf("trust committed after context collision: %#v", cfg)
+	}
+}
+
+func TestMacPairingReplacementRestoresManagedContextWhenLocalCommitFails(t *testing.T) {
+	root := t.TempDir()
+	oldHost := "ssh://remote-docker-device-old"
+	transport := &runtimePairingTransport{hostKey: testAuthorizedKey(t)}
+	docker := &managedContextExecutor{host: oldHost}
+	secrets := credentials.NewMemoryStore()
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Store: config.Store{Path: filepath.Join(root, "config.json")}, Secrets: secrets,
+		Transport: transport, Docker: docker, DockerCLI: "docker-real", DockerContext: "remote-docker",
+		ClientDeviceID:  func(context.Context) (string, error) { return "LOCAL-SYNC", nil },
+		SSHConfigPath:   filepath.Join(root, "ssh_config"),
+		ManagedSSHRoot:  testManagedSSHRoot(t, root),
+		KnownHostsPath:  filepath.Join(root, "known_hosts"),
+		AgentSocketPath: filepath.Join(root, "ssh-agent.sock"),
+		ControlDir:      filepath.Join(root, "control"),
+		SaveConfig:      func(config.Config) error { return errors.New("injected local commit failure") },
+	})
+
+	started, err := coordinator.Start(context.Background(), "windows-peer")
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if _, err := coordinator.Status(context.Background(), started.SessionID); err == nil {
+		t.Fatal("Status() error = nil, want local commit failure")
+	}
+	commands := docker.Commands()
+	if len(commands) != 4 ||
+		!reflect.DeepEqual(commands[0], []string{"context", "inspect", "remote-docker"}) ||
+		commands[1][1] != "update" ||
+		!reflect.DeepEqual(commands[2], []string{"context", "inspect", "remote-docker"}) ||
+		!reflect.DeepEqual(commands[3], []string{"context", "update", "--docker", "host=" + oldHost, "remote-docker"}) {
+		t.Fatalf("Docker context rollback commands = %#v", commands)
+	}
+}
+
 type runtimePairingTransport struct {
 	hostKey      string
 	private      ed25519.PrivateKey
@@ -1070,7 +1262,67 @@ type runtimePairingTransport struct {
 	revokeCalls  int
 	status       pairing.SessionState
 	cancelled    string
+	cancelErr    error
 	targets      []pairingTarget
+}
+
+type blockingBootstrapPairingTransport struct {
+	*runtimePairingTransport
+	mu      sync.Mutex
+	started chan struct{}
+	release chan struct{}
+	calls   int
+}
+
+func (t *blockingBootstrapPairingTransport) Bootstrap(ctx context.Context, selector string, key ed25519.PublicKey) (pairingTarget, pairing.SessionDescriptor, error) {
+	t.mu.Lock()
+	t.calls++
+	if t.calls == 1 {
+		close(t.started)
+	}
+	t.mu.Unlock()
+	<-t.release
+	return t.runtimePairingTransport.Bootstrap(ctx, selector, key)
+}
+
+func (t *blockingBootstrapPairingTransport) BootstrapCalls() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.calls
+}
+
+type managedContextExecutor struct {
+	mu          sync.Mutex
+	host        string
+	description string
+	commands    [][]string
+}
+
+func (e *managedContextExecutor) Run(_ context.Context, invocation dockercli.Invocation) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.commands = append(e.commands, append([]string(nil), invocation.Args...))
+	if len(invocation.Args) >= 2 && invocation.Args[0] == "context" && invocation.Args[1] == "inspect" {
+		description := e.description
+		if description == "" {
+			description = "Managed by Remote Docker"
+		}
+		_, _ = fmt.Fprintf(invocation.Stdout, `[{"Name":"remote-docker","Metadata":{"Description":%q},"Endpoints":{"docker":{"Host":%q}}}]`, description, e.host)
+	}
+	if len(invocation.Args) >= 5 && invocation.Args[0] == "context" && invocation.Args[1] == "update" {
+		e.host = strings.TrimPrefix(invocation.Args[3], "host=")
+	}
+	return nil
+}
+
+func (e *managedContextExecutor) Commands() [][]string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	commands := make([][]string, len(e.commands))
+	for index := range e.commands {
+		commands[index] = append([]string(nil), e.commands[index]...)
+	}
+	return commands
 }
 
 func (t *runtimePairingTransport) Candidates(context.Context) ([]pairingTarget, error) {
@@ -1113,7 +1365,7 @@ func (t *runtimePairingTransport) Status(_ context.Context, _ pairingTarget, des
 
 func (t *runtimePairingTransport) Cancel(_ context.Context, _ pairingTarget, descriptor pairing.SessionDescriptor) error {
 	t.cancelled = descriptor.ID
-	return nil
+	return t.cancelErr
 }
 
 func (t *runtimePairingTransport) Revoke(_ context.Context, _ config.Device, clientDeviceID string) error {

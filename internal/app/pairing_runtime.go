@@ -84,9 +84,10 @@ type pendingPairing struct {
 }
 
 type macPairingCoordinator struct {
-	options macPairingOptions
-	mu      sync.Mutex
-	pending *pendingPairing
+	options  macPairingOptions
+	mu       sync.Mutex
+	pending  *pendingPairing
+	starting bool
 }
 
 func newMacPairingCoordinator(options macPairingOptions) *macPairingCoordinator {
@@ -166,7 +167,7 @@ func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (loc
 		return localapi.PairStartResult{}, unavailable("pairing infrastructure is unavailable")
 	}
 	c.mu.Lock()
-	if c.pending != nil && time.Now().Before(c.pending.descriptor.ExpiresAt) {
+	if c.starting || c.pending != nil && time.Now().Before(c.pending.descriptor.ExpiresAt) {
 		c.mu.Unlock()
 		return localapi.PairStartResult{}, needsAction("a pairing session is already active")
 	}
@@ -174,7 +175,13 @@ func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (loc
 		clearSecret(c.pending.privateKeyPEM)
 		c.pending = nil
 	}
+	c.starting = true
 	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.starting = false
+		c.mu.Unlock()
+	}()
 
 	clientPublicKey, clientPrivateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -207,6 +214,7 @@ func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (loc
 	}
 	code, err := pairing.Code(descriptor)
 	if err != nil {
+		_ = c.options.Transport.Cancel(ctx, target, descriptor)
 		clearSecret(privateKeyPEM)
 		return localapi.PairStartResult{}, unavailable("pairing session is invalid")
 	}
@@ -330,12 +338,27 @@ func (c *macPairingCoordinator) complete(ctx context.Context, sessionID string, 
 		clearSecret(pending.privateKeyPEM)
 		return localapi.Device{}, unavailable("cannot write managed SSH configuration")
 	}
-	if err := dockercli.EnsureContext(ctx, c.options.Docker, c.options.DockerCLI, c.options.DockerContext, "ssh://"+alias); err != nil {
+	contextChange, err := dockercli.EnsureContext(
+		ctx, c.options.Docker, c.options.DockerCLI, c.options.DockerContext, "ssh://"+alias,
+	)
+	if err != nil {
 		clearSecret(pending.privateKeyPEM)
 		return localapi.Device{}, unavailable("cannot create managed Docker context")
 	}
+	rollbackContext := func() error {
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := dockercli.RestoreContext(rollbackCtx, c.options.Docker, c.options.DockerCLI, contextChange); err != nil {
+			return unavailable("managed Docker context could not be restored safely")
+		}
+		return nil
+	}
 	if err := c.options.Secrets.Put(remoteDeviceID, sshtransport.SSHPrivateKeyCredential, pending.privateKeyPEM); err != nil {
+		rollbackErr := rollbackContext()
 		clearSecret(pending.privateKeyPEM)
+		if rollbackErr != nil {
+			return localapi.Device{}, rollbackErr
+		}
 		return localapi.Device{}, unavailable("cannot store paired SSH identity")
 	}
 	clearSecret(pending.privateKeyPEM)
@@ -357,13 +380,16 @@ func (c *macPairingCoordinator) complete(ctx context.Context, sessionID string, 
 		cfg.SchemaVersion = config.CurrentSchemaVersion
 		cfg.ActiveDevice = remoteDeviceID
 		cfg.Devices[remoteDeviceID] = device
-		if err := c.options.Store.Save(cfg); err != nil {
+		if err := c.options.SaveConfig(cfg); err != nil {
 			return unavailable("cannot save paired device configuration")
 		}
 		return nil
 	})
 	if err != nil {
 		_ = c.options.Secrets.Delete(remoteDeviceID, sshtransport.SSHPrivateKeyCredential)
+		if rollbackErr := rollbackContext(); rollbackErr != nil {
+			return localapi.Device{}, rollbackErr
+		}
 		return localapi.Device{}, err
 	}
 	c.mu.Lock()
@@ -396,12 +422,12 @@ func (c *macPairingCoordinator) Cancel(ctx context.Context, sessionID string) (l
 	pending := *c.pending
 	pending.privateKeyPEM = append([]byte(nil), c.pending.privateKeyPEM...)
 	c.mu.Unlock()
-	if err := c.options.Transport.Cancel(ctx, pending.target, pending.descriptor); err != nil {
-		clearSecret(pending.privateKeyPEM)
-		return localapi.PairingStatusResult{}, unavailable("cannot cancel the pairing request")
-	}
+	cancelErr := c.options.Transport.Cancel(ctx, pending.target, pending.descriptor)
 	c.clearPending(sessionID)
 	clearSecret(pending.privateKeyPEM)
+	if cancelErr != nil {
+		return localapi.PairingStatusResult{}, unavailable("cannot cancel the pairing request")
+	}
 	return pairingStatusResult(pending, pairing.SessionStatus{
 		SessionID: sessionID, State: pairing.SessionCancelled, ExpiresAt: pending.descriptor.ExpiresAt,
 	}), nil

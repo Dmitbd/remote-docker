@@ -244,11 +244,27 @@ func BuildDeviceRows(snapshot lifecycle.Snapshot, candidates []localapi.PairingC
 
 func buildDeviceRow(snapshot lifecycle.Snapshot, candidate localapi.PairingCandidate) DeviceRow {
 	row := DeviceRow{ID: candidate.ID, Name: candidate.Name}
-	if snapshot.State == lifecycle.StateConnected && snapshot.Peer != nil && snapshot.Peer.ID == candidate.ID {
-		row.Status = "Соединено"
-		row.Kind = "connected"
-		row.Actions = []Action{enabledAction(ActionDisconnect, "Отключиться")}
-		return row
+	if snapshot.Peer != nil && snapshot.Peer.ID == candidate.ID {
+		switch snapshot.State {
+		case lifecycle.StateConnected:
+			row.Status = "Соединено"
+			row.Kind = "connected"
+			row.Actions = []Action{enabledAction(ActionDisconnect, "Отключиться")}
+			return row
+		case lifecycle.StateConnecting:
+			row.Status = "Подключение"
+			row.Kind = "active"
+			return row
+		case lifecycle.StateReconnecting:
+			row.Status = "Восстановление связи"
+			row.Kind = "active"
+			row.Actions = []Action{enabledAction(ActionDisconnect, "Отключиться")}
+			return row
+		case lifecycle.StateStopping:
+			row.Status = "Завершение работы"
+			row.Kind = "active"
+			return row
+		}
 	}
 	if !candidate.Trusted {
 		row.Status = "Новое устройство"
