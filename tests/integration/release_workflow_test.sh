@@ -41,7 +41,8 @@ for required in \
   'Remote-Docker-Windows-x64-manifest.json' \
   'Remote-Docker-macOS-arm64-manifest.json' \
   'Remote-Docker-Windows-x64-SHA256SUMS' \
-  'Remote-Docker-macOS-arm64-SHA256SUMS'; do
+  'Remote-Docker-macOS-arm64-SHA256SUMS' \
+  'sudo bash tests/integration/rootfs_test.sh'; do
   grep -F "${required}" "${workflow}" >/dev/null || fail "missing release evidence: ${required}"
 done
 
