@@ -33,6 +33,7 @@ const (
 	EventSearchStarted                 EventType = "search_started"
 	EventSearchStopped                 EventType = "search_stopped"
 	EventPairingStarted                EventType = "pairing_started"
+	EventPairingCancellationPending    EventType = "pairing_cancellation_pending"
 	EventPairingApproved               EventType = "pairing_approved"
 	EventPairingRejected               EventType = "pairing_rejected"
 	EventPairingCancelled              EventType = "pairing_cancelled"
@@ -107,16 +108,17 @@ func WithTrustedPeer(peer Peer) Option {
 }
 
 type Machine struct {
-	mu                  sync.RWMutex
-	snapshot            Snapshot
-	now                 func() time.Time
-	afterStop           State
-	forgetting          bool
-	connectionStarting  bool
-	connectionStartFrom State
-	problemFrom         State
-	subscribers         map[uint64]chan Snapshot
-	nextID              uint64
+	mu                      sync.RWMutex
+	snapshot                Snapshot
+	now                     func() time.Time
+	afterStop               State
+	forgetting              bool
+	connectionStarting      bool
+	connectionStartFrom     State
+	problemFrom             State
+	pairingCancellationFrom State
+	subscribers             map[uint64]chan Snapshot
+	nextID                  uint64
 }
 
 func NewMachine(role Role, localName string, options ...Option) (*Machine, error) {
@@ -165,6 +167,9 @@ func (m *Machine) Allowed(command Command) bool {
 func allowed(snapshot Snapshot, command Command) bool {
 	if snapshot.Terminal || snapshot.State == StateStopping {
 		return false
+	}
+	if snapshot.State == StatePairingCancellationPending {
+		return snapshot.Role == RoleMacClient && snapshot.Pairing != nil && command == CommandCancel
 	}
 	switch command {
 	case CommandEnable:
@@ -279,6 +284,25 @@ func (m *Machine) applyLocked(event Event) error {
 		pairing.Status = PairingPending
 		snapshot.Pairing = &pairing
 		snapshot.State = StatePairing
+	case EventPairingCancellationPending:
+		if event.Pairing == nil || event.Pairing.SessionID == "" || event.Pairing.Peer.ID == "" || !sixDigits(event.Pairing.Code) {
+			return m.transitionError(event, "pairing cancellation metadata is incomplete")
+		}
+		validState := snapshot.State == StateSearching || snapshot.State == StateClientReady
+		from := snapshot.State
+		if snapshot.State == StateNeedsAction && snapshot.Problem != nil &&
+			(m.problemFrom == StateSearching || m.problemFrom == StateClientReady) {
+			validState = true
+			from = m.problemFrom
+		}
+		if snapshot.Role != RoleMacClient || snapshot.TrustedPeers != 1 || snapshot.Peer == nil || snapshot.Pairing != nil || !validState {
+			return m.transitionError(event, "replacement cancellation cannot be tracked in the current state")
+		}
+		pairing := *event.Pairing
+		pairing.Status = PairingCancellationPending
+		snapshot.Pairing = &pairing
+		snapshot.State = StatePairingCancellationPending
+		m.pairingCancellationFrom = from
 	case EventPairingApproved:
 		if snapshot.State != StatePairing || snapshot.Pairing == nil || snapshot.Pairing.Status != PairingPending {
 			return m.transitionError(event, "no pending pairing request exists")
@@ -287,15 +311,24 @@ func (m *Machine) applyLocked(event Event) error {
 		pairing.Status = PairingApproved
 		snapshot.Pairing = &pairing
 	case EventPairingRejected, EventPairingCancelled, EventPairingExpired:
-		if snapshot.State != StatePairing || snapshot.Pairing == nil {
+		if snapshot.State != StatePairing && snapshot.State != StatePairingCancellationPending || snapshot.Pairing == nil {
 			return m.transitionError(event, "no pairing request exists")
 		}
+		cancellationPending := snapshot.State == StatePairingCancellationPending
 		snapshot.Pairing = nil
 		if snapshot.Problem != nil {
 			snapshot.State = StateNeedsAction
+		} else if cancellationPending {
+			snapshot.State = m.pairingCancellationFrom
+			if snapshot.State != StateSearching && snapshot.State != StateClientReady {
+				snapshot.State = StateClientReady
+			}
 		} else {
 			snapshot.State = m.idleState()
 			m.problemFrom = ""
+		}
+		if cancellationPending {
+			m.pairingCancellationFrom = ""
 		}
 	case EventPairingCompleted:
 		if snapshot.State != StatePairing || snapshot.Pairing == nil || snapshot.Pairing.Status != PairingApproved || event.Peer == nil || event.Peer.ID == "" {
@@ -394,12 +427,12 @@ func (m *Machine) applyLocked(event Event) error {
 		}
 		m.beginStop(&Disconnect{Initiator: InitiatorSystem, Reason: ReasonNetworkTimeout}, m.idleState())
 	case EventPauseRequested:
-		if snapshot.State == StatePaused || snapshot.State == StateStopping {
+		if snapshot.State == StatePaused || snapshot.State == StateStopping || snapshot.State == StatePairingCancellationPending {
 			return m.transitionError(event, "application is already paused or stopping")
 		}
 		m.beginStop(&Disconnect{Initiator: InitiatorLocal, Reason: ReasonUserPause}, StatePaused)
 	case EventQuitRequested:
-		if snapshot.State == StateStopping {
+		if snapshot.State == StateStopping || snapshot.State == StatePairingCancellationPending {
 			return m.transitionError(event, "application is already stopping")
 		}
 		snapshot.Terminal = true
@@ -457,14 +490,14 @@ func (m *Machine) applyLocked(event Event) error {
 			if snapshot.State != StateNeedsAction {
 				m.problemFrom = snapshot.State
 			}
-		} else if snapshot.State != StatePairing {
+		} else if snapshot.State != StatePairing && snapshot.State != StatePairingCancellationPending {
 			if snapshot.State != StateNeedsAction {
 				m.problemFrom = snapshot.State
 			}
 			snapshot.State = StateNeedsAction
 		}
 	case EventProblemCleared:
-		if snapshot.Problem == nil || snapshot.State != StateNeedsAction && snapshot.State != StatePairing {
+		if snapshot.Problem == nil || snapshot.State != StateNeedsAction && snapshot.State != StatePairing && snapshot.State != StatePairingCancellationPending {
 			return m.transitionError(event, "no problem is active")
 		}
 		snapshot.Problem = nil

@@ -14,26 +14,28 @@ const (
 type State string
 
 const (
-	StatePaused       State = "paused"
-	StateClientReady  State = "client_ready"
-	StateSearching    State = "searching"
-	StateHostWaiting  State = "host_waiting"
-	StatePairing      State = "pairing"
-	StateConnecting   State = "connecting"
-	StateConnected    State = "connected"
-	StateReconnecting State = "reconnecting"
-	StateStopping     State = "stopping"
-	StateNeedsAction  State = "needs_action"
+	StatePaused                     State = "paused"
+	StateClientReady                State = "client_ready"
+	StateSearching                  State = "searching"
+	StateHostWaiting                State = "host_waiting"
+	StatePairing                    State = "pairing"
+	StatePairingCancellationPending State = "pairing_cancellation_pending"
+	StateConnecting                 State = "connecting"
+	StateConnected                  State = "connected"
+	StateReconnecting               State = "reconnecting"
+	StateStopping                   State = "stopping"
+	StateNeedsAction                State = "needs_action"
 )
 
 type PairingStatus string
 
 const (
-	PairingPending   PairingStatus = "pending"
-	PairingApproved  PairingStatus = "approved"
-	PairingRejected  PairingStatus = "rejected"
-	PairingCompleted PairingStatus = "completed"
-	PairingExpired   PairingStatus = "expired"
+	PairingPending             PairingStatus = "pending"
+	PairingCancellationPending PairingStatus = "cancellation_pending"
+	PairingApproved            PairingStatus = "approved"
+	PairingRejected            PairingStatus = "rejected"
+	PairingCompleted           PairingStatus = "completed"
+	PairingExpired             PairingStatus = "expired"
 )
 
 type ServiceState string

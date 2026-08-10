@@ -68,6 +68,34 @@ func TestBuildViewModelKeepsProblemPairingVisibleAndCancelable(t *testing.T) {
 	}
 }
 
+func TestBuildViewModelShowsReplacementCancellationPendingWithRetryOnly(t *testing.T) {
+	pairing := &lifecycle.Pairing{
+		SessionID: "replacement-session", Peer: lifecycle.Peer{ID: "new", Name: "New Windows"},
+		Code: "123456", Status: lifecycle.PairingCancellationPending, ExpiresAt: time.Now().Add(time.Minute),
+	}
+	model := BuildViewModel(lifecycle.Snapshot{
+		Role: lifecycle.RoleMacClient, State: lifecycle.StatePairingCancellationPending,
+		Pairing: pairing, TrustedPeers: 1, Peer: &lifecycle.Peer{ID: "saved", Name: "Saved Windows"},
+	}, SectionConnection, time.Now())
+	quit := viewActionByID(t, model.Actions, ActionQuit)
+	if model.Status != "Отмена нового подключения" || model.PeerName != "New Windows" ||
+		!hasViewAction(model.Actions, ActionCancelPair) || hasViewAction(model.Actions, ActionPause) ||
+		quit.Enabled {
+		t.Fatalf("cancellation-pending model = %#v", model)
+	}
+}
+
+func viewActionByID(t *testing.T, actions []Action, id ActionID) Action {
+	t.Helper()
+	for _, action := range actions {
+		if action.ID == id {
+			return action
+		}
+	}
+	t.Fatalf("action %q not found in %#v", id, actions)
+	return Action{}
+}
+
 func TestBuildViewModelShowsRolesConnectionLimitAndRecoveryCountdown(t *testing.T) {
 	connected := BuildViewModel(lifecycle.Snapshot{
 		Role: lifecycle.RoleMacClient, State: lifecycle.StateConnected, TrustedPeers: 1, ConnectionLimit: 1,

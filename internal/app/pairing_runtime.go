@@ -502,7 +502,7 @@ func (c *macPairingCoordinator) Unpair(ctx context.Context, deviceID string, loc
 	}
 	if !localOnly {
 		if strings.TrimSpace(device.ClientDeviceID) == "" {
-			return needsAction("paired device was not found")
+			return remoteRevokeUnavailable("remote pairing revocation is unavailable for this saved device")
 		}
 		if err := c.options.Transport.Revoke(ctx, device, device.ClientDeviceID); err != nil {
 			return remoteRevokeUnavailable("remote pairing revocation is unavailable")

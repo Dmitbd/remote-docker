@@ -152,6 +152,17 @@ func BuildViewModel(snapshot lifecycle.Snapshot, selected Section, now time.Time
 		} else {
 			model.Actions = append(model.Actions, Action{ID: ActionCancelPair, Label: "Отменить подключение", Enabled: true, Destructive: true})
 		}
+	case lifecycle.StatePairingCancellationPending:
+		model.Status = "Отмена нового подключения"
+		model.Headline = "Завершите отмену нового сопряжения"
+		model.Detail = "Старое доверенное устройство сохранено. Повторите отмену, чтобы новое подключение не осталось активным."
+		if snapshot.Pairing != nil {
+			model.PeerName = snapshot.Pairing.Peer.Name
+		}
+		if snapshot.Problem != nil {
+			model.Notice = snapshot.Problem.Message
+		}
+		model.Actions = append(model.Actions, Action{ID: ActionCancelPair, Label: "Повторить отмену", Enabled: true, Destructive: true})
 	case lifecycle.StateConnecting:
 		model.Status = "Подключение"
 		model.Headline = "Настраиваем защищённое соединение"
@@ -195,7 +206,11 @@ func BuildViewModel(snapshot lifecycle.Snapshot, selected Section, now time.Time
 		model.Headline = "Откройте диагностику"
 	}
 
-	model.Actions = append(model.Actions, Action{ID: ActionQuit, Label: "Завершить работу", Enabled: !snapshot.ActionInProgress, Destructive: true, Icon: "exit"})
+	model.Actions = append(model.Actions, Action{
+		ID: ActionQuit, Label: "Завершить работу",
+		Enabled:     !snapshot.ActionInProgress && snapshot.State != lifecycle.StatePairingCancellationPending,
+		Destructive: true, Icon: "exit",
+	})
 	return model
 }
 
@@ -265,6 +280,10 @@ func buildDeviceRow(snapshot lifecycle.Snapshot, candidate localapi.PairingCandi
 			return row
 		case lifecycle.StateStopping:
 			row.Status = "Завершение работы"
+			row.Kind = "active"
+			return row
+		case lifecycle.StatePairingCancellationPending:
+			row.Status = "Сохранено · ожидает отмены нового подключения"
 			row.Kind = "active"
 			return row
 		}

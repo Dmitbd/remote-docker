@@ -120,7 +120,7 @@ func (a *Application) pollOnce(ctx context.Context) {
 			a.mu.Unlock()
 			fyne.Do(func() { a.render(a.snapshot()) })
 		}
-	case lifecycle.StateHostWaiting, lifecycle.StatePairing:
+	case lifecycle.StateHostWaiting, lifecycle.StatePairing, lifecycle.StatePairingCancellationPending:
 		pollCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
 		_, _ = a.controller.PollPairing(pollCtx)
 		cancel()

@@ -367,6 +367,105 @@ func TestDesktopControllerReplaceRevokeFailureCancelsSessionAndPreservesOldTrust
 	}
 }
 
+func TestDesktopControllerKeepsFailedReplacementCancellationVisibleAndRetryable(t *testing.T) {
+	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "saved", Name: "Saved Windows"}))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled})
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventSearchStarted})
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := &recordingLocalHandler{
+		results: map[localapi.Method]any{
+			localapi.MethodPairStart: localapi.PairStartResult{
+				SessionID: "replacement-session", Code: "123456",
+				ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano),
+				Peer:      localapi.LifecyclePeer{ID: "new-windows", Name: "New Windows", OS: "windows"},
+			},
+			localapi.MethodPairCancel: localapi.PairingStatusResult{
+				SessionID: "replacement-session", Status: string(pairing.SessionCancelled),
+			},
+		},
+		errors: map[localapi.Method]error{
+			localapi.MethodUnpair:     &localapi.PublicError{Code: localapi.ErrorRemoteRevokeUnavailable, Message: "remote trust revocation is unavailable"},
+			localapi.MethodPairCancel: unavailable("pairing cancellation is unavailable"),
+		},
+	}
+	controller, _ := NewDesktopController(supervisor, fallback)
+
+	if _, err := controller.Handle(context.Background(), localapi.MethodReplaceDevice, json.RawMessage(
+		`{"old_device_id":"saved","new_device":"new-windows"}`,
+	)); err == nil {
+		t.Fatal("ReplaceDevice double failure error = nil")
+	}
+	if !reflect.DeepEqual(fallback.methods, []localapi.Method{localapi.MethodPairStart, localapi.MethodUnpair, localapi.MethodPairCancel}) {
+		t.Fatalf("double failure method order = %v", fallback.methods)
+	}
+	pending := supervisor.Snapshot()
+	if pending.State != lifecycle.StatePairingCancellationPending || pending.Pairing == nil ||
+		pending.Pairing.SessionID != "replacement-session" || pending.Pairing.Status != lifecycle.PairingCancellationPending ||
+		pending.TrustedPeers != 1 || pending.Peer == nil || pending.Peer.ID != "saved" {
+		t.Fatalf("hidden replacement cancellation = %#v", pending)
+	}
+	if _, err := controller.Handle(context.Background(), localapi.MethodReplaceDevice, json.RawMessage(
+		`{"old_device_id":"saved","new_device":"new-windows"}`,
+	)); err == nil {
+		t.Fatal("second ReplaceDevice before cancellation error = nil")
+	}
+	if len(fallback.methods) != 3 {
+		t.Fatalf("second replacement reached Bootstrap: %v", fallback.methods)
+	}
+
+	delete(fallback.errors, localapi.MethodPairCancel)
+	if _, err := controller.Handle(context.Background(), localapi.MethodPairCancel, json.RawMessage(
+		`{"session_id":"replacement-session"}`,
+	)); err != nil {
+		t.Fatalf("PairCancel retry error = %v", err)
+	}
+	cleared := supervisor.Snapshot()
+	if cleared.State != lifecycle.StateSearching || cleared.Pairing != nil || cleared.TrustedPeers != 1 ||
+		cleared.Peer == nil || cleared.Peer.ID != "saved" {
+		t.Fatalf("retry cancellation changed old trust = %#v", cleared)
+	}
+}
+
+func TestDesktopControllerPollRetriesCancellationInsteadOfCompletingReplacement(t *testing.T) {
+	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "saved", Name: "Saved Windows"}))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled})
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventSearchStarted})
+	pending := lifecycle.Pairing{
+		SessionID: "replacement-session", Peer: lifecycle.Peer{ID: "new", Name: "New Windows"},
+		Code: "123456", ExpiresAt: time.Now().Add(time.Minute),
+	}
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCancellationPending, Pairing: &pending})
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := &recordingLocalHandler{results: map[localapi.Method]any{
+		localapi.MethodPairCancel: localapi.PairingStatusResult{
+			SessionID: "replacement-session", Status: string(pairing.SessionCancelled),
+		},
+		localapi.MethodPairStatus: localapi.PairingStatusResult{
+			SessionID: "replacement-session", Status: string(pairing.SessionCompleted),
+			Device: &localapi.Device{ID: "new"},
+		},
+	}}
+	controller, _ := NewDesktopController(supervisor, fallback)
+
+	if _, err := controller.Handle(context.Background(), localapi.MethodPairStatus, json.RawMessage(
+		`{"session_id":"replacement-session"}`,
+	)); err != nil {
+		t.Fatalf("PairStatus cancellation retry error = %v", err)
+	}
+	if !reflect.DeepEqual(fallback.methods, []localapi.Method{localapi.MethodPairCancel}) {
+		t.Fatalf("cancellation-pending poll delegated methods = %v", fallback.methods)
+	}
+	if got := supervisor.Snapshot(); got.State != lifecycle.StateSearching || got.TrustedPeers != 1 || got.Peer == nil || got.Peer.ID != "saved" {
+		t.Fatalf("poll replaced old trust = %#v", got)
+	}
+}
+
 func TestDesktopControllerReplaceRunsExactBootstrapForgetPairCommitOrder(t *testing.T) {
 	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "saved", Name: "Saved Windows"}))
 	if err != nil {

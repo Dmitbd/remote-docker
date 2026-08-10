@@ -127,7 +127,19 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 			return nil, needsAction("wait for the active lifecycle operation to finish")
 		}
 		defer c.operations.Unlock()
-		result, err := c.delegate(ctx, method, raw)
+		snapshot := c.supervisor.Snapshot()
+		delegateMethod := method
+		if snapshot.State == lifecycle.StatePairingCancellationPending {
+			if method != localapi.MethodPairStatus && method != localapi.MethodPairCancel {
+				return nil, needsAction("only replacement cancellation can be retried")
+			}
+			if snapshot.Pairing == nil {
+				return nil, unavailable("replacement cancellation metadata is unavailable")
+			}
+			delegateMethod = localapi.MethodPairCancel
+			raw, _ = json.Marshal(localapi.PairSessionParams{SessionID: snapshot.Pairing.SessionID})
+		}
+		result, err := c.delegate(ctx, delegateMethod, raw)
 		if err != nil {
 			return nil, err
 		}
@@ -170,6 +182,9 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 			return nil, needsAction("wait for the active lifecycle operation to finish")
 		}
 		defer c.operations.Unlock()
+		if c.supervisor.Snapshot().State == lifecycle.StatePairingCancellationPending {
+			return nil, needsAction("cancel the pending replacement before shutting down")
+		}
 		if err := c.supervisor.Shutdown(ctx); err != nil {
 			return nil, unavailable("Remote Docker could not stop every owned process")
 		}
@@ -284,7 +299,11 @@ func (c *DesktopController) preserveRollbackPairing(started localapi.PairStartRe
 		SessionID: started.SessionID, Peer: peerFromLocalAPI(started.Peer), Code: started.Code,
 		Status: lifecycle.PairingPending, ExpiresAt: expiresAt,
 	}
-	_, err = c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &pairing})
+	eventType := lifecycle.EventPairingStarted
+	if snapshot := c.supervisor.Snapshot(); snapshot.TrustedPeers == 1 && snapshot.Peer != nil {
+		eventType = lifecycle.EventPairingCancellationPending
+	}
+	_, err = c.supervisor.machine.Apply(lifecycle.Event{Type: eventType, Pairing: &pairing})
 	return err
 }
 
@@ -352,6 +371,24 @@ func sixDigitPairCode(code string) bool {
 
 func (c *DesktopController) reconcilePairing(status localapi.PairingStatusResult) error {
 	snapshot := c.supervisor.Snapshot()
+	if snapshot.State == lifecycle.StatePairingCancellationPending {
+		if snapshot.Pairing == nil || snapshot.Pairing.SessionID != status.SessionID {
+			return needsAction("a different replacement cancellation is active")
+		}
+		switch status.Status {
+		case string(pairing.SessionCancelled):
+			_, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCancelled})
+			return err
+		case string(lifecycle.PairingRejected):
+			_, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingRejected})
+			return err
+		case string(lifecycle.PairingExpired):
+			_, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingExpired})
+			return err
+		default:
+			return unavailable("replacement cancellation is not yet confirmed")
+		}
+	}
 	if snapshot.Pairing == nil {
 		if status.Status != string(lifecycle.PairingPending) && status.Status != string(lifecycle.PairingApproved) {
 			return nil

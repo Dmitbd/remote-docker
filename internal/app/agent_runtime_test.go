@@ -788,6 +788,40 @@ func TestMacPairingNormalRetryDoesNotSilentlyBecomeLocalOnly(t *testing.T) {
 	fixture.assertForgotten(t)
 }
 
+func TestMacPairingLegacyDeviceRequiresExplicitLocalOnlyForget(t *testing.T) {
+	fixture := newLocalForgetFixture(t)
+	cfg, err := fixture.store.Load()
+	if err != nil {
+		t.Fatalf("load legacy config: %v", err)
+	}
+	legacy := cfg.Devices[fixture.deviceID]
+	legacy.ClientDeviceID = ""
+	cfg.Devices[fixture.deviceID] = legacy
+	if err := fixture.store.Save(cfg); err != nil {
+		t.Fatalf("save legacy config: %v", err)
+	}
+	coordinator := newMacPairingCoordinator(fixture.options)
+
+	err = coordinator.Unpair(context.Background(), fixture.deviceID, false)
+	var public *localapi.PublicError
+	if !errors.As(err, &public) || public.Code != localapi.ErrorRemoteRevokeUnavailable {
+		t.Fatalf("legacy normal Unpair error = %v, want typed remote revoke unavailable", err)
+	}
+	if fixture.transport.revokeCalls != 0 {
+		t.Fatalf("legacy normal Unpair attempted remote revoke: calls=%d", fixture.transport.revokeCalls)
+	}
+	fixture.assertPartialCleanup(t, true, true, true)
+	unchanged, err := fixture.store.Load()
+	if err != nil || unchanged.ActiveDevice != fixture.deviceID || len(unchanged.Devices) != 1 || len(unchanged.Workspaces) != 1 {
+		t.Fatalf("legacy trust changed before local-only confirmation: cfg=%#v error=%v", unchanged, err)
+	}
+
+	if err := coordinator.Unpair(context.Background(), fixture.deviceID, true); err != nil {
+		t.Fatalf("legacy local-only Unpair error = %v", err)
+	}
+	fixture.assertForgotten(t)
+}
+
 func TestSharedConfigTransactionPreservesWorkspaceAddDuringForget(t *testing.T) {
 	fixture := newLocalForgetFixture(t)
 	transactions := &configTransactions{}
