@@ -6,6 +6,7 @@ build_script="${repo_root}/packaging/macos/build-pkg.sh"
 archive_validator="${repo_root}/packaging/macos/validate-archive.sh"
 checksum_verifier="${repo_root}/packaging/macos/verify-checksum.sh"
 package_inspector="${repo_root}/packaging/macos/inspect-pkg.sh"
+ci_workflow="${repo_root}/.github/workflows/ci.yml"
 test_root="$(mktemp -d "${TMPDIR:-/private/tmp}/remote-docker-package-test.XXXXXX")"
 trap 'rm -rf "${test_root}"' EXIT
 
@@ -34,6 +35,14 @@ assert_plist_value() {
 [[ -x "${archive_validator}" ]] || fail "missing executable archive validator"
 [[ -x "${checksum_verifier}" ]] || fail "missing executable checksum verifier"
 [[ -x "${package_inspector}" ]] || fail "missing executable package metadata inspector"
+assert_file "${ci_workflow}"
+
+grep -F "REMOTE_DOCKER_VERSION: '0.2.7'" "${ci_workflow}" >/dev/null || fail "development packages do not share the product version"
+grep -F -- '-Version $env:REMOTE_DOCKER_VERSION' "${ci_workflow}" >/dev/null || fail "Windows development package ignores the shared product version"
+grep -F 'REMOTE_DOCKER_BUILD_VERSION="${GITHUB_RUN_NUMBER}"' "${ci_workflow}" >/dev/null || fail "macOS development package does not use a monotonic build version"
+if grep -F 'REMOTE_DOCKER_VERSION="0.1.${GITHUB_RUN_NUMBER}"' "${ci_workflow}" >/dev/null; then
+  fail "macOS development package incorrectly uses the CI run as its product version"
+fi
 
 export REMOTE_DOCKER_APP_SIGN_IDENTITY="PACKAGE_TEST_SECRET_APP_IDENTITY"
 export REMOTE_DOCKER_INSTALLER_SIGN_IDENTITY="PACKAGE_TEST_SECRET_INSTALLER_IDENTITY"
