@@ -82,6 +82,8 @@ type AgentRuntime struct {
 	tunnelReady    *atomic.Bool
 	windowsStopper managedWindowsRuntimeStopper
 	connection     connectionSessionRuntime
+	pairingHandler localapi.Handler
+	pairingRuntime *pairingLifecycleReconciler
 	startupRecover func(context.Context) error
 
 	sessionMu      sync.Mutex
@@ -333,9 +335,10 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 	return &AgentRuntime{
 		agent: agent, store: store, sshConfigPath: sshConfigPath,
 		restorer: restorer, pairHost: pairHost, ssh: sshRuntime, localSync: localSync,
-		windowsBridge: windowsBridge,
-		tunnelClient:  tunnelClient,
-		tunnelReady:   tunnelReady,
+		windowsBridge:  windowsBridge,
+		tunnelClient:   tunnelClient,
+		tunnelReady:    tunnelReady,
+		pairingHandler: controller,
 		windowsStopper: func() managedWindowsRuntimeStopper {
 			if runtime.GOOS == "windows" {
 				return windowsbridge.ManagedWSLOperations{}
@@ -371,6 +374,12 @@ func (r *AgentRuntime) BindLifecycle(machine *lifecycle.Machine, appVersion stri
 	if strings.TrimSpace(appVersion) == "" {
 		appVersion = "dev"
 	}
+	if snapshot.Role != lifecycle.RoleWindowsHost && snapshot.Role != lifecycle.RoleMacClient {
+		return errors.New("production lifecycle role is invalid")
+	}
+	if r.pairingHandler != nil {
+		r.pairingRuntime = &pairingLifecycleReconciler{machine: machine, handler: r.pairingHandler}
+	}
 	if snapshot.Role == lifecycle.RoleWindowsHost {
 		host, err := newHostConnectionRuntime(machine, windowsbridge.ManagedWSLOperations{}, time.Now)
 		if err != nil {
@@ -378,9 +387,6 @@ func (r *AgentRuntime) BindLifecycle(machine *lifecycle.Machine, appVersion stri
 		}
 		r.connection = host
 		return nil
-	}
-	if snapshot.Role != lifecycle.RoleMacClient {
-		return errors.New("production lifecycle role is invalid")
 	}
 	r.connection = &clientConnectionRuntime{
 		machine: machine,
@@ -525,6 +531,15 @@ func (r *AgentRuntime) Run(ctx context.Context, interval time.Duration) error {
 	lifecycleCtx, cancelLifecycle := context.WithCancel(ctx)
 	defer cancelLifecycle()
 	r.restorer.Bind(lifecycleCtx)
+	var pairingDone chan error
+	if r.pairingRuntime != nil {
+		pairingDone = make(chan error, 1)
+		go func() { pairingDone <- r.pairingRuntime.Run(lifecycleCtx, interval) }()
+		defer func() {
+			cancelLifecycle()
+			waitLifecycle(pairingDone)
+		}()
+	}
 	var pairHostDone chan error
 	if r.pairHost != nil {
 		pairHostDone = make(chan error, 1)
@@ -615,6 +630,77 @@ func (r *AgentRuntime) Run(ctx context.Context, interval time.Duration) error {
 		waitLifecycle(pairHostDone)
 		return err
 	}
+}
+
+type pairingLifecycleReconciler struct {
+	machine *lifecycle.Machine
+	handler localapi.Handler
+}
+
+func (r *pairingLifecycleReconciler) Run(ctx context.Context, interval time.Duration) error {
+	if r == nil || r.machine == nil || r.handler == nil {
+		return errors.New("pairing lifecycle reconciler is incomplete")
+	}
+	if interval <= 0 {
+		interval = time.Second
+	}
+	for {
+		if err := r.reconcile(ctx); err != nil && ctx.Err() != nil {
+			return ctx.Err()
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (r *pairingLifecycleReconciler) reconcile(ctx context.Context) error {
+	if r == nil || r.machine == nil || r.handler == nil {
+		return errors.New("pairing lifecycle reconciler is incomplete")
+	}
+	snapshot := r.machine.Snapshot()
+	params, ok := pairingReconciliationParams(snapshot)
+	if !ok {
+		return nil
+	}
+	raw, _ := json.Marshal(params)
+	result, err := r.handler.Handle(ctx, localapi.MethodPairStatus, raw)
+	if err != nil {
+		return err
+	}
+	status, ok := result.(localapi.PairingStatusResult)
+	if !ok {
+		return unavailable("pairing returned an invalid response")
+	}
+	if strings.TrimSpace(status.SessionID) == "" {
+		if params.SessionID == "" {
+			return nil
+		}
+		return unavailable("pairing session status is unavailable")
+	}
+	if r.machine.Snapshot().Revision != snapshot.Revision {
+		return nil
+	}
+	return reconcilePairingLifecycle(r.machine, status)
+}
+
+func pairingReconciliationParams(snapshot lifecycle.Snapshot) (localapi.PairSessionParams, bool) {
+	if snapshot.Pairing != nil {
+		return localapi.PairSessionParams{
+			SessionID:   snapshot.Pairing.SessionID,
+			ObserveOnly: snapshot.State == lifecycle.StatePairingCancellationPending,
+		}, true
+	}
+	if snapshot.Role == lifecycle.RoleWindowsHost && snapshot.State == lifecycle.StateHostWaiting && snapshot.TrustedPeers == 0 {
+		return localapi.PairSessionParams{}, true
+	}
+	return localapi.PairSessionParams{}, false
 }
 
 type tunnelClientLifecycle struct {

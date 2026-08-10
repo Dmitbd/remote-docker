@@ -183,6 +183,140 @@ func TestAgentRuntimeRunInvokesBoundedStartupRecoveryOnce(t *testing.T) {
 	}
 }
 
+func TestPairingLifecycleReconcilerDiscoversWindowsRequestWithoutDesktopPolling(t *testing.T) {
+	machine := newLifecycleMachine(t, lifecycle.RoleWindowsHost)
+	if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled}); err != nil {
+		t.Fatalf("enable Windows host: %v", err)
+	}
+	expiresAt := time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano)
+	var firstParams localapi.PairSessionParams
+	calls := 0
+	handler := localapi.HandlerFunc(func(_ context.Context, method localapi.Method, raw json.RawMessage) (any, error) {
+		if method != localapi.MethodPairStatus {
+			return nil, fmt.Errorf("background method = %q", method)
+		}
+		var params localapi.PairSessionParams
+		if err := json.Unmarshal(raw, &params); err != nil {
+			return nil, err
+		}
+		if calls == 0 {
+			firstParams = params
+		}
+		calls++
+		return localapi.PairingStatusResult{
+			SessionID: "session-1", Code: "123456", Status: string(pairing.SessionPending), ExpiresAt: expiresAt,
+			Peer: localapi.LifecyclePeer{ID: "mac", Name: "MacBook", OS: "macos"},
+		}, nil
+	})
+	reconciler := &pairingLifecycleReconciler{machine: machine, handler: handler}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- reconciler.Run(ctx, time.Millisecond) }()
+
+	waitForLifecycleState(t, machine, lifecycle.StatePairing)
+	cancel()
+	if err := waitForTestError(t, done, "pairing lifecycle stop"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context cancellation", err)
+	}
+	if pairingState := machine.Snapshot().Pairing; pairingState == nil || pairingState.SessionID != "session-1" {
+		t.Fatalf("background pairing = %#v", pairingState)
+	}
+	if firstParams.SessionID != "" || firstParams.ObserveOnly {
+		t.Fatalf("first background params = %#v", firstParams)
+	}
+}
+
+func TestPairingLifecycleReconcilerCompletesMacPairingWithoutDesktopPolling(t *testing.T) {
+	machine := newLifecycleMachine(t, lifecycle.RoleMacClient)
+	if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventSearchStarted}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &lifecycle.Pairing{
+		SessionID: "session-1", Peer: lifecycle.Peer{ID: "windows", Name: "Windows"}, Code: "123456",
+		Status: lifecycle.PairingPending, ExpiresAt: time.Now().Add(time.Minute),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	handler := localapi.HandlerFunc(func(_ context.Context, method localapi.Method, raw json.RawMessage) (any, error) {
+		var params localapi.PairSessionParams
+		if method != localapi.MethodPairStatus || json.Unmarshal(raw, &params) != nil ||
+			params.SessionID != "session-1" || params.ObserveOnly {
+			t.Fatalf("Mac background poll = method %q params %#v", method, params)
+		}
+		return localapi.PairingStatusResult{
+			SessionID: "session-1", Status: string(pairing.SessionCompleted),
+			Peer:   localapi.LifecyclePeer{ID: "windows", Name: "Windows"},
+			Device: &localapi.Device{ID: "trusted-windows", Name: "Windows", Address: "192.168.1.20"},
+		}, nil
+	})
+	if err := (&pairingLifecycleReconciler{machine: machine, handler: handler}).reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile completed Mac pairing: %v", err)
+	}
+	snapshot := machine.Snapshot()
+	if snapshot.State != lifecycle.StateConnecting || snapshot.Pairing != nil || snapshot.TrustedPeers != 1 ||
+		snapshot.Peer == nil || snapshot.Peer.ID != "trusted-windows" {
+		t.Fatalf("completed Mac lifecycle = %#v", snapshot)
+	}
+}
+
+func TestPairingLifecycleReconcilerDiscardsResultAfterSessionRevisionChanges(t *testing.T) {
+	machine := newLifecycleMachine(t, lifecycle.RoleMacClient)
+	if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventSearchStarted}); err != nil {
+		t.Fatal(err)
+	}
+	expiresAt := time.Now().Add(time.Minute)
+	if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &lifecycle.Pairing{
+		SessionID: "session-1", Peer: lifecycle.Peer{ID: "windows", Name: "Windows"}, Code: "123456",
+		Status: lifecycle.PairingPending, ExpiresAt: expiresAt,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	handler := localapi.HandlerFunc(func(context.Context, localapi.Method, json.RawMessage) (any, error) {
+		close(started)
+		<-release
+		return localapi.PairingStatusResult{
+			SessionID: "session-1", Status: string(pairing.SessionCompleted),
+			Peer:   localapi.LifecyclePeer{ID: "windows", Name: "Windows"},
+			Device: &localapi.Device{ID: "trusted-windows", Name: "Windows"},
+		}, nil
+	})
+	reconciler := &pairingLifecycleReconciler{machine: machine, handler: handler}
+	done := make(chan error, 1)
+	go func() { done <- reconciler.reconcile(context.Background()) }()
+	waitForTestSignal(t, started, "pairing status request")
+	if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCancelled}); err != nil {
+		t.Fatalf("cancel pairing while status is pending: %v", err)
+	}
+	close(release)
+	if err := waitForTestError(t, done, "stale pairing result"); err != nil {
+		t.Fatalf("reconcile stale result error = %v", err)
+	}
+	snapshot := machine.Snapshot()
+	if snapshot.Pairing != nil || snapshot.TrustedPeers != 0 || snapshot.State != lifecycle.StateClientReady {
+		t.Fatalf("stale result changed lifecycle = %#v", snapshot)
+	}
+}
+
+func waitForLifecycleState(t *testing.T, machine *lifecycle.Machine, want lifecycle.State) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if machine.Snapshot().State == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("lifecycle state = %q, want %q", machine.Snapshot().State, want)
+}
+
 func TestAgentRuntimeStartAndStopOwnOneSessionLifecycle(t *testing.T) {
 	restorer := newInfrastructureRestorer(func(context.Context) (portrelay.Reconciler, error) {
 		return portrelay.Reconciler{}, nil

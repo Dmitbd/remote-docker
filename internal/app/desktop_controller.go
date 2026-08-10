@@ -36,13 +36,6 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 	}
 	switch method {
 	case localapi.MethodStatus:
-		if c.fallback == nil || !c.operations.TryLock() {
-			return statusFromLifecycle(c.supervisor.Snapshot()), nil
-		}
-		defer c.operations.Unlock()
-		if err := c.refreshPairingLocked(ctx); err != nil {
-			return nil, err
-		}
 		return statusFromLifecycle(c.supervisor.Snapshot()), nil
 	case localapi.MethodEnable:
 		if !c.operations.TryLock() {
@@ -226,35 +219,6 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 	}
 }
 
-func (c *DesktopController) refreshPairingLocked(ctx context.Context) error {
-	snapshot := c.supervisor.Snapshot()
-	shouldRefresh := snapshot.Pairing != nil ||
-		snapshot.Role == lifecycle.RoleWindowsHost && snapshot.State == lifecycle.StateHostWaiting && snapshot.TrustedPeers == 0
-	if !shouldRefresh {
-		return nil
-	}
-	params := localapi.PairSessionParams{ObserveOnly: snapshot.State == lifecycle.StatePairingCancellationPending}
-	if snapshot.Pairing != nil {
-		params.SessionID = snapshot.Pairing.SessionID
-	}
-	raw, _ := json.Marshal(params)
-	result, err := c.delegate(ctx, localapi.MethodPairStatus, raw)
-	if err != nil {
-		return err
-	}
-	status, ok := result.(localapi.PairingStatusResult)
-	if !ok {
-		return unavailable("pairing returned an invalid response")
-	}
-	if strings.TrimSpace(status.SessionID) == "" {
-		if snapshot.Pairing == nil {
-			return nil
-		}
-		return unavailable("pairing session status is unavailable")
-	}
-	return c.reconcilePairing(status)
-}
-
 func connectionLimitOccupied(snapshot lifecycle.Snapshot) bool {
 	limit := snapshot.ConnectionLimit
 	if limit <= 0 {
@@ -420,20 +384,27 @@ func sixDigitPairCode(code string) bool {
 }
 
 func (c *DesktopController) reconcilePairing(status localapi.PairingStatusResult) error {
-	snapshot := c.supervisor.Snapshot()
+	return reconcilePairingLifecycle(c.supervisor.machine, status)
+}
+
+func reconcilePairingLifecycle(machine *lifecycle.Machine, status localapi.PairingStatusResult) error {
+	if machine == nil {
+		return unavailable("pairing lifecycle is unavailable")
+	}
+	snapshot := machine.Snapshot()
 	if snapshot.State == lifecycle.StatePairingCancellationPending {
 		if snapshot.Pairing == nil || snapshot.Pairing.SessionID != status.SessionID {
 			return needsAction("a different replacement cancellation is active")
 		}
 		switch status.Status {
 		case string(pairing.SessionCancelled):
-			_, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCancelled})
+			_, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCancelled})
 			return err
 		case string(lifecycle.PairingRejected):
-			_, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingRejected})
+			_, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingRejected})
 			return err
 		case string(lifecycle.PairingExpired):
-			_, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingExpired})
+			_, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingExpired})
 			return err
 		case string(lifecycle.PairingPending), string(lifecycle.PairingApproved), string(pairing.SessionCompleted):
 			return nil
@@ -445,12 +416,16 @@ func (c *DesktopController) reconcilePairing(status localapi.PairingStatusResult
 		if status.Status != string(lifecycle.PairingPending) && status.Status != string(lifecycle.PairingApproved) {
 			return nil
 		}
-		if err := c.startPairing(localapi.PairStartResult{
+		pairingState, err := pairingFromStart(localapi.PairStartResult{
 			SessionID: status.SessionID, Code: status.Code, Peer: status.Peer, ExpiresAt: status.ExpiresAt,
-		}); err != nil {
+		})
+		if err != nil {
 			return err
 		}
-		snapshot = c.supervisor.Snapshot()
+		if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &pairingState}); err != nil {
+			return needsAction("the device is not ready to start pairing")
+		}
+		snapshot = machine.Snapshot()
 	}
 	if snapshot.Pairing == nil || snapshot.Pairing.SessionID != status.SessionID {
 		return needsAction("a different pairing request is active")
@@ -461,25 +436,25 @@ func (c *DesktopController) reconcilePairing(status localapi.PairingStatusResult
 		return nil
 	case string(lifecycle.PairingApproved):
 		if snapshot.Pairing.Status == lifecycle.PairingPending {
-			_, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingApproved})
+			_, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingApproved})
 			return err
 		}
 		return nil
 	case string(lifecycle.PairingRejected):
-		_, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingRejected})
+		_, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingRejected})
 		return err
 	case string(pairing.SessionCancelled):
-		_, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCancelled})
+		_, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCancelled})
 		return err
 	case string(lifecycle.PairingExpired):
-		_, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingExpired})
+		_, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingExpired})
 		return err
 	case string(lifecycle.PairingCompleted):
 		if status.Device == nil || strings.TrimSpace(status.Device.ID) == "" {
 			return unavailable("completed pairing did not return a trusted device")
 		}
 		if snapshot.Pairing.Status == lifecycle.PairingPending {
-			if _, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingApproved}); err != nil {
+			if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingApproved}); err != nil {
 				return err
 			}
 		}
@@ -487,7 +462,7 @@ func (c *DesktopController) reconcilePairing(status localapi.PairingStatusResult
 		peer.ID = status.Device.ID
 		peer.Name = status.Device.Name
 		peer.Address = status.Device.Address
-		_, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCompleted, Peer: &peer})
+		_, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCompleted, Peer: &peer})
 		return err
 	default:
 		return unavailable("pairing returned an unknown state")

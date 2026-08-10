@@ -33,14 +33,12 @@ func TestDesktopControllerPublishesPausedLifecycleSnapshot(t *testing.T) {
 	}
 }
 
-func TestDesktopControllerStatusReconcilesIncomingWindowsPairing(t *testing.T) {
+func TestDesktopControllerStatusDoesNotPerformPairingIO(t *testing.T) {
 	machine := newLifecycleMachine(t, lifecycle.RoleWindowsHost)
 	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
-	expiresAt := time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano)
 	fallback := &recordingLocalHandler{results: map[localapi.Method]any{
 		localapi.MethodPairStatus: localapi.PairingStatusResult{
-			SessionID: "session-1", Code: "123456", Status: string(pairing.SessionPending), ExpiresAt: expiresAt,
-			Peer: localapi.LifecyclePeer{ID: "mac", Name: "MacBook", OS: "macos"},
+			SessionID: "session-1", Status: string(pairing.SessionPending),
 		},
 	}}
 	controller, _ := NewDesktopController(supervisor, fallback)
@@ -51,71 +49,11 @@ func TestDesktopControllerStatusReconcilesIncomingWindowsPairing(t *testing.T) {
 		t.Fatalf("Status error = %v", err)
 	}
 	status, ok := result.(localapi.StatusResult)
-	if !ok || status.State != string(lifecycle.StatePairing) || status.Pairing == nil ||
-		status.Pairing.SessionID != "session-1" || status.Pairing.Code != "123456" || status.Pairing.Peer.Name != "MacBook" {
-		t.Fatalf("reconciled Windows status = %#v", result)
+	if !ok || status.State != string(lifecycle.StateHostWaiting) || status.Pairing != nil {
+		t.Fatalf("Windows status = %#v", result)
 	}
-	if !reflect.DeepEqual(fallback.methods, []localapi.Method{localapi.MethodPairStatus}) {
-		t.Fatalf("delegated methods = %v", fallback.methods)
-	}
-	var params localapi.PairSessionParams
-	if err := json.Unmarshal(fallback.raws[0], &params); err != nil || params.SessionID != "" || params.ObserveOnly {
-		t.Fatalf("incoming pairing params = %#v error=%v", params, err)
-	}
-}
-
-func TestDesktopControllerStatusCompletesMacPairingAfterRemoteApproval(t *testing.T) {
-	machine := newLifecycleMachine(t, lifecycle.RoleMacClient)
-	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
-	expiresAt := time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano)
-	fallback := &recordingLocalHandler{results: map[localapi.Method]any{
-		localapi.MethodPairStart: localapi.PairStartResult{
-			SessionID: "session-1", Code: "123456", ExpiresAt: expiresAt,
-			Peer: localapi.LifecyclePeer{ID: "temporary-windows", Name: "Windows PC", OS: "windows"},
-		},
-		localapi.MethodPairStatus: localapi.PairingStatusResult{
-			SessionID: "session-1", Code: "123456", Status: string(pairing.SessionCompleted), ExpiresAt: expiresAt,
-			Peer:   localapi.LifecyclePeer{ID: "temporary-windows", Name: "Windows PC", OS: "windows"},
-			Device: &localapi.Device{ID: "trusted-windows", Name: "Windows PC", Address: "192.168.1.20"},
-		},
-	}}
-	controller, _ := NewDesktopController(supervisor, fallback)
-	_, _ = controller.Handle(context.Background(), localapi.MethodEnable, nil)
-	_, _ = controller.Handle(context.Background(), localapi.MethodSearchStart, nil)
-	_, _ = controller.Handle(context.Background(), localapi.MethodPairStart, json.RawMessage(`{"device":"temporary-windows"}`))
-
-	result, err := controller.Handle(context.Background(), localapi.MethodStatus, nil)
-	if err != nil {
-		t.Fatalf("Status error = %v", err)
-	}
-	status, ok := result.(localapi.StatusResult)
-	if !ok || status.State != string(lifecycle.StateConnecting) || status.TrustedPeers != 1 ||
-		status.Pairing != nil || status.Peer == nil || status.Peer.ID != "trusted-windows" {
-		t.Fatalf("completed Mac status = %#v", result)
-	}
-	var params localapi.PairSessionParams
-	if err := json.Unmarshal(fallback.raws[len(fallback.raws)-1], &params); err != nil ||
-		params.SessionID != "session-1" || params.ObserveOnly {
-		t.Fatalf("Mac pairing poll params = %#v error=%v", params, err)
-	}
-}
-
-func TestDesktopControllerStatusTreatsMissingWindowsPairingAsIdle(t *testing.T) {
-	machine := newLifecycleMachine(t, lifecycle.RoleWindowsHost)
-	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
-	fallback := &recordingLocalHandler{results: map[localapi.Method]any{
-		localapi.MethodPairStatus: localapi.PairingStatusResult{},
-	}}
-	controller, _ := NewDesktopController(supervisor, fallback)
-	_, _ = controller.Handle(context.Background(), localapi.MethodEnable, nil)
-
-	result, err := controller.Handle(context.Background(), localapi.MethodStatus, nil)
-	if err != nil {
-		t.Fatalf("idle Windows Status error = %v", err)
-	}
-	status := result.(localapi.StatusResult)
-	if status.State != string(lifecycle.StateHostWaiting) || status.Pairing != nil || len(fallback.methods) != 1 {
-		t.Fatalf("idle Windows status=%#v methods=%v", status, fallback.methods)
+	if len(fallback.methods) != 0 {
+		t.Fatalf("Status delegated methods = %v, want pure lifecycle read", fallback.methods)
 	}
 }
 
