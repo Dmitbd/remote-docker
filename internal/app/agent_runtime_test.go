@@ -221,7 +221,7 @@ func TestPairingLifecycleReconcilerDiscoversWindowsRequestWithoutDesktopPolling(
 	if pairingState := machine.Snapshot().Pairing; pairingState == nil || pairingState.SessionID != "session-1" {
 		t.Fatalf("background pairing = %#v", pairingState)
 	}
-	if firstParams.SessionID != "" || firstParams.ObserveOnly {
+	if firstParams.SessionID != "" || !firstParams.ObserveOnly {
 		t.Fatalf("first background params = %#v", firstParams)
 	}
 }
@@ -243,22 +243,152 @@ func TestPairingLifecycleReconcilerCompletesMacPairingWithoutDesktopPolling(t *t
 	handler := localapi.HandlerFunc(func(_ context.Context, method localapi.Method, raw json.RawMessage) (any, error) {
 		var params localapi.PairSessionParams
 		if method != localapi.MethodPairStatus || json.Unmarshal(raw, &params) != nil ||
-			params.SessionID != "session-1" || params.ObserveOnly {
+			params.SessionID != "session-1" || !params.ObserveOnly {
 			t.Fatalf("Mac background poll = method %q params %#v", method, params)
 		}
 		return localapi.PairingStatusResult{
-			SessionID: "session-1", Status: string(pairing.SessionCompleted),
-			Peer:   localapi.LifecyclePeer{ID: "windows", Name: "Windows"},
-			Device: &localapi.Device{ID: "trusted-windows", Name: "Windows", Address: "192.168.1.20"},
+			SessionID: "session-1", Status: string(pairing.SessionApproved),
+			Peer: localapi.LifecyclePeer{ID: "windows", Name: "Windows"},
 		}, nil
 	})
-	if err := (&pairingLifecycleReconciler{machine: machine, handler: handler}).reconcile(context.Background()); err != nil {
+	completeCalls := 0
+	afterCompleteCalls := 0
+	reconciler := &pairingLifecycleReconciler{
+		machine: machine, handler: handler,
+		complete: func(context.Context, string) (localapi.PairingStatusResult, error) {
+			completeCalls++
+			return localapi.PairingStatusResult{
+				SessionID: "session-1", Status: string(pairing.SessionCompleted),
+				Peer:   localapi.LifecyclePeer{ID: "windows", Name: "Windows"},
+				Device: &localapi.Device{ID: "trusted-windows", Name: "Windows", Address: "192.168.1.20"},
+			}, nil
+		},
+		afterComplete: func() { afterCompleteCalls++ },
+	}
+	if err := reconciler.reconcile(context.Background()); err != nil {
 		t.Fatalf("reconcile completed Mac pairing: %v", err)
 	}
 	snapshot := machine.Snapshot()
-	if snapshot.State != lifecycle.StateConnecting || snapshot.Pairing != nil || snapshot.TrustedPeers != 1 ||
+	if completeCalls != 1 || afterCompleteCalls != 1 || snapshot.State != lifecycle.StateConnecting || snapshot.Pairing != nil || snapshot.TrustedPeers != 1 ||
 		snapshot.Peer == nil || snapshot.Peer.ID != "trusted-windows" {
-		t.Fatalf("completed Mac lifecycle = %#v", snapshot)
+		t.Fatalf("complete calls=%d after calls=%d Mac lifecycle=%#v", completeCalls, afterCompleteCalls, snapshot)
+	}
+}
+
+func TestPairingLifecycleReconcilerRollsBackCompletionWhenStopWinsLease(t *testing.T) {
+	for _, eventType := range []lifecycle.EventType{lifecycle.EventPauseRequested, lifecycle.EventQuitRequested} {
+		t.Run(string(eventType), func(t *testing.T) {
+			machine := newLifecycleMachine(t, lifecycle.RoleMacClient)
+			if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventSearchStarted}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &lifecycle.Pairing{
+				SessionID: "session-1", Peer: lifecycle.Peer{ID: "windows", Name: "Windows"}, Code: "123456",
+				Status: lifecycle.PairingPending, ExpiresAt: time.Now().Add(time.Minute),
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			handler := localapi.HandlerFunc(func(context.Context, localapi.Method, json.RawMessage) (any, error) {
+				return localapi.PairingStatusResult{
+					SessionID: "session-1", Status: string(pairing.SessionApproved),
+					Peer: localapi.LifecyclePeer{ID: "windows", Name: "Windows"},
+				}, nil
+			})
+			completionStarted := make(chan struct{})
+			releaseCompletion := make(chan struct{})
+			rolledBack := ""
+			rollbackContextErr := errors.New("rollback was not called")
+			afterCompleteCalls := 0
+			reconciler := &pairingLifecycleReconciler{
+				machine: machine, handler: handler,
+				complete: func(context.Context, string) (localapi.PairingStatusResult, error) {
+					close(completionStarted)
+					<-releaseCompletion
+					return localapi.PairingStatusResult{
+						SessionID: "session-1", Status: string(pairing.SessionCompleted),
+						Peer:   localapi.LifecyclePeer{ID: "windows", Name: "Windows"},
+						Device: &localapi.Device{ID: "trusted-windows", Name: "Windows"},
+					}, nil
+				},
+				rollback: func(rollbackCtx context.Context, deviceID string) error {
+					rolledBack = deviceID
+					rollbackContextErr = rollbackCtx.Err()
+					return nil
+				},
+				afterComplete: func() { afterCompleteCalls++ },
+			}
+			reconcileCtx, cancelReconcile := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- reconciler.reconcile(reconcileCtx) }()
+			waitForTestSignal(t, completionStarted, "protected pairing completion")
+			if _, err := machine.Apply(lifecycle.Event{Type: eventType}); err != nil {
+				t.Fatalf("stop while completion is pending: %v", err)
+			}
+			cancelReconcile()
+			close(releaseCompletion)
+			if err := waitForTestError(t, done, "pairing completion rollback"); err != nil {
+				t.Fatalf("reconcile after lost lease error = %v", err)
+			}
+			snapshot := machine.Snapshot()
+			if rolledBack != "trusted-windows" || rollbackContextErr != nil || afterCompleteCalls != 0 ||
+				snapshot.State != lifecycle.StateStopping || snapshot.TrustedPeers != 0 {
+				t.Fatalf("rollback=%q context error=%v after calls=%d lifecycle=%#v", rolledBack, rollbackContextErr, afterCompleteCalls, snapshot)
+			}
+		})
+	}
+}
+
+func TestPairingLifecycleReconcilerExpiresOfflineSessionLocally(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		nowOffset     time.Duration
+		wantCalls     int
+		wantAbandoned string
+		wantState     lifecycle.State
+		wantError     bool
+	}{
+		{name: "before expiry", nowOffset: -time.Second, wantCalls: 1, wantState: lifecycle.StatePairing, wantError: true},
+		{name: "after expiry", nowOffset: time.Second, wantAbandoned: "session-1", wantState: lifecycle.StateClientReady},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			machine := newLifecycleMachine(t, lifecycle.RoleMacClient)
+			if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventSearchStarted}); err != nil {
+				t.Fatal(err)
+			}
+			expiresAt := time.Now().Add(time.Minute)
+			if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &lifecycle.Pairing{
+				SessionID: "session-1", Peer: lifecycle.Peer{ID: "windows", Name: "Windows"}, Code: "123456",
+				Status: lifecycle.PairingPending, ExpiresAt: expiresAt,
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			statusCalls := 0
+			abandoned := ""
+			reconciler := &pairingLifecycleReconciler{
+				machine: machine,
+				handler: localapi.HandlerFunc(func(context.Context, localapi.Method, json.RawMessage) (any, error) {
+					statusCalls++
+					return nil, unavailable("peer is offline")
+				}),
+				now:     func() time.Time { return expiresAt.Add(test.nowOffset) },
+				abandon: func(sessionID string) { abandoned = sessionID },
+			}
+			err := reconciler.reconcile(context.Background())
+			if (err != nil) != test.wantError {
+				t.Fatalf("local expiry error = %v, wantError=%t", err, test.wantError)
+			}
+			snapshot := machine.Snapshot()
+			if statusCalls != test.wantCalls || abandoned != test.wantAbandoned || snapshot.State != test.wantState ||
+				(snapshot.Pairing != nil) != (test.wantState == lifecycle.StatePairing) {
+				t.Fatalf("status calls=%d abandoned=%q lifecycle=%#v", statusCalls, abandoned, snapshot)
+			}
+		})
 	}
 }
 
@@ -353,6 +483,42 @@ func TestAgentRuntimeStartAndStopOwnOneSessionLifecycle(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Done() did not report the completed session")
+	}
+}
+
+func TestAgentRuntimeStopAbandonsPendingPairingSecrets(t *testing.T) {
+	for _, reason := range []lifecycle.StopReason{lifecycle.StopPause, lifecycle.StopQuit} {
+		t.Run(string(reason), func(t *testing.T) {
+			machine := newLifecycleMachine(t, lifecycle.RoleMacClient)
+			if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventSearchStarted}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &lifecycle.Pairing{
+				SessionID: "session-1", Peer: lifecycle.Peer{ID: "windows", Name: "Windows"}, Code: "123456",
+				Status: lifecycle.PairingPending, ExpiresAt: time.Now().Add(time.Minute),
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			wait := make(chan struct{})
+			close(wait)
+			abandoned := ""
+			runtimeAgent := &AgentRuntime{
+				sessionCancel: func() {}, sessionWait: wait, sessionErr: context.Canceled,
+				pairingRuntime: &pairingLifecycleReconciler{
+					machine: machine,
+					abandon: func(sessionID string) { abandoned = sessionID },
+				},
+			}
+			if err := runtimeAgent.Stop(context.Background(), reason); err != nil {
+				t.Fatalf("Stop(%s) error = %v", reason, err)
+			}
+			if abandoned != "session-1" {
+				t.Fatalf("Stop(%s) abandoned session = %q", reason, abandoned)
+			}
+		})
 	}
 }
 
@@ -698,8 +864,9 @@ func TestMacPairingCoordinatorPersistsPinnedDeviceAndRevokesBeforeLocalRemoval(t
 		t.Fatalf("Docker context calls = %#v", docker.calls)
 	}
 
-	if err := coordinator.Unpair(context.Background(), confirmed.ID, false); err != nil {
-		t.Fatalf("Unpair() error = %v", err)
+	controller := &productionAgentController{pairing: coordinator}
+	if err := controller.rollbackCompletedPairing(context.Background(), confirmed.ID); err != nil {
+		t.Fatalf("rollbackCompletedPairing() error = %v", err)
 	}
 	if transport.revoked != device.ClientDeviceID {
 		t.Fatalf("remote revoked device = %q, want %q", transport.revoked, device.ClientDeviceID)

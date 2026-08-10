@@ -178,6 +178,28 @@ func TestApprovedPairingTerminalDecisionReturnsToRoleIdleState(t *testing.T) {
 	}
 }
 
+func TestApplyIfRevisionRejectsAStaleLifecycleLease(t *testing.T) {
+	machine := mustMachine(t, RoleMacClient)
+	initial := machine.Snapshot()
+	enabled := mustApply(t, machine, Event{Type: EventEnabled})
+
+	stale, applied, err := machine.ApplyIfRevision(initial.Revision, Event{Type: EventPauseRequested})
+	if err != nil {
+		t.Fatalf("ApplyIfRevision(stale) error = %v", err)
+	}
+	if applied || stale.Revision != enabled.Revision || stale.State != StateClientReady {
+		t.Fatalf("stale lease applied=%t snapshot=%#v", applied, stale)
+	}
+
+	paused, applied, err := machine.ApplyIfRevision(enabled.Revision, Event{Type: EventPauseRequested})
+	if err != nil {
+		t.Fatalf("ApplyIfRevision(current) error = %v", err)
+	}
+	if !applied || paused.State != StateStopping || paused.Revision != enabled.Revision+1 {
+		t.Fatalf("current lease applied=%t snapshot=%#v", applied, paused)
+	}
+}
+
 func TestPairingProblemNeverHidesPendingSession(t *testing.T) {
 	pairing := Pairing{
 		SessionID: "session-1", Peer: Peer{ID: "windows", Name: "Windows"},

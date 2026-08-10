@@ -70,21 +70,25 @@ type localSyncLifecycle interface {
 // AgentRuntime owns the concrete controller, health observer, pairing host,
 // SSH child, Docker event reconciler, and relay state for one background agent.
 type AgentRuntime struct {
-	agent          *Agent
-	store          config.Store
-	sshConfigPath  string
-	restorer       *infrastructureRestorer
-	pairHost       *windowsPairingHost
-	ssh            *managedSSHRuntime
-	localSync      localSyncLifecycle
-	windowsBridge  localSyncLifecycle
-	tunnelClient   localSyncLifecycle
-	tunnelReady    *atomic.Bool
-	windowsStopper managedWindowsRuntimeStopper
-	connection     connectionSessionRuntime
-	pairingHandler localapi.Handler
-	pairingRuntime *pairingLifecycleReconciler
-	startupRecover func(context.Context) error
+	agent           *Agent
+	store           config.Store
+	sshConfigPath   string
+	restorer        *infrastructureRestorer
+	pairHost        *windowsPairingHost
+	ssh             *managedSSHRuntime
+	localSync       localSyncLifecycle
+	windowsBridge   localSyncLifecycle
+	tunnelClient    localSyncLifecycle
+	tunnelReady     *atomic.Bool
+	windowsStopper  managedWindowsRuntimeStopper
+	connection      connectionSessionRuntime
+	pairingHandler  localapi.Handler
+	pairingComplete func(context.Context, string) (localapi.PairingStatusResult, error)
+	pairingRollback func(context.Context, string) error
+	pairingAbandon  func(string)
+	pairingAfter    func()
+	pairingRuntime  *pairingLifecycleReconciler
+	startupRecover  func(context.Context) error
 
 	sessionMu      sync.Mutex
 	sessionCancel  context.CancelFunc
@@ -335,10 +339,14 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 	return &AgentRuntime{
 		agent: agent, store: store, sshConfigPath: sshConfigPath,
 		restorer: restorer, pairHost: pairHost, ssh: sshRuntime, localSync: localSync,
-		windowsBridge:  windowsBridge,
-		tunnelClient:   tunnelClient,
-		tunnelReady:    tunnelReady,
-		pairingHandler: controller,
+		windowsBridge:   windowsBridge,
+		tunnelClient:    tunnelClient,
+		tunnelReady:     tunnelReady,
+		pairingHandler:  controller,
+		pairingComplete: controller.completePairing,
+		pairingRollback: controller.rollbackCompletedPairing,
+		pairingAbandon:  controller.abandonPairing,
+		pairingAfter:    controller.notifyPairingCompleted,
 		windowsStopper: func() managedWindowsRuntimeStopper {
 			if runtime.GOOS == "windows" {
 				return windowsbridge.ManagedWSLOperations{}
@@ -378,7 +386,11 @@ func (r *AgentRuntime) BindLifecycle(machine *lifecycle.Machine, appVersion stri
 		return errors.New("production lifecycle role is invalid")
 	}
 	if r.pairingHandler != nil {
-		r.pairingRuntime = &pairingLifecycleReconciler{machine: machine, handler: r.pairingHandler}
+		r.pairingRuntime = &pairingLifecycleReconciler{
+			machine: machine, handler: r.pairingHandler,
+			complete: r.pairingComplete, rollback: r.pairingRollback,
+			abandon: r.pairingAbandon, afterComplete: r.pairingAfter,
+		}
 	}
 	if snapshot.Role == lifecycle.RoleWindowsHost {
 		host, err := newHostConnectionRuntime(machine, windowsbridge.ManagedWSLOperations{}, time.Now)
@@ -487,6 +499,9 @@ func (r *AgentRuntime) Stop(ctx context.Context, reason lifecycle.StopReason) er
 		presenceErr = connection.Stop(ctx, reason)
 	}
 	cancel()
+	if r.pairingRuntime != nil {
+		r.pairingRuntime.abandonCurrent()
+	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -633,8 +648,13 @@ func (r *AgentRuntime) Run(ctx context.Context, interval time.Duration) error {
 }
 
 type pairingLifecycleReconciler struct {
-	machine *lifecycle.Machine
-	handler localapi.Handler
+	machine       *lifecycle.Machine
+	handler       localapi.Handler
+	complete      func(context.Context, string) (localapi.PairingStatusResult, error)
+	rollback      func(context.Context, string) error
+	abandon       func(string)
+	afterComplete func()
+	now           func() time.Time
 }
 
 func (r *pairingLifecycleReconciler) Run(ctx context.Context, interval time.Duration) error {
@@ -646,6 +666,9 @@ func (r *pairingLifecycleReconciler) Run(ctx context.Context, interval time.Dura
 	}
 	for {
 		if err := r.reconcile(ctx); err != nil && ctx.Err() != nil {
+			if !errors.Is(err, context.Canceled) {
+				return err
+			}
 			return ctx.Err()
 		}
 		timer := time.NewTimer(interval)
@@ -665,6 +688,9 @@ func (r *pairingLifecycleReconciler) reconcile(ctx context.Context) error {
 		return errors.New("pairing lifecycle reconciler is incomplete")
 	}
 	snapshot := r.machine.Snapshot()
+	if expired, err := r.expireIfDue(snapshot); expired || err != nil {
+		return err
+	}
 	params, ok := pairingReconciliationParams(snapshot)
 	if !ok {
 		return nil
@@ -672,6 +698,9 @@ func (r *pairingLifecycleReconciler) reconcile(ctx context.Context) error {
 	raw, _ := json.Marshal(params)
 	result, err := r.handler.Handle(ctx, localapi.MethodPairStatus, raw)
 	if err != nil {
+		if expired, expiryErr := r.expireIfDue(r.machine.Snapshot()); expired || expiryErr != nil {
+			return expiryErr
+		}
 		return err
 	}
 	status, ok := result.(localapi.PairingStatusResult)
@@ -687,20 +716,172 @@ func (r *pairingLifecycleReconciler) reconcile(ctx context.Context) error {
 	if r.machine.Snapshot().Revision != snapshot.Revision {
 		return nil
 	}
-	return reconcilePairingLifecycle(r.machine, status)
+	updated, err := r.applyObserved(snapshot, status)
+	if err != nil || updated.Pairing == nil || updated.Role != lifecycle.RoleMacClient ||
+		updated.Pairing.Status != lifecycle.PairingApproved {
+		return err
+	}
+	return r.completeApproved(ctx, updated)
 }
 
 func pairingReconciliationParams(snapshot lifecycle.Snapshot) (localapi.PairSessionParams, bool) {
 	if snapshot.Pairing != nil {
 		return localapi.PairSessionParams{
 			SessionID:   snapshot.Pairing.SessionID,
-			ObserveOnly: snapshot.State == lifecycle.StatePairingCancellationPending,
+			ObserveOnly: true,
 		}, true
 	}
 	if snapshot.Role == lifecycle.RoleWindowsHost && snapshot.State == lifecycle.StateHostWaiting && snapshot.TrustedPeers == 0 {
-		return localapi.PairSessionParams{}, true
+		return localapi.PairSessionParams{ObserveOnly: true}, true
 	}
 	return localapi.PairSessionParams{}, false
+}
+
+func (r *pairingLifecycleReconciler) applyObserved(snapshot lifecycle.Snapshot, status localapi.PairingStatusResult) (lifecycle.Snapshot, error) {
+	if snapshot.Pairing == nil {
+		if status.Status != string(lifecycle.PairingPending) && status.Status != string(lifecycle.PairingApproved) {
+			return snapshot, nil
+		}
+		pairingState, err := pairingFromStart(localapi.PairStartResult{
+			SessionID: status.SessionID, Code: status.Code, Peer: status.Peer, ExpiresAt: status.ExpiresAt,
+		})
+		if err != nil {
+			return snapshot, err
+		}
+		updated, applied, err := r.machine.ApplyIfRevision(snapshot.Revision, lifecycle.Event{
+			Type: lifecycle.EventPairingStarted, Pairing: &pairingState,
+		})
+		if err != nil || !applied {
+			return updated, err
+		}
+		snapshot = updated
+	}
+	if snapshot.Pairing == nil || snapshot.Pairing.SessionID != status.SessionID {
+		return snapshot, nil
+	}
+	if snapshot.State == lifecycle.StatePairingCancellationPending {
+		switch status.Status {
+		case string(pairing.SessionCancelled):
+			return r.applyObservedEvent(snapshot, lifecycle.EventPairingCancelled, nil)
+		case string(lifecycle.PairingRejected):
+			return r.applyObservedEvent(snapshot, lifecycle.EventPairingRejected, nil)
+		case string(lifecycle.PairingExpired):
+			return r.applyObservedEvent(snapshot, lifecycle.EventPairingExpired, nil)
+		default:
+			return snapshot, nil
+		}
+	}
+
+	switch status.Status {
+	case string(lifecycle.PairingPending):
+		return snapshot, nil
+	case string(lifecycle.PairingApproved), string(pairing.SessionCompleted):
+		if snapshot.Pairing.Status == lifecycle.PairingPending {
+			updated, err := r.applyObservedEvent(snapshot, lifecycle.EventPairingApproved, nil)
+			if err != nil || updated.Revision == snapshot.Revision {
+				return updated, err
+			}
+			snapshot = updated
+		}
+		if snapshot.Role == lifecycle.RoleWindowsHost && status.Status == string(pairing.SessionCompleted) {
+			if status.Device == nil || strings.TrimSpace(status.Device.ID) == "" {
+				return snapshot, unavailable("completed pairing did not return a trusted device")
+			}
+			peer := peerFromLocalAPI(status.Peer)
+			peer.ID = status.Device.ID
+			peer.Name = status.Device.Name
+			peer.Address = status.Device.Address
+			return r.applyObservedEvent(snapshot, lifecycle.EventPairingCompleted, &peer)
+		}
+		return snapshot, nil
+	case string(lifecycle.PairingRejected):
+		return r.applyObservedEvent(snapshot, lifecycle.EventPairingRejected, nil)
+	case string(pairing.SessionCancelled):
+		return r.applyObservedEvent(snapshot, lifecycle.EventPairingCancelled, nil)
+	case string(lifecycle.PairingExpired):
+		return r.applyObservedEvent(snapshot, lifecycle.EventPairingExpired, nil)
+	default:
+		return snapshot, unavailable("pairing returned an unknown state")
+	}
+}
+
+func (r *pairingLifecycleReconciler) applyObservedEvent(
+	snapshot lifecycle.Snapshot,
+	eventType lifecycle.EventType,
+	peer *lifecycle.Peer,
+) (lifecycle.Snapshot, error) {
+	updated, applied, err := r.machine.ApplyIfRevision(snapshot.Revision, lifecycle.Event{Type: eventType, Peer: peer})
+	if err != nil || !applied {
+		return updated, err
+	}
+	return updated, nil
+}
+
+func (r *pairingLifecycleReconciler) completeApproved(ctx context.Context, snapshot lifecycle.Snapshot) error {
+	if r.complete == nil || snapshot.Pairing == nil {
+		return nil
+	}
+	status, err := r.complete(ctx, snapshot.Pairing.SessionID)
+	if err != nil {
+		return err
+	}
+	if status.Status != string(pairing.SessionCompleted) || status.Device == nil || strings.TrimSpace(status.Device.ID) == "" {
+		return unavailable("pairing completion did not return a trusted device")
+	}
+	peer := peerFromLocalAPI(status.Peer)
+	peer.ID = status.Device.ID
+	peer.Name = status.Device.Name
+	peer.Address = status.Device.Address
+	_, applied, applyErr := r.machine.ApplyIfRevision(snapshot.Revision, lifecycle.Event{
+		Type: lifecycle.EventPairingCompleted, Peer: &peer,
+	})
+	if applyErr != nil || !applied {
+		return errors.Join(applyErr, r.rollbackCompleted(status.Device.ID))
+	}
+	if r.afterComplete != nil {
+		r.afterComplete()
+	}
+	return nil
+}
+
+func (r *pairingLifecycleReconciler) rollbackCompleted(deviceID string) error {
+	if r.rollback == nil {
+		return unavailable("stale pairing completion cannot be rolled back")
+	}
+	rollbackCtx, cancel := context.WithTimeout(context.Background(), pairingRollbackTimeout)
+	defer cancel()
+	return r.rollback(rollbackCtx, deviceID)
+}
+
+func (r *pairingLifecycleReconciler) expireIfDue(snapshot lifecycle.Snapshot) (bool, error) {
+	if snapshot.Pairing == nil || snapshot.Pairing.ExpiresAt.IsZero() || r.currentTime().Before(snapshot.Pairing.ExpiresAt) {
+		return false, nil
+	}
+	sessionID := snapshot.Pairing.SessionID
+	_, applied, err := r.machine.ApplyIfRevision(snapshot.Revision, lifecycle.Event{Type: lifecycle.EventPairingExpired})
+	if err != nil || !applied {
+		return false, err
+	}
+	if r.abandon != nil {
+		r.abandon(sessionID)
+	}
+	return true, nil
+}
+
+func (r *pairingLifecycleReconciler) abandonCurrent() {
+	if r == nil || r.machine == nil || r.abandon == nil {
+		return
+	}
+	if snapshot := r.machine.Snapshot(); snapshot.Pairing != nil {
+		r.abandon(snapshot.Pairing.SessionID)
+	}
+}
+
+func (r *pairingLifecycleReconciler) currentTime() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
 }
 
 type tunnelClientLifecycle struct {
@@ -836,6 +1017,29 @@ func (c *productionAgentController) abandonPairing(sessionID string) {
 	}
 	if cleaner, ok := c.pairing.(interface{ Abandon(string) }); ok {
 		cleaner.Abandon(sessionID)
+	}
+}
+
+func (c *productionAgentController) completePairing(ctx context.Context, sessionID string) (localapi.PairingStatusResult, error) {
+	if c == nil || c.pairing == nil {
+		return localapi.PairingStatusResult{}, unavailable("pairing infrastructure is unavailable")
+	}
+	return c.pairing.Status(ctx, sessionID)
+}
+
+func (c *productionAgentController) rollbackCompletedPairing(ctx context.Context, deviceID string) error {
+	if c == nil || c.pairing == nil {
+		return unavailable("pairing rollback is unavailable")
+	}
+	if err := c.pairing.Unpair(ctx, deviceID, false); err == nil {
+		return nil
+	}
+	return c.pairing.Unpair(ctx, deviceID, true)
+}
+
+func (c *productionAgentController) notifyPairingCompleted() {
+	if c != nil && c.afterPair != nil {
+		go c.afterPair(context.Background())
 	}
 }
 

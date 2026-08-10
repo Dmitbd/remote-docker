@@ -208,7 +208,25 @@ func (m *Machine) Apply(event Event) (Snapshot, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.applyAndPublishLocked(event)
+}
 
+// ApplyIfRevision applies an event only while the caller still owns the exact
+// lifecycle snapshot it observed before starting asynchronous work.
+func (m *Machine) ApplyIfRevision(expected uint64, event Event) (Snapshot, bool, error) {
+	if m == nil {
+		return Snapshot{}, false, errors.New("lifecycle machine is nil")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.snapshot.Revision != expected {
+		return m.snapshot.Clone(), false, nil
+	}
+	current, err := m.applyAndPublishLocked(event)
+	return current, err == nil, err
+}
+
+func (m *Machine) applyAndPublishLocked(event Event) (Snapshot, error) {
 	if m.snapshot.Terminal && event.Type != EventStopCompleted {
 		return m.snapshot.Clone(), m.transitionError(event, "application shutdown is already in progress")
 	}
