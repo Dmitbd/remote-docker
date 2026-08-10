@@ -116,6 +116,8 @@ func migrate(cfg Config) (Config, Migration, error) {
 		if cfg.ActiveDevice == "" {
 			cfg.Devices = nil
 		}
+	}
+	if cfg.SchemaVersion < CurrentSchemaVersion {
 		cfg.SchemaVersion = CurrentSchemaVersion
 	}
 	if err := validate(cfg); err != nil {

@@ -36,6 +36,7 @@ import (
 	"github.com/Dmitbd/remote-docker/internal/sshtransport"
 	"github.com/Dmitbd/remote-docker/internal/syncer"
 	"github.com/Dmitbd/remote-docker/internal/systemtransport"
+	"github.com/Dmitbd/remote-docker/internal/tunnel"
 	"github.com/Dmitbd/remote-docker/internal/windowsbridge"
 	"github.com/Dmitbd/remote-docker/internal/workspace"
 	"golang.org/x/crypto/ssh"
@@ -141,7 +142,11 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 	if runtime.GOOS == "windows" {
 		installer := provision.WSLPairingInstaller{}
 		registry := windowsPairingRegistry{store: store, configTransactions: configTransactions}
-		host, err := newWindowsPairingHostWithRegistry(installer, registry)
+		identity, identityErr := tunnel.LoadOrCreateIdentity(secrets, tunnel.WindowsIdentityOwner)
+		if identityErr != nil {
+			return nil, identityErr
+		}
+		host, err := newWindowsPairingHostWithRegistryAndIdentity(installer, registry, identity)
 		if err != nil {
 			return nil, err
 		}
@@ -1249,13 +1254,19 @@ func newWindowsPairingHost(installer pairing.Installer) (*windowsPairingHost, er
 }
 
 func newWindowsPairingHostWithRegistry(installer pairing.Installer, registry windowsPairingRegistry) (*windowsPairingHost, error) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	return newWindowsPairingHostWithRegistryAndIdentity(installer, registry, tunnel.Identity{
+		PrivateKey: privateKey, PublicKey: publicKey,
+	})
+}
+
+func newWindowsPairingHostWithRegistryAndIdentity(installer pairing.Installer, registry windowsPairingRegistry, identity tunnel.Identity) (*windowsPairingHost, error) {
 	deviceName, err := os.Hostname()
 	if err != nil || strings.TrimSpace(deviceName) == "" {
 		return nil, errors.New("find Windows device name")
-	}
-	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, err
 	}
 	options := []pairing.ServerOption{
 		pairing.WithInstaller(installer),
@@ -1268,7 +1279,7 @@ func newWindowsPairingHostWithRegistry(installer pairing.Installer, registry win
 		)
 	}
 	server, err := pairing.NewServer(
-		pairing.ServerIdentity{PrivateKey: privateKey},
+		pairing.ServerIdentity{PrivateKey: append(ed25519.PrivateKey(nil), identity.PrivateKey...)},
 		options...,
 	)
 	if err != nil {

@@ -28,6 +28,7 @@ import (
 	"github.com/Dmitbd/remote-docker/internal/pairing"
 	"github.com/Dmitbd/remote-docker/internal/portrelay"
 	"github.com/Dmitbd/remote-docker/internal/sshtransport"
+	"github.com/Dmitbd/remote-docker/internal/tunnel"
 	"github.com/Dmitbd/remote-docker/internal/windowsbridge"
 	"golang.org/x/crypto/ssh"
 )
@@ -1588,6 +1589,8 @@ func (t *runtimePairingTransport) Confirm(_ context.Context, _ pairingTarget, de
 		DeviceID: clientDeviceID, AuthorizedKeys: []string{authorizedKey},
 		SSHHostPublicKey: t.hostKey, SyncthingDeviceID: "WINDOWS-SYNC",
 		SSHPort: 49222, SyncthingPort: 49220,
+		TunnelPublicKey: append(ed25519.PublicKey(nil), descriptor.ServerPublicKey...),
+		TunnelPort: tunnel.TunnelPort, TransportVersion: tunnel.CurrentTransportVersion,
 	}, nil
 }
 

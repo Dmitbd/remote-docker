@@ -1,6 +1,6 @@
 package config
 
-const CurrentSchemaVersion = 2
+const CurrentSchemaVersion = 3
 
 // Config contains non-secret application settings.
 type Config struct {
@@ -21,6 +21,9 @@ type Device struct {
 	SSHHostPublicKey  string `json:"sshHostPublicKey,omitempty"`
 	SyncthingDeviceID string `json:"syncthingDeviceId,omitempty"`
 	ClientDeviceID    string `json:"clientDeviceId,omitempty"`
+	TunnelPort          int    `json:"tunnelPort,omitempty"`
+	TunnelPeerPublicKey string `json:"tunnelPeerPublicKey,omitempty"`
+	TransportVersion    int    `json:"transportVersion,omitempty"`
 }
 
 // Workspace is the persisted public registration used by bind-mount policy.

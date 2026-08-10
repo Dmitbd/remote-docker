@@ -108,6 +108,11 @@ type DeviceInfo struct {
 	SyncthingPort     int    `json:"syncthing_port"`
 }
 
+type TrustedPeer struct {
+	DeviceID string
+	PublicKey ed25519.PublicKey
+}
+
 // DeviceRecord is the public result of a successful pairing.
 type DeviceRecord struct {
 	DeviceID          string   `json:"device_id"`
@@ -116,6 +121,9 @@ type DeviceRecord struct {
 	SyncthingDeviceID string   `json:"syncthing_device_id"`
 	SSHPort           int      `json:"ssh_port"`
 	SyncthingPort     int      `json:"syncthing_port"`
+	TunnelPublicKey   ed25519.PublicKey `json:"tunnel_public_key"`
+	TunnelPort        int      `json:"tunnel_port"`
+	TransportVersion  int      `json:"transport_version"`
 }
 
 // Code calculates the six-digit out-of-band comparison code.

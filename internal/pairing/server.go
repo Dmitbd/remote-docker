@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dmitbd/remote-docker/internal/tunnel"
 )
 
 const (
@@ -55,7 +57,7 @@ type Server struct {
 	device       DeviceInfo
 	installer    Installer
 	sessionGuard func(context.Context) error
-	afterInstall func(context.Context, string) error
+	afterInstall func(context.Context, TrustedPeer) error
 	now          func() time.Time
 	random       io.Reader
 	active       *sessionState
@@ -98,7 +100,7 @@ func WithSessionGuard(guard func(context.Context) error) ServerOption {
 
 // WithAfterInstall persists public trust metadata after the managed WSL key is
 // installed. A failure revokes that exact key and keeps the session retryable.
-func WithAfterInstall(afterInstall func(context.Context, string) error) ServerOption {
+func WithAfterInstall(afterInstall func(context.Context, TrustedPeer) error) ServerOption {
 	return func(server *Server) {
 		server.afterInstall = afterInstall
 	}
@@ -431,7 +433,8 @@ func (s *Server) confirm(ctx context.Context, request confirmRequest) (DeviceRec
 		}
 	}
 	if s.afterInstall != nil {
-		if err := s.afterInstall(ctx, request.DeviceID); err != nil {
+		peer := TrustedPeer{DeviceID: request.DeviceID, PublicKey: append(ed25519.PublicKey(nil), session.descriptor.ClientPublicKey...)}
+		if err := s.afterInstall(ctx, peer); err != nil {
 			if s.installer != nil {
 				_ = s.installer.Revoke(ctx, request.DeviceID)
 			}
@@ -445,6 +448,9 @@ func (s *Server) confirm(ctx context.Context, request confirmRequest) (DeviceRec
 		SyncthingDeviceID: device.SyncthingDeviceID,
 		SSHPort:           device.SSHPort,
 		SyncthingPort:     device.SyncthingPort,
+		TunnelPublicKey:   s.identity.PublicKey(),
+		TunnelPort:        tunnel.TunnelPort,
+		TransportVersion:  tunnel.CurrentTransportVersion,
 	}
 	s.finishLocked(SessionCompleted, http.StatusConflict, request.DeviceID)
 	return record, http.StatusOK, ""
