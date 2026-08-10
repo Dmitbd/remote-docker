@@ -181,9 +181,12 @@ type ResourceStatusParams struct {
 type ResourceStatusResult = metrics.Sample
 
 type Device struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Address string `json:"address,omitempty"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Address   string `json:"address,omitempty"`
+	Role      string `json:"role,omitempty"`
+	Trusted   bool   `json:"trusted,omitempty"`
+	Available bool   `json:"available,omitempty"`
 }
 
 type ListDevicesResult struct {
@@ -266,6 +269,7 @@ type UnpairParams struct {
 
 type Workspace struct {
 	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
 	Path string `json:"path"`
 }
 
@@ -285,6 +289,8 @@ type SyncFolderStatus struct {
 	WorkspaceID string `json:"workspace_id"`
 	State       string `json:"state"`
 	Connected   bool   `json:"connected"`
+	LastSuccess string `json:"last_success,omitempty"`
+	Message     string `json:"message,omitempty"`
 }
 
 type SyncStatusResult struct {
@@ -318,7 +324,9 @@ type PrepareDockerResult struct {
 type DoctorCheck struct {
 	Name    string `json:"name"`
 	OK      bool   `json:"ok"`
+	Status  string `json:"status,omitempty"`
 	Message string `json:"message,omitempty"`
+	Action  string `json:"action,omitempty"`
 }
 
 type DoctorResult struct {

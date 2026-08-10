@@ -148,6 +148,18 @@ func TestResourceRoleLabelsExplainWhereDockerRuns(t *testing.T) {
 	}
 }
 
+func TestViewActionsExposeFinitePendingLabels(t *testing.T) {
+	for _, id := range []ActionID{
+		ActionEnableClient, ActionStartSearch, ActionConnect, ActionApprovePair,
+		ActionPause, ActionDisconnect, ActionForgetDevice, ActionAddWorkspace,
+		ActionDiagnostics, ActionQuit,
+	} {
+		if label := pendingActionLabel(id); label == "" {
+			t.Fatalf("pendingActionLabel(%q) is empty", id)
+		}
+	}
+}
+
 func TestBuildDeviceRowsShowsActionsByDeviceKind(t *testing.T) {
 	newDevice := localapi.PairingCandidate{ID: "new", Name: "New Windows", Available: true, Unverified: true}
 	savedAvailable := localapi.PairingCandidate{ID: "saved", Name: "Saved Windows", Trusted: true, Available: true}
@@ -160,7 +172,7 @@ func TestBuildDeviceRowsShowsActionsByDeviceKind(t *testing.T) {
 		t.Fatalf("row order = %#v", got)
 	}
 	if got := deviceRowByID(t, rows, "new"); got.Status != "Новое устройство" || got.Kind != "new" ||
-		!reflect.DeepEqual(got.Actions, []Action{{ID: ActionConnect, Label: "Подключиться", Enabled: false}}) {
+		!reflect.DeepEqual(got.Actions, []Action{viewAction(ActionConnect, "Подключиться", false, false)}) {
 		t.Fatalf("new row = %#v", got)
 	}
 	searching := BuildDeviceRows(lifecycle.Snapshot{State: lifecycle.StateSearching}, []localapi.PairingCandidate{newDevice})
@@ -170,14 +182,14 @@ func TestBuildDeviceRowsShowsActionsByDeviceKind(t *testing.T) {
 	if got := deviceRowByID(t, rows, "saved"); got.Status != "Сохранено · доступно" || got.Kind != "saved" ||
 		!reflect.DeepEqual(got.Actions, []Action{
 			enabledAction(ActionConnectTrusted, "Подключиться"),
-			{ID: ActionForgetDevice, Label: "Забыть", Enabled: true, Destructive: true},
+			viewAction(ActionForgetDevice, "Забыть", true, true),
 		}) {
 		t.Fatalf("saved available row = %#v", got)
 	}
 	if got := deviceRowByID(t, rows, "offline"); got.Status != "Сохранено · недоступно" || got.Kind != "saved" ||
 		!reflect.DeepEqual(got.Actions, []Action{
-			{ID: ActionConnectTrusted, Label: "Подключиться", Enabled: false},
-			{ID: ActionForgetDevice, Label: "Забыть", Enabled: true, Destructive: true},
+			viewAction(ActionConnectTrusted, "Подключиться", false, false),
+			viewAction(ActionForgetDevice, "Забыть", true, true),
 		}) {
 		t.Fatalf("saved unavailable row = %#v", got)
 	}
