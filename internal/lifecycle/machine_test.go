@@ -155,6 +155,27 @@ func TestPairingProblemNeverHidesPendingSession(t *testing.T) {
 	})
 }
 
+func TestPairingCompletionPreservesRuntimeProblemAndStopsServices(t *testing.T) {
+	machine := mustMachine(t, RoleMacClient)
+	mustApply(t, machine, Event{Type: EventEnabled})
+	mustApply(t, machine, Event{Type: EventSearchStarted})
+	pairing := Pairing{
+		SessionID: "session", Peer: Peer{ID: "windows", Name: "Windows"},
+		Code: "123456", Status: PairingPending, ExpiresAt: time.Now().Add(time.Minute),
+	}
+	mustApply(t, machine, Event{Type: EventPairingStarted, Pairing: &pairing})
+	mustApply(t, machine, Event{Type: EventPairingApproved})
+	problem := &Problem{Code: "runtime_stopped", Message: "Runtime stopped"}
+	mustApply(t, machine, Event{Type: EventProblemDetected, Problem: problem})
+
+	completed := mustApply(t, machine, Event{Type: EventPairingCompleted, Peer: &pairing.Peer})
+	if completed.State != StateNeedsAction || completed.Pairing != nil || completed.Problem == nil ||
+		completed.Problem.Code != problem.Code || completed.TrustedPeers != 1 || completed.Peer == nil ||
+		completed.Peer.ID != pairing.Peer.ID || completed.Docker.State != ServiceStopped || completed.Sync.State != ServiceStopped {
+		t.Fatalf("problem pairing completion = %#v", completed)
+	}
+}
+
 func TestPairingTerminalDecisionIsObservedOnEitherDevice(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
@@ -358,6 +379,39 @@ func TestForgetReservationBlocksTransitionsUntilCancelled(t *testing.T) {
 	}
 	if !machine.Allowed(CommandConnect) || !machine.Allowed(CommandForget) {
 		t.Fatal("cancelled reservation did not restore trusted actions")
+	}
+}
+
+func TestForgetReservationDefersProblemUntilCommitOrRollback(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		finish    EventType
+		wantTrust int
+		wantPeer  bool
+	}{
+		{name: "committed cleanup", finish: EventTrustForgotten, wantTrust: 0, wantPeer: false},
+		{name: "rolled back cleanup", finish: EventTrustForgetCancelled, wantTrust: 1, wantPeer: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			machine, err := NewMachine(RoleMacClient, "MacBook", WithTrustedPeer(Peer{ID: "windows", Name: "Windows"}))
+			if err != nil {
+				t.Fatalf("NewMachine() error = %v", err)
+			}
+			mustApply(t, machine, Event{Type: EventEnabled})
+			mustApply(t, machine, Event{Type: EventTrustForgetStarted, Peer: &Peer{ID: "windows"}})
+			problem := &Problem{Code: "runtime_stopped", Message: "Runtime stopped"}
+			deferred := mustApply(t, machine, Event{Type: EventProblemDetected, Problem: problem})
+			if deferred.State != StateClientReady || deferred.Problem == nil || !deferred.ActionInProgress {
+				t.Fatalf("deferred problem snapshot = %#v", deferred)
+			}
+
+			finished := mustApply(t, machine, Event{Type: tt.finish})
+			if finished.State != StateNeedsAction || finished.Problem == nil || finished.ActionInProgress ||
+				finished.TrustedPeers != tt.wantTrust || (finished.Peer != nil) != tt.wantPeer ||
+				finished.Docker.State != ServiceStopped || finished.Sync.State != ServiceStopped {
+				t.Fatalf("finished cleanup with problem = %#v", finished)
+			}
+		})
 	}
 }
 

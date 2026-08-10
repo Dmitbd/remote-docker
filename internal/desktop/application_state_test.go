@@ -78,7 +78,7 @@ func TestForgetUsesRemoteRevokeBeforeLocalCleanup(t *testing.T) {
 }
 
 func TestUnavailableRemoteOffersExplicitLocalForget(t *testing.T) {
-	handler := &confirmationRecordingHandler{forgetError: &localapi.RemoteError{Code: localapi.ErrorUnavailable}}
+	handler := &confirmationRecordingHandler{forgetError: &localapi.RemoteError{Code: localapi.ErrorRemoteRevokeUnavailable}}
 	application, confirm := newConfirmationApplication(handler, snapshotProvider(&lifecycle.Snapshot{}))
 
 	application.showForgetConfirmation(DeviceRow{ID: "saved-windows", Name: "Saved Windows"})
@@ -156,7 +156,7 @@ func TestReplaceLocalOnlyFallbackRequiresSecondConfirmation(t *testing.T) {
 		State: lifecycle.StateSearching, TrustedPeers: 1, ConnectionLimit: 1,
 		Peer: &lifecycle.Peer{ID: "saved-windows", Name: "Saved Windows"},
 	}
-	handler := &confirmationRecordingHandler{replaceError: &localapi.RemoteError{Code: localapi.ErrorUnavailable}}
+	handler := &confirmationRecordingHandler{replaceError: &localapi.RemoteError{Code: localapi.ErrorRemoteRevokeUnavailable}}
 	application, confirm := newConfirmationApplication(handler, snapshotProvider(&snapshot))
 
 	application.showReplaceConfirmation(DeviceRow{ID: "new-windows", Name: "New Windows"})
@@ -176,6 +176,37 @@ func TestReplaceLocalOnlyFallbackRequiresSecondConfirmation(t *testing.T) {
 	calls := handler.WaitForCalls(t, 2)
 	if !calls[1].Replace.LocalOnly || calls[1].Replace.OldDeviceID != "saved-windows" || calls[1].Replace.NewDevice != "new-windows" {
 		t.Fatalf("local-only replacement = %#v", calls[1])
+	}
+}
+
+func TestReplaceDoesNotOfferLocalOnlyForNonRevokeFailure(t *testing.T) {
+	snapshot := lifecycle.Snapshot{
+		State: lifecycle.StateSearching, TrustedPeers: 1, ConnectionLimit: 1,
+		Peer: &lifecycle.Peer{ID: "saved-windows", Name: "Saved Windows"},
+	}
+	handler := &confirmationRecordingHandler{replaceError: &localapi.RemoteError{Code: localapi.ErrorUnavailable}}
+	application, confirm := newConfirmationApplication(handler, snapshotProvider(&snapshot))
+
+	application.showReplaceConfirmation(DeviceRow{ID: "new-windows", Name: "New Windows"})
+	(<-confirm)(true)
+	handler.WaitForCalls(t, 1)
+	deadline := time.After(time.Second)
+	for application.isActionBusy() {
+		select {
+		case <-deadline:
+			t.Fatal("replacement failure did not complete the action")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	select {
+	case unexpected := <-confirm:
+		unexpected(false)
+		t.Fatal("non-revoke failure offered local-only replacement")
+	default:
+	}
+	if application.actionError == "" {
+		t.Fatal("non-revoke replacement failure did not show a safe error")
 	}
 }
 

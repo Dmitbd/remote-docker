@@ -504,7 +504,7 @@ func (a *Application) replaceDevice(oldRow, newRow DeviceRow) {
 func (a *Application) continueReplace(sequence uint64, oldRow, newRow DeviceRow, localOnly bool) {
 	go func() {
 		err := a.controller.ReplaceDevice(context.Background(), oldRow.ID, newRow.ID, localOnly)
-		if err != nil && !localOnly && remoteUnavailable(err) {
+		if err != nil && !localOnly && remoteRevokeUnavailable(err) {
 			a.offerLocalReplaceConfirmation(oldRow, newRow, sequence, err)
 			return
 		}
@@ -541,7 +541,7 @@ func (a *Application) offerLocalReplaceConfirmation(oldRow, newRow DeviceRow, se
 func (a *Application) continueForget(sequence uint64, row DeviceRow, localOnly bool, after func() error) {
 	go func() {
 		err := a.controller.ForgetDevice(context.Background(), row.ID, localOnly)
-		if err != nil && !localOnly && remoteUnavailable(err) {
+		if err != nil && !localOnly && remoteRevokeUnavailable(err) {
 			a.offerLocalForgetConfirmation(row, after, sequence, err)
 			return
 		}
@@ -632,13 +632,13 @@ func safeActionMessage(err error) string {
 	return "Не удалось выполнить действие. Попробуйте снова."
 }
 
-func remoteUnavailable(err error) bool {
+func remoteRevokeUnavailable(err error) bool {
 	var public *localapi.PublicError
-	if errors.As(err, &public) && public.Code == localapi.ErrorUnavailable {
+	if errors.As(err, &public) && public.Code == localapi.ErrorRemoteRevokeUnavailable {
 		return true
 	}
 	var remote *localapi.RemoteError
-	return errors.As(err, &remote) && remote.Code == localapi.ErrorUnavailable
+	return errors.As(err, &remote) && remote.Code == localapi.ErrorRemoteRevokeUnavailable
 }
 
 func safeLocalAPIErrorMessage(code localapi.ErrorCode) string {
@@ -647,6 +647,8 @@ func safeLocalAPIErrorMessage(code localapi.ErrorCode) string {
 		return "Действие сейчас недоступно. Проверьте состояние подключения."
 	case localapi.ErrorInvalidRequest:
 		return "Не удалось выполнить действие. Проверьте выбранное устройство."
+	case localapi.ErrorRemoteRevokeUnavailable:
+		return "Не удалось отозвать доверие на старом компьютере. Можно удалить связь только на этом Mac."
 	case localapi.ErrorPeerForbidden:
 		return "Подключение отклонено. Проверьте, что это доверенное устройство."
 	case localapi.ErrorUnavailable:

@@ -60,12 +60,13 @@ func (m Method) valid() bool {
 type ErrorCode string
 
 const (
-	ErrorInvalidRequest ErrorCode = "invalid_request"
-	ErrorSchemaMismatch ErrorCode = "schema_mismatch"
-	ErrorPeerForbidden  ErrorCode = "peer_forbidden"
-	ErrorNeedsAction    ErrorCode = "needs_action"
-	ErrorUnavailable    ErrorCode = "unavailable"
-	ErrorInternal       ErrorCode = "internal"
+	ErrorInvalidRequest          ErrorCode = "invalid_request"
+	ErrorSchemaMismatch          ErrorCode = "schema_mismatch"
+	ErrorPeerForbidden           ErrorCode = "peer_forbidden"
+	ErrorNeedsAction             ErrorCode = "needs_action"
+	ErrorUnavailable             ErrorCode = "unavailable"
+	ErrorRemoteRevokeUnavailable ErrorCode = "remote_revoke_unavailable"
+	ErrorInternal                ErrorCode = "internal"
 )
 
 type PublicError struct {

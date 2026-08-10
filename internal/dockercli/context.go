@@ -73,11 +73,11 @@ func EnsureContext(
 			return ContextChange{}, err
 		}
 		change.PreviousHost = previousHost
-		if len(expectedPreviousHost) > 0 && expectedPreviousHost[0] != "" && previousHost != expectedPreviousHost[0] {
-			return ContextChange{}, fmt.Errorf("%w: %q does not point to the expected managed endpoint", ErrContextCollision, name)
-		}
 		if previousHost == host {
 			return change, nil
+		}
+		if len(expectedPreviousHost) == 0 || expectedPreviousHost[0] == "" || previousHost != expectedPreviousHost[0] {
+			return ContextChange{}, fmt.Errorf("%w: %q does not point to the exact previous managed endpoint", ErrContextCollision, name)
 		}
 		if err := updateContext(ctx, executor, cli, name, host); err != nil {
 			return ContextChange{}, err

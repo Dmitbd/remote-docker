@@ -239,11 +239,6 @@ func (c *DesktopController) replaceDeviceLocked(ctx context.Context, params loca
 		oldDeviceID == "" || snapshot.Peer.ID != oldDeviceID || newDevice == "" || newDevice == oldDeviceID {
 		return nil, needsAction("device replacement requires active search and the exact saved device")
 	}
-	if _, err := c.forgetDeviceLocked(ctx, localapi.ForgetDeviceParams{
-		DeviceID: oldDeviceID, LocalOnly: params.LocalOnly,
-	}); err != nil {
-		return nil, err
-	}
 	pairRaw, _ := json.Marshal(localapi.PairStartParams{Device: newDevice})
 	result, err := c.delegate(ctx, localapi.MethodPairStart, pairRaw)
 	if err != nil {
@@ -252,6 +247,14 @@ func (c *DesktopController) replaceDeviceLocked(ctx context.Context, params loca
 	started, ok := result.(localapi.PairStartResult)
 	if !ok {
 		return nil, unavailable("pairing returned an invalid response")
+	}
+	if _, err := pairingFromStart(started); err != nil {
+		return c.rollbackStartedPairing(started, err)
+	}
+	if _, err := c.forgetDeviceLocked(ctx, localapi.ForgetDeviceParams{
+		DeviceID: oldDeviceID, LocalOnly: params.LocalOnly,
+	}); err != nil {
+		return c.rollbackStartedPairing(started, err)
 	}
 	if err := c.startPairing(started); err != nil {
 		return c.rollbackStartedPairing(started, err)
@@ -313,18 +316,38 @@ func (c *DesktopController) startTrustedConnection(ctx context.Context, foregrou
 }
 
 func (c *DesktopController) startPairing(started localapi.PairStartResult) error {
-	expiresAt, err := time.Parse(time.RFC3339Nano, started.ExpiresAt)
+	pairing, err := pairingFromStart(started)
 	if err != nil {
-		return unavailable("pairing returned an invalid expiry time")
-	}
-	pairing := lifecycle.Pairing{
-		SessionID: started.SessionID, Peer: peerFromLocalAPI(started.Peer), Code: started.Code,
-		Status: lifecycle.PairingPending, ExpiresAt: expiresAt,
+		return err
 	}
 	if _, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &pairing}); err != nil {
 		return needsAction("the device is not ready to start pairing")
 	}
 	return nil
+}
+
+func pairingFromStart(started localapi.PairStartResult) (lifecycle.Pairing, error) {
+	expiresAt, err := time.Parse(time.RFC3339Nano, started.ExpiresAt)
+	if err != nil || !expiresAt.After(time.Now()) || strings.TrimSpace(started.SessionID) == "" ||
+		strings.TrimSpace(started.Peer.ID) == "" || !sixDigitPairCode(started.Code) {
+		return lifecycle.Pairing{}, unavailable("pairing returned invalid session metadata")
+	}
+	return lifecycle.Pairing{
+		SessionID: started.SessionID, Peer: peerFromLocalAPI(started.Peer), Code: started.Code,
+		Status: lifecycle.PairingPending, ExpiresAt: expiresAt,
+	}, nil
+}
+
+func sixDigitPairCode(code string) bool {
+	if len(code) != 6 {
+		return false
+	}
+	for _, digit := range code {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *DesktopController) reconcilePairing(status localapi.PairingStatusResult) error {

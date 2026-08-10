@@ -230,7 +230,7 @@ func (m *Machine) Apply(event Event) (Snapshot, error) {
 
 func (m *Machine) applyLocked(event Event) error {
 	snapshot := &m.snapshot
-	if m.forgetting && event.Type != EventTrustForgotten && event.Type != EventTrustForgetCancelled {
+	if m.forgetting && event.Type != EventTrustForgotten && event.Type != EventTrustForgetCancelled && event.Type != EventProblemDetected {
 		return m.transitionError(event, "trusted-device cleanup is in progress")
 	}
 	if m.connectionStarting {
@@ -305,11 +305,14 @@ func (m *Machine) applyLocked(event Event) error {
 		snapshot.Peer = &peer
 		snapshot.TrustedPeers = 1
 		snapshot.Pairing = nil
-		snapshot.Problem = nil
-		m.problemFrom = ""
-		snapshot.State = StateConnecting
-		snapshot.Docker.State = ServiceStarting
-		snapshot.Sync.State = ServiceStarting
+		if snapshot.Problem != nil {
+			m.enterNeedsAction()
+		} else {
+			m.problemFrom = ""
+			snapshot.State = StateConnecting
+			snapshot.Docker.State = ServiceStarting
+			snapshot.Sync.State = ServiceStarting
+		}
 	case EventConnectionStarted:
 		validStart := snapshot.TrustedPeers == 1 && snapshot.Peer != nil &&
 			(snapshot.Role == RoleMacClient && (snapshot.State == StateClientReady || snapshot.State == StateSearching) ||
@@ -432,19 +435,29 @@ func (m *Machine) applyLocked(event Event) error {
 		snapshot.TrustedPeers = 0
 		snapshot.ActionInProgress = false
 		m.forgetting = false
+		if snapshot.Problem != nil {
+			m.enterNeedsAction()
+		}
 	case EventTrustForgetCancelled:
 		if !m.forgetting {
 			return m.transitionError(event, "trusted-device cleanup is not reserved")
 		}
 		snapshot.ActionInProgress = false
 		m.forgetting = false
+		if snapshot.Problem != nil {
+			m.enterNeedsAction()
+		}
 	case EventProblemDetected:
 		if event.Problem == nil || event.Problem.Code == "" {
 			return m.transitionError(event, "problem metadata is incomplete")
 		}
 		problem := *event.Problem
 		snapshot.Problem = &problem
-		if snapshot.State != StatePairing {
+		if m.forgetting {
+			if snapshot.State != StateNeedsAction {
+				m.problemFrom = snapshot.State
+			}
+		} else if snapshot.State != StatePairing {
 			if snapshot.State != StateNeedsAction {
 				m.problemFrom = snapshot.State
 			}
@@ -463,6 +476,14 @@ func (m *Machine) applyLocked(event Event) error {
 		return m.transitionError(event, "event is unknown")
 	}
 	return nil
+}
+
+func (m *Machine) enterNeedsAction() {
+	m.snapshot.State = StateNeedsAction
+	m.snapshot.Recovery = nil
+	m.snapshot.Latency = 0
+	m.snapshot.Docker = DockerStatus{State: ServiceStopped}
+	m.snapshot.Sync = SyncStatus{State: ServiceStopped}
 }
 
 func (m *Machine) beginStop(disconnect *Disconnect, target State) {

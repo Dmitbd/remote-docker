@@ -771,8 +771,10 @@ func TestMacPairingNormalRetryDoesNotSilentlyBecomeLocalOnly(t *testing.T) {
 	if err := coordinator.Unpair(context.Background(), fixture.deviceID, false); err == nil {
 		t.Fatal("first normal Unpair error = nil")
 	}
-	if err := coordinator.Unpair(context.Background(), fixture.deviceID, false); err == nil {
-		t.Fatal("second normal Unpair error = nil, want repeated remote revoke failure")
+	secondErr := coordinator.Unpair(context.Background(), fixture.deviceID, false)
+	var public *localapi.PublicError
+	if !errors.As(secondErr, &public) || public.Code != localapi.ErrorRemoteRevokeUnavailable {
+		t.Fatalf("second normal Unpair error = %v, want typed remote revoke failure", secondErr)
 	}
 	if fixture.transport.revokeCalls != 2 {
 		t.Fatalf("normal remote revoke calls = %d, want two", fixture.transport.revokeCalls)
@@ -1098,6 +1100,66 @@ func TestMacPairingCoordinatorPreservesPendingForCancelRetryAfterRemoteFailure(t
 	}
 }
 
+func TestMacPairingInvalidBootstrapDescriptorUsesDetachedCancellation(t *testing.T) {
+	root := t.TempDir()
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	transport := &runtimePairingTransport{invalidDescriptor: true, afterBootstrap: cancelRequest}
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Store: config.Store{Path: filepath.Join(root, "config.json")}, Secrets: credentials.NewMemoryStore(),
+		Transport: transport, Docker: &runtimeDockerExecutor{}, DockerCLI: "docker-real", DockerContext: "remote-docker",
+		ClientDeviceID: func(context.Context) (string, error) { return "LOCAL-SYNC", nil },
+	})
+
+	if _, err := coordinator.Start(requestCtx, "windows-peer"); err == nil {
+		t.Fatal("Start() invalid descriptor error = nil")
+	}
+	if transport.cancelCalls != 1 || transport.cancelCtxErr != nil {
+		t.Fatalf("invalid descriptor cancellation calls=%d context error=%v", transport.cancelCalls, transport.cancelCtxErr)
+	}
+	coordinator.mu.Lock()
+	pending := coordinator.pending
+	cancellation := coordinator.cancellation
+	coordinator.mu.Unlock()
+	if pending != nil || cancellation != nil {
+		t.Fatalf("successful invalid-descriptor cancellation retained local state: pending=%#v cancellation=%#v", pending, cancellation)
+	}
+}
+
+func TestMacPairingInvalidDescriptorCancellationBlocksBootstrapUntilRetried(t *testing.T) {
+	root := t.TempDir()
+	transport := &runtimePairingTransport{
+		invalidDescriptor: true,
+		cancelErrors:      []error{errors.New("cancel unavailable"), errors.New("still unavailable"), nil},
+	}
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Store: config.Store{Path: filepath.Join(root, "config.json")}, Secrets: credentials.NewMemoryStore(),
+		Transport: transport, Docker: &runtimeDockerExecutor{}, DockerCLI: "docker-real", DockerContext: "remote-docker",
+		ClientDeviceID: func(context.Context) (string, error) { return "LOCAL-SYNC", nil },
+	})
+
+	if _, err := coordinator.Start(context.Background(), "windows-peer"); err == nil {
+		t.Fatal("first Start() invalid descriptor error = nil")
+	}
+	transport.invalidDescriptor = false
+	if _, err := coordinator.Start(context.Background(), "windows-peer"); err == nil {
+		t.Fatal("second Start() error = nil while cancellation remains unconfirmed")
+	}
+	if transport.bootstrapCalls != 1 {
+		t.Fatalf("second Bootstrap ran before cancellation acknowledgement: calls=%d", transport.bootstrapCalls)
+	}
+	started, err := coordinator.Start(context.Background(), "windows-peer")
+	if err != nil {
+		t.Fatalf("third Start() after cancellation retry error = %v", err)
+	}
+	if started.SessionID == "" || transport.bootstrapCalls != 2 || transport.cancelCalls != 3 {
+		t.Fatalf("retry result=%#v bootstrap=%d cancel=%d", started, transport.bootstrapCalls, transport.cancelCalls)
+	}
+	wantEvents := []string{"bootstrap", "cancel", "cancel", "cancel", "bootstrap"}
+	if !reflect.DeepEqual(transport.events, wantEvents) {
+		t.Fatalf("cancellation retry order = %v, want %v", transport.events, wantEvents)
+	}
+}
+
 func TestMacPairingCoordinatorReservesStartBeforeRemoteBootstrap(t *testing.T) {
 	root := t.TempDir()
 	transport := &blockingBootstrapPairingTransport{
@@ -1245,6 +1307,7 @@ func TestMacPairingReplacementRestoresManagedContextWhenLocalCommitFails(t *test
 		ControlDir:      filepath.Join(root, "control"),
 		SaveConfig:      func(config.Config) error { return errors.New("injected local commit failure") },
 	})
+	coordinator.previousDockerHost = oldHost
 
 	started, err := coordinator.Start(context.Background(), "windows-peer")
 	if err != nil {
@@ -1264,17 +1327,23 @@ func TestMacPairingReplacementRestoresManagedContextWhenLocalCommitFails(t *test
 }
 
 type runtimePairingTransport struct {
-	hostKey      string
-	private      ed25519.PrivateKey
-	revoked      string
-	revokeErr    error
-	revokeErrors []error
-	revokeCalls  int
-	status       pairing.SessionState
-	cancelled    string
-	cancelErr    error
-	cancelCalls  int
-	targets      []pairingTarget
+	hostKey           string
+	private           ed25519.PrivateKey
+	revoked           string
+	revokeErr         error
+	revokeErrors      []error
+	revokeCalls       int
+	status            pairing.SessionState
+	cancelled         string
+	cancelErr         error
+	cancelErrors      []error
+	cancelCalls       int
+	cancelCtxErr      error
+	bootstrapCalls    int
+	invalidDescriptor bool
+	afterBootstrap    func()
+	events            []string
+	targets           []pairingTarget
 }
 
 type blockingBootstrapPairingTransport struct {
@@ -1344,12 +1413,21 @@ func (t *runtimePairingTransport) Candidates(context.Context) ([]pairingTarget, 
 }
 
 func (t *runtimePairingTransport) Bootstrap(_ context.Context, _ string, clientPublicKey ed25519.PublicKey) (pairingTarget, pairing.SessionDescriptor, error) {
+	t.bootstrapCalls++
+	t.events = append(t.events, "bootstrap")
 	serverPublic, serverPrivate, _ := ed25519.GenerateKey(nil)
 	t.private = serverPrivate
 	descriptor := pairing.SessionDescriptor{
 		ID: "session-1", Nonce: []byte("01234567890123456789012345678901"),
 		ServerPublicKey: serverPublic, ClientPublicKey: append(ed25519.PublicKey(nil), clientPublicKey...),
 		ExpiresAt: time.Now().Add(time.Minute),
+	}
+	if t.invalidDescriptor {
+		descriptor.Nonce = nil
+	}
+	if t.afterBootstrap != nil {
+		t.afterBootstrap()
+		t.afterBootstrap = nil
 	}
 	return pairingTarget{Name: "Dev PC", Address: "192.168.1.20", PairingPort: 43119}, descriptor, nil
 }
@@ -1374,9 +1452,14 @@ func (t *runtimePairingTransport) Status(_ context.Context, _ pairingTarget, des
 	return pairing.SessionStatus{SessionID: descriptor.ID, State: state, ExpiresAt: descriptor.ExpiresAt}, nil
 }
 
-func (t *runtimePairingTransport) Cancel(_ context.Context, _ pairingTarget, descriptor pairing.SessionDescriptor) error {
+func (t *runtimePairingTransport) Cancel(ctx context.Context, _ pairingTarget, descriptor pairing.SessionDescriptor) error {
 	t.cancelCalls++
+	t.events = append(t.events, "cancel")
 	t.cancelled = descriptor.ID
+	t.cancelCtxErr = ctx.Err()
+	if t.cancelCalls <= len(t.cancelErrors) {
+		return t.cancelErrors[t.cancelCalls-1]
+	}
 	return t.cancelErr
 }
 

@@ -303,7 +303,71 @@ func TestDesktopControllerReplacePreflightPreservesTrustOutsideSearching(t *test
 	}
 }
 
-func TestDesktopControllerReplaceRunsExactForgetThenPairStart(t *testing.T) {
+func TestDesktopControllerReplaceBootstrapFailurePreservesOldTrust(t *testing.T) {
+	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "saved", Name: "Saved Windows"}))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled})
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventSearchStarted})
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := &recordingLocalHandler{errors: map[localapi.Method]error{
+		localapi.MethodPairStart: unavailable("candidate bootstrap failed"),
+	}}
+	controller, _ := NewDesktopController(supervisor, fallback)
+
+	if _, err := controller.Handle(context.Background(), localapi.MethodReplaceDevice, json.RawMessage(
+		`{"old_device_id":"saved","new_device":"new-windows"}`,
+	)); err == nil {
+		t.Fatal("ReplaceDevice bootstrap error = nil")
+	}
+	if !reflect.DeepEqual(fallback.methods, []localapi.Method{localapi.MethodPairStart}) {
+		t.Fatalf("bootstrap failure delegated destructive methods: %v", fallback.methods)
+	}
+	if got := supervisor.Snapshot(); got.State != lifecycle.StateSearching || got.TrustedPeers != 1 || got.Peer == nil || got.Peer.ID != "saved" {
+		t.Fatalf("old trust changed after bootstrap failure = %#v", got)
+	}
+}
+
+func TestDesktopControllerReplaceRevokeFailureCancelsSessionAndPreservesOldTrust(t *testing.T) {
+	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "saved", Name: "Saved Windows"}))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled})
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventSearchStarted})
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := &recordingLocalHandler{
+		results: map[localapi.Method]any{
+			localapi.MethodPairStart: localapi.PairStartResult{
+				SessionID: "replacement-session", Code: "123456",
+				ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano),
+				Peer:      localapi.LifecyclePeer{ID: "new-windows", Name: "New Windows", OS: "windows"},
+			},
+			localapi.MethodPairCancel: localapi.PairingStatusResult{SessionID: "replacement-session", Status: string(pairing.SessionCancelled)},
+		},
+		errors: map[localapi.Method]error{
+			localapi.MethodUnpair: &localapi.PublicError{Code: localapi.ErrorRemoteRevokeUnavailable, Message: "remote trust revocation is unavailable"},
+		},
+	}
+	controller, _ := NewDesktopController(supervisor, fallback)
+
+	_, err = controller.Handle(context.Background(), localapi.MethodReplaceDevice, json.RawMessage(
+		`{"old_device_id":"saved","new_device":"new-windows"}`,
+	))
+	var public *localapi.PublicError
+	if !errors.As(err, &public) || public.Code != localapi.ErrorRemoteRevokeUnavailable {
+		t.Fatalf("ReplaceDevice revoke error = %v, want typed remote revoke error", err)
+	}
+	if !reflect.DeepEqual(fallback.methods, []localapi.Method{localapi.MethodPairStart, localapi.MethodUnpair, localapi.MethodPairCancel}) {
+		t.Fatalf("revoke rollback order = %v", fallback.methods)
+	}
+	if got := supervisor.Snapshot(); got.State != lifecycle.StateSearching || got.TrustedPeers != 1 || got.Peer == nil || got.Peer.ID != "saved" || got.Pairing != nil {
+		t.Fatalf("old trust changed after revoke failure = %#v", got)
+	}
+}
+
+func TestDesktopControllerReplaceRunsExactBootstrapForgetPairCommitOrder(t *testing.T) {
 	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "saved", Name: "Saved Windows"}))
 	if err != nil {
 		t.Fatalf("NewMachine() error = %v", err)
@@ -325,13 +389,13 @@ func TestDesktopControllerReplaceRunsExactForgetThenPairStart(t *testing.T) {
 	)); err != nil {
 		t.Fatalf("ReplaceDevice error = %v", err)
 	}
-	if !reflect.DeepEqual(fallback.methods, []localapi.Method{localapi.MethodUnpair, localapi.MethodPairStart}) {
+	if !reflect.DeepEqual(fallback.methods, []localapi.Method{localapi.MethodPairStart, localapi.MethodUnpair}) {
 		t.Fatalf("replacement delegate order = %v", fallback.methods)
 	}
 	var unpair localapi.UnpairParams
 	var start localapi.PairStartParams
-	_ = json.Unmarshal(fallback.raws[0], &unpair)
-	_ = json.Unmarshal(fallback.raws[1], &start)
+	_ = json.Unmarshal(fallback.raws[0], &start)
+	_ = json.Unmarshal(fallback.raws[1], &unpair)
 	if unpair.DeviceID != "saved" || !unpair.LocalOnly || start.Device != "new-windows" {
 		t.Fatalf("replacement params unpair=%#v start=%#v", unpair, start)
 	}
@@ -372,7 +436,7 @@ func TestDesktopControllerReplaceBlocksConcurrentLifecycleMutation(t *testing.T)
 	if err := waitForTestError(t, replaceDone, "replacement completion"); err != nil {
 		t.Fatalf("ReplaceDevice error = %v", err)
 	}
-	if got := fallback.Methods(); !reflect.DeepEqual(got, []localapi.Method{localapi.MethodUnpair, localapi.MethodPairStart}) {
+	if got := fallback.Methods(); !reflect.DeepEqual(got, []localapi.Method{localapi.MethodPairStart, localapi.MethodUnpair}) {
 		t.Fatalf("replacement methods = %v", got)
 	}
 }
@@ -889,12 +953,16 @@ type recordingLocalHandler struct {
 	raws    []json.RawMessage
 	result  any
 	results map[localapi.Method]any
+	errors  map[localapi.Method]error
 	err     error
 }
 
 func (h *recordingLocalHandler) Handle(_ context.Context, method localapi.Method, raw json.RawMessage) (any, error) {
 	h.methods = append(h.methods, method)
 	h.raws = append(h.raws, append(json.RawMessage(nil), raw...))
+	if err, ok := h.errors[method]; ok {
+		return h.results[method], err
+	}
 	if result, ok := h.results[method]; ok {
 		return result, h.err
 	}

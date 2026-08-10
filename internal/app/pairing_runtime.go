@@ -83,10 +83,16 @@ type pendingPairing struct {
 	record         *pairing.DeviceRecord
 }
 
+type pendingCancellation struct {
+	target     pairingTarget
+	descriptor pairing.SessionDescriptor
+}
+
 type macPairingCoordinator struct {
 	options            macPairingOptions
 	mu                 sync.Mutex
 	pending            *pendingPairing
+	cancellation       *pendingCancellation
 	starting           bool
 	previousDockerHost string
 }
@@ -176,6 +182,11 @@ func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (loc
 		clearSecret(c.pending.privateKeyPEM)
 		c.pending = nil
 	}
+	cancellation := c.cancellation
+	if cancellation != nil && !time.Now().Before(cancellation.descriptor.ExpiresAt) {
+		c.cancellation = nil
+		cancellation = nil
+	}
 	c.starting = true
 	c.mu.Unlock()
 	defer func() {
@@ -183,6 +194,16 @@ func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (loc
 		c.starting = false
 		c.mu.Unlock()
 	}()
+	if cancellation != nil {
+		if err := c.cancelDetached(cancellation.target, cancellation.descriptor); err != nil {
+			return localapi.PairStartResult{}, unavailable("previous pairing cancellation is still pending")
+		}
+		c.mu.Lock()
+		if c.cancellation == cancellation {
+			c.cancellation = nil
+		}
+		c.mu.Unlock()
+	}
 
 	clientPublicKey, clientPrivateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -215,8 +236,13 @@ func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (loc
 	}
 	code, err := pairing.Code(descriptor)
 	if err != nil {
-		_ = c.options.Transport.Cancel(ctx, target, descriptor)
 		clearSecret(privateKeyPEM)
+		if cancelErr := c.cancelDetached(target, descriptor); cancelErr != nil {
+			c.mu.Lock()
+			c.cancellation = &pendingCancellation{target: target, descriptor: descriptor}
+			c.mu.Unlock()
+			return localapi.PairStartResult{}, unavailable("invalid pairing session cancellation is pending")
+		}
 		return localapi.PairStartResult{}, unavailable("pairing session is invalid")
 	}
 	pending := &pendingPairing{
@@ -232,6 +258,12 @@ func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (loc
 		Peer:      localapi.LifecyclePeer{ID: target.InstanceID, Name: target.Name, OS: "windows", Address: target.Address},
 		ExpiresAt: descriptor.ExpiresAt.UTC().Format(time.RFC3339Nano),
 	}, nil
+}
+
+func (c *macPairingCoordinator) cancelDetached(target pairingTarget, descriptor pairing.SessionDescriptor) error {
+	cancelCtx, cancel := context.WithTimeout(context.Background(), pairingRollbackTimeout)
+	defer cancel()
+	return c.options.Transport.Cancel(cancelCtx, target, descriptor)
 }
 
 func (c *macPairingCoordinator) Status(ctx context.Context, sessionID string) (localapi.PairingStatusResult, error) {
@@ -473,7 +505,7 @@ func (c *macPairingCoordinator) Unpair(ctx context.Context, deviceID string, loc
 			return needsAction("paired device was not found")
 		}
 		if err := c.options.Transport.Revoke(ctx, device, device.ClientDeviceID); err != nil {
-			return unavailable("remote pairing revocation failed")
+			return remoteRevokeUnavailable("remote pairing revocation is unavailable")
 		}
 	}
 	return c.forgetLocal(deviceID)
@@ -789,6 +821,10 @@ func unavailable(message string) *localapi.PublicError {
 
 func needsAction(message string) *localapi.PublicError {
 	return &localapi.PublicError{Code: localapi.ErrorNeedsAction, Message: message}
+}
+
+func remoteRevokeUnavailable(message string) *localapi.PublicError {
+	return &localapi.PublicError{Code: localapi.ErrorRemoteRevokeUnavailable, Message: message}
 }
 
 func clearSecret(value []byte) {

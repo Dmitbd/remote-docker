@@ -107,6 +107,7 @@ func TestEnsureContextUpdatesExistingManagedEndpoint(t *testing.T) {
 
 	change, err := EnsureContext(
 		context.Background(), executor, "docker-real", "remote-docker", "ssh://remote-docker-device-new",
+		"ssh://remote-docker-device-old",
 	)
 	if err != nil {
 		t.Fatalf("EnsureContext() error = %v", err)
@@ -120,6 +121,20 @@ func TestEnsureContextUpdatesExistingManagedEndpoint(t *testing.T) {
 	}
 	if !reflect.DeepEqual(executor.args(), want) {
 		t.Fatalf("commands = %#v, want %#v", executor.args(), want)
+	}
+}
+
+func TestEnsureContextRejectsDifferingManagedEndpointWithoutExactPreviousHost(t *testing.T) {
+	executor := &recordingExecutor{results: []executorResult{{stdout: `[{"Name":"remote-docker","Metadata":{"Description":"Managed by Remote Docker"},"Endpoints":{"docker":{"Host":"ssh://remote-docker-device-old"}}}]`}}}
+
+	_, err := EnsureContext(
+		context.Background(), executor, "docker-real", "remote-docker", "ssh://remote-docker-device-new",
+	)
+	if !errors.Is(err, ErrContextCollision) {
+		t.Fatalf("EnsureContext() error = %v, want ErrContextCollision", err)
+	}
+	if got := executor.args(); !reflect.DeepEqual(got, [][]string{{"context", "inspect", "remote-docker"}}) {
+		t.Fatalf("unowned managed endpoint was mutated: %#v", got)
 	}
 }
 
