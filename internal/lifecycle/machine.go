@@ -472,6 +472,7 @@ func (m *Machine) applyLocked(event Event) error {
 		}
 		snapshot.Peer = nil
 		snapshot.TrustedPeers = 0
+		snapshot.LastDisconnect = nil
 		snapshot.ActionInProgress = false
 		m.forgetting = false
 		if snapshot.Problem != nil {

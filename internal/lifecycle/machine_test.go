@@ -548,6 +548,24 @@ func TestForgetReservationCommitsTrustRemovalAtomically(t *testing.T) {
 	}
 }
 
+func TestTrustForgottenClearsPreviousDisconnectNotice(t *testing.T) {
+	machine := connectedMachine(t, RoleWindowsHost)
+	mustApply(t, machine, Event{
+		Type:       EventDisconnectRequested,
+		Disconnect: &Disconnect{Initiator: InitiatorPeer, Reason: ReasonUserDisconnect},
+	})
+	idle := mustApply(t, machine, Event{Type: EventStopCompleted})
+	if idle.LastDisconnect == nil || idle.Peer == nil {
+		t.Fatalf("pre-forget snapshot = %#v", idle)
+	}
+	mustApply(t, machine, Event{Type: EventTrustForgetStarted, Peer: &Peer{ID: idle.Peer.ID}})
+
+	forgotten := mustApply(t, machine, Event{Type: EventTrustForgotten})
+	if forgotten.Peer != nil || forgotten.TrustedPeers != 0 || forgotten.LastDisconnect != nil {
+		t.Fatalf("forgotten snapshot retained disconnect notice = %#v", forgotten)
+	}
+}
+
 func TestTransportUpgradeProblemKeepsTrustUntilExplicitForget(t *testing.T) {
 	machine, err := NewMachine(RoleMacClient, "MacBook", WithTrustedPeer(Peer{ID: "legacy-windows", Name: "Windows"}))
 	if err != nil {
