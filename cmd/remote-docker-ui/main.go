@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"runtime"
 	"sync"
@@ -35,18 +37,25 @@ type UIBridge struct {
 	mu      sync.RWMutex
 	ctx     context.Context
 	backend uiBackend
+	focus   net.Listener
 }
 
 func (b *UIBridge) startup(ctx context.Context) {
 	b.mu.Lock()
 	b.ctx = ctx
 	b.mu.Unlock()
+	b.startFocusServer(ctx)
 }
 
 func (b *UIBridge) shutdown(context.Context) {
 	b.mu.Lock()
+	listener := b.focus
+	b.focus = nil
 	b.ctx = nil
 	b.mu.Unlock()
+	if listener != nil {
+		_ = listener.Close()
+	}
 }
 
 func (b *UIBridge) Snapshot() (desktopui.State, error) {
@@ -112,6 +121,39 @@ func (b *UIBridge) callContext(timeout time.Duration) (context.Context, context.
 	return ctx, cancel, nil
 }
 
+func (b *UIBridge) startFocusServer(ctx context.Context) {
+	endpoint, err := desktopui.FocusEndpoint()
+	if err != nil {
+		return
+	}
+	listener, err := localapi.Listen(endpoint)
+	if err != nil {
+		return
+	}
+	b.mu.Lock()
+	b.focus = listener
+	b.mu.Unlock()
+	handler := localapi.HandlerFunc(func(_ context.Context, method localapi.Method, _ json.RawMessage) (any, error) {
+		if method != localapi.MethodShowWindow {
+			return nil, &localapi.PublicError{Code: localapi.ErrorInvalidRequest, Message: "UI focus method is unavailable"}
+		}
+		b.show()
+		return map[string]bool{"shown": true}, nil
+	})
+	go func() { _ = (localapi.Server{Handler: handler}).Serve(ctx, listener) }()
+}
+
+func (b *UIBridge) show() {
+	b.mu.RLock()
+	ctx := b.ctx
+	b.mu.RUnlock()
+	if ctx == nil {
+		return
+	}
+	wailsruntime.WindowUnminimise(ctx)
+	wailsruntime.WindowShow(ctx)
+}
+
 func operationTimeout(id string) time.Duration {
 	switch id {
 	case desktopui.OperationApprovePair, desktopui.OperationRejectPair, desktopui.OperationCancelPair:
@@ -153,6 +195,12 @@ func windowOptions(bridge *UIBridge) *options.App {
 		OnStartup:        bridge.startup,
 		OnShutdown:       bridge.shutdown,
 		Bind:             []interface{}{bridge},
+		SingleInstanceLock: &options.SingleInstanceLock{
+			UniqueId: "io.github.dmitbd.remote-docker.ui",
+			OnSecondInstanceLaunch: func(options.SecondInstanceData) {
+				bridge.show()
+			},
+		},
 		ErrorFormatter: func(err error) any {
 			return err.Error()
 		},

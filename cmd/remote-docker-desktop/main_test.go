@@ -45,3 +45,11 @@ func TestInitialTrustedPeerRestoresOnlyActivePublicRecord(t *testing.T) {
 		t.Fatalf("restored peer = %#v", peer)
 	}
 }
+
+func TestUIExecutableLivesBesideDesktopHost(t *testing.T) {
+	desktopPath := filepath.Join(string(filepath.Separator), "Applications", "Remote Docker.app", "Contents", "MacOS", "remote-docker-desktop")
+	got := uiExecutablePath(desktopPath)
+	if filepath.Dir(got) != filepath.Dir(desktopPath) || filepath.Base(got) == filepath.Base(desktopPath) {
+		t.Fatalf("uiExecutablePath() = %q", got)
+	}
+}

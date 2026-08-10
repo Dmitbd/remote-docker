@@ -12,9 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"fyne.io/fyne/v2"
 	"github.com/Dmitbd/remote-docker/internal/app"
-	productassets "github.com/Dmitbd/remote-docker/internal/assets"
 	"github.com/Dmitbd/remote-docker/internal/config"
 	"github.com/Dmitbd/remote-docker/internal/desktop"
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
@@ -123,29 +121,40 @@ func run() error {
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- (localapi.Server{Handler: handler}).Serve(ctx, listener) }()
 
-	uiController := desktop.NewController(controller, machine.Snapshot)
+	uiProcess := &desktop.ProcessLauncher{Executable: uiExecutablePath(executable), Owner: owner}
 	application, err := desktop.NewApplication(desktop.ApplicationOptions{
-		Controller: uiController, Snapshot: machine.Snapshot, Updates: updates,
-		Icon: fyne.NewStaticResource("remote-docker.png", productassets.AppIcon()),
-		OnQuit: func() {
-			cancel()
-			_ = listener.Close()
+		UI: uiProcess, Snapshot: machine.Snapshot, Updates: updates, Platform: runtime.GOOS,
+		OnPause: func(pauseCtx context.Context) error {
+			_, pauseErr := handler.Handle(pauseCtx, localapi.MethodPause, nil)
+			return pauseErr
+		},
+		OnQuit: func(quitCtx context.Context) error {
+			_, quitErr := handler.Handle(quitCtx, localapi.MethodShutdown, nil)
+			return quitErr
 		},
 	})
 	if err != nil {
 		return err
 	}
 	handler.setShow(application.Show)
+	handler.setShutdown(func() {
+		cancel()
+		_ = listener.Close()
+	})
 	shutdownDone := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		_, shutdownErr := controller.Handle(shutdownCtx, localapi.MethodShutdown, nil)
 		shutdownCancel()
-		application.Quit()
+		_ = application.Quit(shutdownCtx)
 		shutdownDone <- shutdownErr
 	}()
-	application.Run(ctx)
+	if err := application.Run(ctx); err != nil {
+		cancel()
+		_ = listener.Close()
+		return err
+	}
 	cancel()
 	_ = listener.Close()
 	select {
@@ -156,6 +165,14 @@ func run() error {
 		return fmt.Errorf("stop desktop runtime: %w", err)
 	}
 	return nil
+}
+
+func uiExecutablePath(desktopExecutable string) string {
+	name := "remote-docker-ui"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	return filepath.Join(filepath.Dir(desktopExecutable), name)
 }
 
 func waitForDesktopShutdown(done <-chan error, timeout time.Duration) error {
@@ -186,9 +203,16 @@ func initialTrustedPeer(store config.Store, role lifecycle.Role) *lifecycle.Peer
 }
 
 type desktopAPIHandler struct {
-	base localapi.Handler
-	mu   sync.RWMutex
-	show func()
+	base     localapi.Handler
+	mu       sync.RWMutex
+	show     func()
+	shutdown func()
+}
+
+func (h *desktopAPIHandler) setShutdown(shutdown func()) {
+	h.mu.Lock()
+	h.shutdown = shutdown
+	h.mu.Unlock()
 }
 
 func (h *desktopAPIHandler) setShow(show func()) {
@@ -207,7 +231,16 @@ func (h *desktopAPIHandler) Handle(ctx context.Context, method localapi.Method, 
 		}
 		return map[string]bool{"shown": true}, nil
 	}
-	return h.base.Handle(ctx, method, params)
+	result, err := h.base.Handle(ctx, method, params)
+	if err == nil && method == localapi.MethodShutdown {
+		h.mu.RLock()
+		shutdown := h.shutdown
+		h.mu.RUnlock()
+		if shutdown != nil {
+			shutdown()
+		}
+	}
+	return result, err
 }
 
 var _ localapi.Handler = (*desktopAPIHandler)(nil)
