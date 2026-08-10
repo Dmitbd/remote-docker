@@ -54,22 +54,22 @@ type pairingTransport interface {
 }
 
 type macPairingOptions struct {
-	Store              config.Store
-	ConfigTransactions *configTransactions
-	Secrets            credentials.Store
-	Transport          pairingTransport
-	Docker             dockercli.Executor
-	DockerCLI          string
-	DockerContext      string
-	SSHConfigPath      string
-	ManagedSSHRoot     sshtransport.ManagedRoot
-	KnownHostsPath     string
-	AgentSocketPath    string
-	ControlDir         string
-	ClientDeviceID     func(context.Context) (string, error)
-	RemovePinnedHost   func(string, string) error
-	RemoveSSHConfig    func(sshtransport.ManagedRoot, string) error
-	SaveConfig         func(config.Config) error
+	Store                   config.Store
+	ConfigTransactions      *configTransactions
+	Secrets                 credentials.Store
+	Transport               pairingTransport
+	Docker                  dockercli.Executor
+	DockerCLI               string
+	DockerContext           string
+	SSHConfigPath           string
+	ManagedSSHRoot          sshtransport.ManagedRoot
+	KnownHostsPath          string
+	AgentSocketPath         string
+	ControlDir              string
+	ClientDeviceID          func(context.Context) (string, error)
+	RemovePinnedHost        func(string, string) error
+	RemoveSSHConfig         func(sshtransport.ManagedRoot, string) error
+	SaveConfig              func(config.Config) error
 	BeforeConfigTransaction func()
 }
 

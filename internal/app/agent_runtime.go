@@ -165,7 +165,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 		applicationRoot := filepath.Dir(configPath)
 		macSync := newLocalSyncthingRuntime(localSyncthingOptions{
 			Store: store, Secrets: secrets, Executable: syncthingExecutable,
-			ConfigTransactions: configTransactions,
+			ConfigTransactions:  configTransactions,
 			PersistentConfigDir: filepath.Join(applicationRoot, "syncthing", "config"),
 			DataDir:             filepath.Join(applicationRoot, "syncthing", "data"),
 			RuntimeRoot:         filepath.Join(applicationRoot, "run", "syncthing"),
@@ -180,7 +180,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 			},
 			Docker: dockercli.Runner{}, DockerCLI: dockerCLI, DockerContext: defaultContextName,
 			SSHConfigPath: sshConfigPath, KnownHostsPath: knownHostsPath,
-			ManagedSSHRoot: managedSSHRoot,
+			ManagedSSHRoot:  managedSSHRoot,
 			AgentSocketPath: agentSocketPath, ControlDir: controlDir,
 			ClientDeviceID: macSync.DeviceID,
 		})
@@ -547,15 +547,15 @@ func (t *configTransactions) Run(operation func() error) error {
 }
 
 type productionAgentController struct {
-	store              config.Store
-	configTransactions *configTransactions
-	pairing            runtimePairingCoordinator
-	sync               productionSyncInspector
-	dockerPreparer     dockerPreparer
-	diagnostics        productionDiagnostics
-	metrics            *metrics.Collector
-	afterPair          func(context.Context)
-	mu                 sync.Mutex
+	store                   config.Store
+	configTransactions      *configTransactions
+	pairing                 runtimePairingCoordinator
+	sync                    productionSyncInspector
+	dockerPreparer          dockerPreparer
+	diagnostics             productionDiagnostics
+	metrics                 *metrics.Collector
+	afterPair               func(context.Context)
+	mu                      sync.Mutex
 	beforeConfigTransaction func()
 	beforeConfigSave        func()
 }

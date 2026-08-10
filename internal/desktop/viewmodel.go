@@ -23,21 +23,21 @@ const (
 type ActionID string
 
 const (
-	ActionEnableClient ActionID = "enable-client"
-	ActionEnableHost   ActionID = "enable-host"
-	ActionStartSearch  ActionID = "start-search"
-	ActionStopSearch   ActionID = "stop-search"
-	ActionConnect      ActionID = "connect"
+	ActionEnableClient   ActionID = "enable-client"
+	ActionEnableHost     ActionID = "enable-host"
+	ActionStartSearch    ActionID = "start-search"
+	ActionStopSearch     ActionID = "stop-search"
+	ActionConnect        ActionID = "connect"
 	ActionConnectTrusted ActionID = "connect-trusted"
-	ActionApprovePair  ActionID = "approve-pair"
-	ActionRejectPair   ActionID = "reject-pair"
-	ActionCancelPair   ActionID = "cancel-pair"
-	ActionPause        ActionID = "pause"
-	ActionDisconnect   ActionID = "disconnect"
-	ActionForgetDevice ActionID = "forget-device"
-	ActionAddWorkspace ActionID = "add-workspace"
-	ActionDiagnostics  ActionID = "diagnostics"
-	ActionQuit         ActionID = "quit"
+	ActionApprovePair    ActionID = "approve-pair"
+	ActionRejectPair     ActionID = "reject-pair"
+	ActionCancelPair     ActionID = "cancel-pair"
+	ActionPause          ActionID = "pause"
+	ActionDisconnect     ActionID = "disconnect"
+	ActionForgetDevice   ActionID = "forget-device"
+	ActionAddWorkspace   ActionID = "add-workspace"
+	ActionDiagnostics    ActionID = "diagnostics"
+	ActionQuit           ActionID = "quit"
 )
 
 type Action struct {

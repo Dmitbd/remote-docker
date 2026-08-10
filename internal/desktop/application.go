@@ -286,8 +286,8 @@ func (a *Application) connectionBody(model ViewModel, snapshot lifecycle.Snapsho
 	}
 	rows := BuildDeviceRows(snapshot, a.candidates)
 	if len(rows) == 0 && snapshot.State == lifecycle.StateSearching {
-			body.Add(widget.NewLabel("Пока ничего не найдено"))
-		}
+		body.Add(widget.NewLabel("Пока ничего не найдено"))
+	}
 	for _, row := range rows {
 		row := row
 		name := widget.NewLabel(row.Name + " · " + row.Status)
@@ -392,13 +392,13 @@ func (a *Application) diagnosticsBody() *fyne.Container {
 
 func (a *Application) perform(action ActionID, value string) {
 	sequence := a.beginAction()
-	fyne.Do(func() { a.render(a.snapshot()) })
+	a.refreshCurrent()
 	go func() {
 		err := a.controller.Perform(context.Background(), action, value)
 		if !a.completeAction(sequence, err) {
 			return
 		}
-		fyne.Do(func() { a.render(a.snapshot()) })
+		a.refreshCurrent()
 		if err != nil {
 			return
 		}

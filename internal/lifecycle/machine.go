@@ -29,33 +29,33 @@ const (
 type EventType string
 
 const (
-	EventEnabled             EventType = "enabled"
-	EventSearchStarted       EventType = "search_started"
-	EventSearchStopped       EventType = "search_stopped"
-	EventPairingStarted      EventType = "pairing_started"
-	EventPairingApproved     EventType = "pairing_approved"
-	EventPairingRejected     EventType = "pairing_rejected"
-	EventPairingCancelled    EventType = "pairing_cancelled"
-	EventPairingExpired      EventType = "pairing_expired"
-	EventPairingCompleted    EventType = "pairing_completed"
-	EventConnectionStarted   EventType = "connection_started"
-	EventConnectionStartReserved EventType = "connection_start_reserved"
-	EventConnectionStartCommitted EventType = "connection_start_committed"
+	EventEnabled                       EventType = "enabled"
+	EventSearchStarted                 EventType = "search_started"
+	EventSearchStopped                 EventType = "search_stopped"
+	EventPairingStarted                EventType = "pairing_started"
+	EventPairingApproved               EventType = "pairing_approved"
+	EventPairingRejected               EventType = "pairing_rejected"
+	EventPairingCancelled              EventType = "pairing_cancelled"
+	EventPairingExpired                EventType = "pairing_expired"
+	EventPairingCompleted              EventType = "pairing_completed"
+	EventConnectionStarted             EventType = "connection_started"
+	EventConnectionStartReserved       EventType = "connection_start_reserved"
+	EventConnectionStartCommitted      EventType = "connection_start_committed"
 	EventConnectionStartAbortRequested EventType = "connection_start_abort_requested"
-	EventConnected           EventType = "connected"
-	EventHeartbeat           EventType = "heartbeat"
-	EventDisconnectRequested EventType = "disconnect_requested"
-	EventNetworkLost         EventType = "network_lost"
-	EventNetworkRestored     EventType = "network_restored"
-	EventRecoveryExpired     EventType = "recovery_expired"
-	EventPauseRequested      EventType = "pause_requested"
-	EventQuitRequested       EventType = "quit_requested"
-	EventStopCompleted       EventType = "stop_completed"
-	EventTrustForgetStarted  EventType = "trust_forget_started"
-	EventTrustForgotten      EventType = "trust_forgotten"
-	EventTrustForgetCancelled EventType = "trust_forget_cancelled"
-	EventProblemDetected     EventType = "problem_detected"
-	EventProblemCleared      EventType = "problem_cleared"
+	EventConnected                     EventType = "connected"
+	EventHeartbeat                     EventType = "heartbeat"
+	EventDisconnectRequested           EventType = "disconnect_requested"
+	EventNetworkLost                   EventType = "network_lost"
+	EventNetworkRestored               EventType = "network_restored"
+	EventRecoveryExpired               EventType = "recovery_expired"
+	EventPauseRequested                EventType = "pause_requested"
+	EventQuitRequested                 EventType = "quit_requested"
+	EventStopCompleted                 EventType = "stop_completed"
+	EventTrustForgetStarted            EventType = "trust_forget_started"
+	EventTrustForgotten                EventType = "trust_forgotten"
+	EventTrustForgetCancelled          EventType = "trust_forget_cancelled"
+	EventProblemDetected               EventType = "problem_detected"
+	EventProblemCleared                EventType = "problem_cleared"
 )
 
 type Event struct {
@@ -107,15 +107,15 @@ func WithTrustedPeer(peer Peer) Option {
 }
 
 type Machine struct {
-	mu          sync.RWMutex
-	snapshot    Snapshot
-	now         func() time.Time
-	afterStop   State
-	forgetting  bool
-	connectionStarting bool
+	mu                  sync.RWMutex
+	snapshot            Snapshot
+	now                 func() time.Time
+	afterStop           State
+	forgetting          bool
+	connectionStarting  bool
 	connectionStartFrom State
-	subscribers map[uint64]chan Snapshot
-	nextID      uint64
+	subscribers         map[uint64]chan Snapshot
+	nextID              uint64
 }
 
 func NewMachine(role Role, localName string, options ...Option) (*Machine, error) {
