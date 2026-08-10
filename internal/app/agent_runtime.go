@@ -195,11 +195,11 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 				OnState: func(state tunnel.ServerState) {
 					switch state {
 					case tunnel.ServerConnected:
-						tunnelServerState.Store(1)
+						tunnelServerState.Store(tunnelServerStateConnected)
 					case tunnel.ServerBusy:
-						tunnelServerState.Store(2)
+						tunnelServerState.Store(tunnelServerStateBusy)
 					default:
-						tunnelServerState.Store(0)
+						tunnelServerState.Store(tunnelServerStateWaiting)
 					}
 				},
 			}

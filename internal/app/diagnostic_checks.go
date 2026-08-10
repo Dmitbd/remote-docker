@@ -22,6 +22,12 @@ import (
 
 const diagnosticProbeTimeout = 3 * time.Second
 
+const (
+	tunnelServerStateWaiting int32 = iota
+	tunnelServerStateConnected
+	tunnelServerStateBusy
+)
+
 type macDiagnosticProbe struct {
 	store             config.Store
 	secrets           credentials.Store
@@ -98,13 +104,24 @@ func (p macDiagnosticProbe) checkIdentity(ctx context.Context) error {
 }
 
 func (p macDiagnosticProbe) checkSession(ctx context.Context) error {
-	if p.tunnelReady == nil || !p.tunnelReady.Load() {
-		if err := p.checkIdentity(ctx); err != nil {
-			return err
-		}
+	connected := p.tunnelReady != nil && p.tunnelReady.Load()
+	if connected {
+		return nil
+	}
+	if err := p.checkIdentity(ctx); err != nil {
+		return err
+	}
+	return tunnelSessionStateError(false, false)
+}
+
+func tunnelSessionStateError(connected, confirmedBusy bool) error {
+	if connected {
+		return nil
+	}
+	if confirmedBusy {
 		return diagnostics.NewPublicError(diagnostics.ReasonPeerBusy)
 	}
-	return nil
+	return diagnostics.NewPublicError(diagnostics.ReasonRemoteConnectionNotReady)
 }
 
 func (p macDiagnosticProbe) checkLocalRelays(ctx context.Context) error {
@@ -196,15 +213,15 @@ func (p windowsDiagnosticProbe) checks() productionDiagnosticsOptions {
 		})
 	}
 	return productionDiagnosticsOptions{
-		LANReachability: diagnostics.CheckFunc(func(ctx context.Context) error {
-			probeCtx, cancel := context.WithTimeout(ctx, diagnosticProbeTimeout)
-			defer cancel()
-			connection, err := (&net.Dialer{}).DialContext(probeCtx, "tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(tunnel.TunnelPort)))
-			if err != nil {
-				return diagnostics.NewPublicError(classifyLANDialFailure(err))
+		LANReachability: diagnostics.CheckFunc(func(context.Context) error {
+			if p.serverState == nil {
+				return diagnostics.NewPublicError(diagnostics.ReasonRemoteConnectionNotReady)
 			}
-			_ = connection.Close()
-			return nil
+			state := p.serverState.Load()
+			if state == tunnelServerStateConnected || state == tunnelServerStateBusy {
+				return nil
+			}
+			return diagnostics.NewPublicError(diagnostics.ReasonRemoteConnectionNotReady)
 		}),
 		TunnelIdentity: diagnostics.CheckFunc(func(context.Context) error {
 			encoded, err := p.secrets.Get(tunnel.WindowsIdentityOwner, tunnel.IdentityCredential)
@@ -218,10 +235,11 @@ func (p windowsDiagnosticProbe) checks() productionDiagnosticsOptions {
 			return nil
 		}),
 		TunnelSession: diagnostics.CheckFunc(func(context.Context) error {
-			if p.serverState == nil || p.serverState.Load() != 1 {
-				return diagnostics.NewPublicError(diagnostics.ReasonPeerBusy)
+			if p.serverState == nil {
+				return tunnelSessionStateError(false, false)
 			}
-			return nil
+			state := p.serverState.Load()
+			return tunnelSessionStateError(state == tunnelServerStateConnected, state == tunnelServerStateBusy)
 		}),
 		LocalRelays:   diagnostics.CheckFunc(func(context.Context) error { return nil }),
 		DockerChannel: observe(func(status windowsbridge.ManagedWSLStatus) bool { return status.DockerSocket }, diagnostics.ReasonWSLUnavailable),

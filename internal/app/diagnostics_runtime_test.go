@@ -386,6 +386,60 @@ func TestMacDiagnosticsPreserveActualLocalRelayOwnershipFailure(t *testing.T) {
 	}
 }
 
+func TestTunnelSessionReasonRequiresConfirmedBusyState(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		connected     bool
+		confirmedBusy bool
+		want          diagnostics.Reason
+	}{
+		{name: "waiting", want: diagnostics.ReasonRemoteConnectionNotReady},
+		{name: "connected", connected: true},
+		{name: "confirmed server busy", confirmedBusy: true, want: diagnostics.ReasonPeerBusy},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := tunnelSessionStateError(test.connected, test.confirmedBusy)
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("connected session error = %v", err)
+				}
+				return
+			}
+			if got := diagnostics.ReasonForError(err, diagnostics.ReasonCheckFailed); got != string(test.want) {
+				t.Fatalf("session reason = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestWindowsLANReachabilityRequiresAuthenticatedNetworkActivity(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		state int32
+		want  diagnostics.Reason
+	}{
+		{name: "waiting", state: tunnelServerStateWaiting, want: diagnostics.ReasonRemoteConnectionNotReady},
+		{name: "authenticated client connected", state: tunnelServerStateConnected},
+		{name: "authenticated second client rejected busy", state: tunnelServerStateBusy},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := &atomic.Int32{}
+			state.Store(test.state)
+			check := (windowsDiagnosticProbe{serverState: state}).checks().LANReachability
+			err := check.Check(context.Background())
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("LAN check error = %v", err)
+				}
+				return
+			}
+			if got := diagnostics.ReasonForError(err, diagnostics.ReasonCheckFailed); got != string(test.want) {
+				t.Fatalf("LAN reason = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func setTestDiagnosticChecks(options *productionDiagnosticsOptions, check func(context.Context) error) {
 	operation := diagnostics.CheckFunc(check)
 	options.LANReachability = operation
