@@ -133,6 +133,21 @@ func TestProvisionScriptKeepsConfirmationAndMutationOrder(t *testing.T) {
 			t.Fatalf("provision.ps1 is missing firewall restriction %q", fragment)
 		}
 	}
+	for _, fragment := range []string{
+		"Name = 'RemoteDocker.Managed.Tunnel.TCP'", "Protocol = 'TCP'",
+		"Name = 'RemoteDocker.Managed.Discovery.UDP'", "Protocol = 'UDP'",
+		"-LocalPort $PairingPort",
+		"$legacyRule.Group -eq $firewallRuleGroup",
+	} {
+		if !strings.Contains(script, fragment) {
+			t.Fatalf("provision.ps1 is missing secure tunnel firewall contract %q", fragment)
+		}
+	}
+	for _, obsolete := range []string{"Port = $SshBridgePort", "Port = $SyncthingBridgePort"} {
+		if strings.Contains(script, obsolete) {
+			t.Fatalf("provision.ps1 still exposes obsolete LAN firewall port %q", obsolete)
+		}
+	}
 	for _, fragment := range []string{"New-ScheduledTask", "Register-ScheduledTask", "RunLevel Highest"} {
 		if strings.Contains(script, fragment) {
 			t.Fatalf("provision.ps1 contains obsolete elevated startup registration %q", fragment)

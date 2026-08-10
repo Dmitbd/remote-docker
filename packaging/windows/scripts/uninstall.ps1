@@ -75,13 +75,19 @@ if (Test-Path -LiteralPath $desktopExecutable -PathType Leaf) {
     & $desktopExecutable --shutdown
 }
 
-foreach ($ruleName in @('RemoteDocker.Managed.Pairing', 'RemoteDocker.Managed.SSH', 'RemoteDocker.Managed.Syncthing')) {
+foreach ($ruleName in @(
+    'RemoteDocker.Managed.Tunnel.TCP',
+    'RemoteDocker.Managed.Discovery.UDP',
+    'RemoteDocker.Managed.Pairing',
+    'RemoteDocker.Managed.SSH',
+    'RemoteDocker.Managed.Syncthing'
+)) {
     $existingRule = Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue
     if ($null -eq $existingRule) {
         continue
     }
     if ($existingRule.Group -ne $firewallRuleGroup) {
-        throw "Refusing to remove the foreign firewall rule '$ruleName'."
+        continue
     }
     Remove-NetFirewallRule -InputObject $existingRule
 }

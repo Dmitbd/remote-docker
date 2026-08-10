@@ -154,7 +154,11 @@ Describe 'Windows Setup EXE contract' {
         $script | Should -Match '-Profile\s+Private'
         $script | Should -Match '-Program\s+\$desktopExecutable'
         $script | Should -Match '-RemoteAddress\s+LocalSubnet'
-        $script | Should -Match 'Name = ''RemoteDocker\.Managed\.Pairing''; DisplayName = ''Remote Docker Managed Pairing''; Port = \$PairingPort'
+        $script | Should -Match 'Name = ''RemoteDocker\.Managed\.Tunnel\.TCP''; DisplayName = ''Remote Docker Managed Tunnel''; Protocol = ''TCP'''
+        $script | Should -Match 'Name = ''RemoteDocker\.Managed\.Discovery\.UDP''; DisplayName = ''Remote Docker Managed Discovery''; Protocol = ''UDP'''
+        $script | Should -Match '-LocalPort\s+\$PairingPort'
+        $script | Should -Match '\$legacyRule\.Group\s+-eq\s+\$firewallRuleGroup'
+        $script | Should -Not -Match 'Port = \$SshBridgePort|Port = \$SyncthingBridgePort'
         $script | Should -Match "(?s)Invoke-External.*'wsl\.exe'.*'--terminate'"
         $rootCheck | Should -BeGreaterThan -1
         $import | Should -BeGreaterThan $rootCheck

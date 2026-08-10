@@ -5,9 +5,7 @@ param(
     [Parameter(Mandatory = $true)][string]$DataRoot,
     [Parameter(Mandatory = $true)][string]$ProgressPath,
     [Parameter(Mandatory = $true)][string]$LogPath,
-    [ValidateRange(1024, 65535)][int]$PairingPort = 49221,
-    [ValidateRange(1024, 65535)][int]$SshBridgePort = 49222,
-    [ValidateRange(1024, 65535)][int]$SyncthingBridgePort = 49220
+    [ValidateRange(1024, 65535)][int]$PairingPort = 49221
 )
 
 $ErrorActionPreference = 'Stop'
@@ -236,10 +234,15 @@ try {
     Write-RemoteDockerProvisionStatus -ProgressPath $ProgressPath -Phase 'docker' -State 'completed' -Message 'Docker environment is ready and stopped.'
 
     Write-RemoteDockerProvisionStatus -ProgressPath $ProgressPath -Phase 'firewall' -State 'started' -Message 'Restricting access to the private local network.'
+    foreach ($legacyRuleName in @('RemoteDocker.Managed.Pairing', 'RemoteDocker.Managed.SSH', 'RemoteDocker.Managed.Syncthing')) {
+        $legacyRule = Get-NetFirewallRule -Name $legacyRuleName -ErrorAction SilentlyContinue
+        if ($null -ne $legacyRule -and $legacyRule.Group -eq $firewallRuleGroup) {
+            Remove-NetFirewallRule -InputObject $legacyRule
+        }
+    }
     $firewallRules = @(
-        @{ Name = 'RemoteDocker.Managed.Pairing'; DisplayName = 'Remote Docker Managed Pairing'; Port = $PairingPort },
-        @{ Name = 'RemoteDocker.Managed.SSH'; DisplayName = 'Remote Docker Managed SSH'; Port = $SshBridgePort },
-        @{ Name = 'RemoteDocker.Managed.Syncthing'; DisplayName = 'Remote Docker Managed Syncthing'; Port = $SyncthingBridgePort }
+        @{ Name = 'RemoteDocker.Managed.Tunnel.TCP'; DisplayName = 'Remote Docker Managed Tunnel'; Protocol = 'TCP' },
+        @{ Name = 'RemoteDocker.Managed.Discovery.UDP'; DisplayName = 'Remote Docker Managed Discovery'; Protocol = 'UDP' }
     )
     foreach ($rule in $firewallRules) {
         $existingRule = Get-NetFirewallRule -Name $rule.Name -ErrorAction SilentlyContinue
@@ -256,8 +259,8 @@ try {
             -Direction Inbound `
             -Action Allow `
             -Program $desktopExecutable `
-            -Protocol TCP `
-            -LocalPort $rule.Port `
+            -Protocol $rule.Protocol `
+            -LocalPort $PairingPort `
             -Profile Private `
             -RemoteAddress LocalSubnet | Out-Null
     }
