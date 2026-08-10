@@ -88,7 +88,7 @@ func (b *Backend) Snapshot(ctx context.Context) (State, error) {
 		return State{}, publicBackendError("прочитать состояние Remote Docker", err)
 	}
 	input := SnapshotInput{Status: status, PendingID: b.operations.Pending()}
-	if status.Role == "mac_client" && (status.State == "client_ready" || status.State == "searching" || status.Peer != nil) {
+	if status.Role == "mac_client" && status.State == "searching" {
 		var candidates localapi.PairCandidatesResult
 		if err := b.Client.Call(ctx, localapi.MethodPairCandidates, nil, &candidates); err == nil {
 			input.Candidates = candidates.Candidates

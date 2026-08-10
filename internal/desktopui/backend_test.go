@@ -97,7 +97,7 @@ func TestEveryMutatingDesktopOperationHasAnExplicitTimeout(t *testing.T) {
 func TestBackendSnapshotUsesOwnerOnlyLocalAPIAndPreservesRevision(t *testing.T) {
 	handler := &desktopUIHandler{responses: map[localapi.Method]any{
 		localapi.MethodStatus: localapi.StatusResult{
-			Revision: 42, Role: "mac_client", State: "client_ready", LocalName: "Mac",
+			Revision: 42, Role: "mac_client", State: "searching", LocalName: "Mac",
 		},
 		localapi.MethodPairCandidates: localapi.PairCandidatesResult{Candidates: []localapi.PairingCandidate{
 			{ID: "windows", Name: "Windows", Available: true},
@@ -114,6 +114,57 @@ func TestBackendSnapshotUsesOwnerOnlyLocalAPIAndPreservesRevision(t *testing.T) 
 	}
 	if state.Revision != 42 || state.Platform != "darwin" || len(state.Devices) != 1 {
 		t.Fatalf("Snapshot() = %#v", state)
+	}
+}
+
+func TestBackendSnapshotRunsDiscoveryOnlyWhileSearching(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		state          string
+		wantDiscovery  int
+		wantDeviceKind string
+	}{
+		{name: "active search", state: "searching", wantDiscovery: 1, wantDeviceKind: "saved"},
+		{name: "ready without search", state: "client_ready", wantDeviceKind: "saved"},
+		{name: "paused", state: "paused", wantDeviceKind: "saved"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			discoveryCalls := 0
+			handler := &desktopUIHandler{
+				responses: map[localapi.Method]any{
+					localapi.MethodStatus: localapi.StatusResult{
+						Revision: 7,
+						Role:     "mac_client",
+						State:    test.state,
+						Peer:     &localapi.LifecyclePeer{ID: "saved-windows", Name: "Saved Windows"},
+					},
+					localapi.MethodPairCandidates: localapi.PairCandidatesResult{Candidates: []localapi.PairingCandidate{
+						{ID: "saved-windows", Name: "Saved Windows", Trusted: true, Available: true},
+					}},
+					localapi.MethodWorkspaceList:  localapi.WorkspaceListResult{},
+					localapi.MethodSyncStatus:     localapi.SyncStatusResult{},
+					localapi.MethodResourceStatus: localapi.ResourceStatusResult{},
+					localapi.MethodDoctor:         localapi.DoctorResult{},
+				},
+				call: func(method localapi.Method) error {
+					if method == localapi.MethodPairCandidates {
+						discoveryCalls++
+					}
+					return nil
+				},
+			}
+
+			state, err := NewBackend(localClientForTest(handler), "darwin").Snapshot(context.Background())
+			if err != nil {
+				t.Fatalf("Snapshot() error = %v", err)
+			}
+			if discoveryCalls != test.wantDiscovery {
+				t.Fatalf("PairCandidates calls = %d, want %d in state %q", discoveryCalls, test.wantDiscovery, test.state)
+			}
+			if len(state.Devices) != 1 || state.Devices[0].ID != "saved-windows" || state.Devices[0].Kind != test.wantDeviceKind {
+				t.Fatalf("saved device = %#v", state.Devices)
+			}
+		})
 	}
 }
 
