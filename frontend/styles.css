@@ -187,6 +187,7 @@ button.loading { opacity: 1; cursor: wait; }
 
 .notice { display: flex; gap: 10px; padding: 13px 14px; border-radius: 10px; border: 1px solid rgba(255, 204, 102, .25); background: rgba(255, 204, 102, .07); color: #f4daa2; font-size: 13px; line-height: 1.45; }
 .error-notice { border-color: rgba(255, 107, 115, .28); background: rgba(255, 107, 115, .08); color: #ffc0c4; }
+.operation-error { max-width: 920px; margin: 0 auto 18px; }
 .searching { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; margin-top: 12px; }
 .spinner { width: 14px; height: 14px; border: 2px solid #3a4355; border-top-color: var(--cyan); border-radius: 50%; animation: spin .8s linear infinite; }
 .path { color: var(--muted); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; margin-top: 4px; overflow-wrap: anywhere; }

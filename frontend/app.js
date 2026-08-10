@@ -6,6 +6,7 @@
   const statusLabel = document.getElementById('status-label');
   const statusDot = document.getElementById('status-dot');
   const announcement = document.getElementById('announcement');
+  const operationErrorElement = document.getElementById('operation-error');
   const quitButton = document.getElementById('quit-button');
   const sections = ['connection', 'projects', 'resources', 'diagnostics'];
   let selectedSection = 'connection';
@@ -13,8 +14,10 @@
   let currentState = null;
   let localBusy = false;
   let pollTimer = 0;
+  let snapshotInFlight = false;
   let stopped = false;
   let manualAddressRevealed = false;
+  let operationError = '';
 
   const escapeHTML = (value) => String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -127,6 +130,7 @@
     renderProjects(state);
     renderResources(state);
     renderDiagnostics(state);
+    renderOperationError(operationError || state.error || '');
     bindDynamicActions();
     updateGlobalBusy();
   }
@@ -165,13 +169,28 @@
     const busy = localBusy || pendingExists(currentState);
     document.querySelectorAll('button').forEach((button) => {
       if (button.matches('[data-section]')) return;
-      if (busy && !button.classList.contains('loading')) button.disabled = true;
+      const operation = button === quitButton
+        ? findOperation('quit', '')
+        : (button.matches('[data-operation]') ? findOperation(button.dataset.operation, button.dataset.value || '') : null);
+      const enabled = operation ? operation.enabled : currentState?.lifecycle !== 'stopping';
+      button.disabled = busy || !enabled;
     });
+  }
+
+  function renderOperationError(message) {
+    operationErrorElement.textContent = message;
+    operationErrorElement.hidden = !message;
+  }
+
+  function setOperationError(message) {
+    operationError = message;
+    renderOperationError(message);
   }
 
   async function perform(id, value, button) {
     if (localBusy || !id) return;
     if ((id === 'forget-device' || id === 'remove-project') && !window.confirm(id === 'forget-device' ? 'Забыть это устройство? Для следующего подключения потребуется безопасное сопряжение.' : 'Удалить проект из синхронизации? Исходные файлы на Mac останутся.')) return;
+    setOperationError('');
     localBusy = true;
     const original = button?.textContent?.trim() || '';
     if (button) {
@@ -189,8 +208,10 @@
       nextState = await api.Perform(id, value);
       announce('Действие завершено');
     } catch (error) {
-      announce(errorMessage(error));
-      if (currentState) nextState = {...currentState, error: errorMessage(error)};
+      const message = errorMessage(error);
+      announce(message);
+      setOperationError(message);
+      if (currentState) nextState = {...currentState, error: message};
     } finally {
       localBusy = false;
       if (nextState) render(nextState);
@@ -215,6 +236,7 @@
 
   async function pickWorkspace() {
     if (localBusy) return;
+    setOperationError('');
     localBusy = true;
     updateGlobalBusy();
     let path = '';
@@ -223,7 +245,9 @@
       if (!api?.PickWorkspace) throw new Error('Выбор папки недоступен.');
       path = await api.PickWorkspace();
     } catch (error) {
-      announce(errorMessage(error));
+      const message = errorMessage(error);
+      announce(message);
+      setOperationError(message);
     } finally {
       localBusy = false;
       updateGlobalBusy();
@@ -233,6 +257,7 @@
 
   async function quitApplication() {
     if (localBusy) return;
+    setOperationError('');
     localBusy = true;
     quitButton.classList.add('loading');
     quitButton.disabled = true;
@@ -250,13 +275,17 @@
       quitButton.classList.remove('loading');
       quitButton.disabled = false;
       quitButton.innerHTML = '<svg class="nav-icon" aria-hidden="true"><use href="assets/icons.svg#quit"></use></svg><span>Завершить работу</span>';
-      announce(errorMessage(error));
+      const message = errorMessage(error);
+      announce(message);
+      setOperationError(message);
       updateGlobalBusy();
     }
   }
 
   async function snapshot() {
     if (stopped || document.visibilityState !== 'visible' || localBusy) return;
+    if (snapshotInFlight) return;
+    snapshotInFlight = true;
     try {
       const api = bridge();
       if (!api?.Snapshot) throw new Error('Ожидание фонового приложения…');
@@ -264,6 +293,8 @@
     } catch (error) {
       announce(errorMessage(error));
       if (!currentState) renderUnavailable(errorMessage(error));
+    } finally {
+      snapshotInFlight = false;
     }
   }
 
@@ -284,13 +315,21 @@
   }
 
   function startPolling() {
+    if (stopped || pollTimer || snapshotInFlight || document.visibilityState !== 'visible') return;
+    schedulePolling(0);
+  }
+
+  function schedulePolling(delay) {
     if (stopped || pollTimer || document.visibilityState !== 'visible') return;
-    snapshot();
-    pollTimer = window.setInterval(snapshot, 1000);
+    pollTimer = window.setTimeout(async () => {
+      pollTimer = 0;
+      await snapshot();
+      schedulePolling(1000);
+    }, delay);
   }
 
   function stopPolling() {
-    if (pollTimer) window.clearInterval(pollTimer);
+    if (pollTimer) window.clearTimeout(pollTimer);
     pollTimer = 0;
   }
 

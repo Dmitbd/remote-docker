@@ -68,6 +68,42 @@ func TestFrontendKeepsDestructiveCancellationLocalAndUsesCompleteQuit(t *testing
 	}
 }
 
+func TestFrontendRestoresActionsShowsErrorsAndSerializesPolling(t *testing.T) {
+	appContents, err := fs.ReadFile(frontendAssets(), "app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexContents, err := fs.ReadFile(frontendAssets(), "index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	appSource := string(appContents)
+	indexSource := string(indexContents)
+	for _, required := range []string{
+		"let snapshotInFlight = false",
+		"if (snapshotInFlight) return",
+		"window.setTimeout(async () =>",
+		"await snapshot()",
+		"button.disabled = busy || !enabled",
+		"setOperationError('')",
+	} {
+		if !strings.Contains(appSource, required) {
+			t.Errorf("frontend app is missing %q", required)
+		}
+	}
+	if strings.Contains(appSource, "setInterval") {
+		t.Error("frontend polling still uses overlapping setInterval calls")
+	}
+	if calls := strings.Count(appSource, "setOperationError(message)"); calls < 3 {
+		t.Errorf("visible operation errors are handled in only %d failure paths", calls)
+	}
+	for _, required := range []string{`id="operation-error"`, `role="alert"`} {
+		if !strings.Contains(indexSource, required) {
+			t.Errorf("frontend markup is missing %q", required)
+		}
+	}
+}
+
 func TestProductionBuildRejectsMockArguments(t *testing.T) {
 	if _, enabled, err := mockBackendFromArgs([]string{"--mock=mac:connected"}, "darwin"); err == nil || enabled {
 		t.Fatalf("production mock arguments enabled=%t error=%v", enabled, err)
