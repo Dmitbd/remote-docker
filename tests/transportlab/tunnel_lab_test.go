@@ -91,6 +91,59 @@ func TestSecureTransportLabPairingStreamsReconnectLimitAndCleanup(t *testing.T) 
 	}
 }
 
+func TestSecondMacReceivesPeerBusyWithoutInterruptingFirstSession(t *testing.T) {
+	macIdentity := deterministicIdentity(21)
+	windowsIdentity := deterministicIdentity(22)
+	lab := newTunnelLab(t, macIdentity, windowsIdentity)
+
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	firstSession := make(chan tunnel.Session, 1)
+	firstDone := runLabClient(firstCtx, lab, macIdentity, windowsIdentity.PublicKey, func(session tunnel.Session) ([]io.Closer, error) {
+		firstSession <- session
+		return nil, nil
+	}, nil)
+	var active tunnel.Session
+	select {
+	case active = <-firstSession:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first Mac did not receive tunnel admission")
+	}
+	assertEcho(t, active, tunnel.StreamControl, []byte("first-before-busy"))
+
+	secondCtx, cancelSecond := context.WithCancel(context.Background())
+	secondErrors := make(chan error, 8)
+	var secondRelays atomic.Int32
+	secondDone := runLabClient(secondCtx, lab, macIdentity, windowsIdentity.PublicKey, func(tunnel.Session) ([]io.Closer, error) {
+		secondRelays.Add(1)
+		return nil, nil
+	}, func(_ tunnel.ClientState, err error) {
+		if err != nil {
+			secondErrors <- err
+		}
+	})
+	select {
+	case err := <-secondErrors:
+		if !errors.Is(err, tunnel.ErrPeerBusy) {
+			t.Fatalf("second Mac error = %v, want ErrPeerBusy", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("second Mac did not receive explicit peer-busy admission")
+	}
+	if secondRelays.Load() != 0 {
+		t.Fatal("rejected second Mac opened application relays")
+	}
+	assertEcho(t, active, tunnel.StreamMetrics, []byte("first-after-busy"))
+
+	cancelSecond()
+	waitLabClient(t, secondDone)
+	cancelFirst()
+	waitLabClient(t, firstDone)
+	lab.close(t)
+	if active := lab.active.Load(); active != 0 {
+		t.Fatalf("peer-busy lab retained %d owned resources", active)
+	}
+}
+
 type tunnelLab struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -169,21 +222,61 @@ func (l *tunnelLab) dial(t *testing.T, identity tunnel.Identity, peer ed25519.Pu
 }
 
 func (l *tunnelLab) tryDial(identity tunnel.Identity, peer ed25519.PublicKey) (tunnel.Session, error) {
+	secured, err := l.dialConnection(l.ctx, identity, peer)
+	if err != nil {
+		return nil, err
+	}
+	return tunnel.NewClientSession(secured)
+}
+
+func (l *tunnelLab) dialConnection(ctx context.Context, identity tunnel.Identity, peer ed25519.PublicKey) (net.Conn, error) {
 	clientTLS, err := tunnel.ClientTLSConfig(identity, peer)
 	if err != nil {
 		return nil, err
 	}
 	clientTLS.Time = func() time.Time { return labTime }
-	raw, err := (&net.Dialer{}).DialContext(l.ctx, "tcp4", l.listener.Addr().String())
+	raw, err := (&net.Dialer{}).DialContext(ctx, "tcp4", l.listener.Addr().String())
 	if err != nil {
 		return nil, err
 	}
 	secured := tls.Client(raw, clientTLS)
-	if err := secured.HandshakeContext(l.ctx); err != nil {
+	if err := secured.HandshakeContext(ctx); err != nil {
 		_ = secured.Close()
 		return nil, err
 	}
-	return tunnel.NewClientSession(secured)
+	return secured, nil
+}
+
+func runLabClient(
+	ctx context.Context,
+	lab *tunnelLab,
+	identity tunnel.Identity,
+	peer ed25519.PublicKey,
+	openRelays func(tunnel.Session) ([]io.Closer, error),
+	onState func(tunnel.ClientState, error),
+) <-chan error {
+	done := make(chan error, 1)
+	client := &tunnel.Client{
+		Dial: func(dialCtx context.Context) (net.Conn, error) {
+			return lab.dialConnection(dialCtx, identity, peer)
+		},
+		OpenRelays: openRelays,
+		OnState:    onState,
+	}
+	go func() { done <- client.Run(ctx) }()
+	return done
+}
+
+func waitLabClient(t *testing.T, done <-chan error) {
+	t.Helper()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("lab client shutdown error = %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("lab client did not stop")
+	}
 }
 
 func (l *tunnelLab) waitState(t *testing.T, wanted tunnel.ServerState) {

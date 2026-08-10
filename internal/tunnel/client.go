@@ -68,6 +68,16 @@ func (c *Client) Run(ctx context.Context) error {
 			reconnecting = true
 			continue
 		}
+		if err := waitSessionAdmission(ctx, session); err != nil {
+			_ = session.Close()
+			c.state(ClientDisconnected, err)
+			if !wait(ctx, reconnectDelay(failures)) {
+				break
+			}
+			failures++
+			reconnecting = true
+			continue
+		}
 		relays, err := c.OpenRelays(session)
 		if err != nil {
 			_ = session.Close()

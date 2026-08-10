@@ -16,6 +16,7 @@ import (
 	"github.com/Dmitbd/remote-docker/internal/diagnostics"
 	"github.com/Dmitbd/remote-docker/internal/localapi"
 	"github.com/Dmitbd/remote-docker/internal/sshtransport"
+	"github.com/Dmitbd/remote-docker/internal/tunnel"
 	"github.com/Dmitbd/remote-docker/internal/windowsbridge"
 )
 
@@ -409,6 +410,32 @@ func TestTunnelSessionReasonRequiresConfirmedBusyState(t *testing.T) {
 				t.Fatalf("session reason = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestMacTunnelDiagnosticStateRetainsProtocolBusyUntilConfirmedOutcome(t *testing.T) {
+	ready := &atomic.Bool{}
+	busy := &atomic.Bool{}
+	portOccupied := &atomic.Bool{}
+	updateMacTunnelDiagnosticState(ready, busy, portOccupied, tunnel.ClientDisconnected, tunnel.ErrPeerBusy)
+	if !busy.Load() || ready.Load() || portOccupied.Load() {
+		t.Fatalf("busy state = ready:%t busy:%t occupied:%t", ready.Load(), busy.Load(), portOccupied.Load())
+	}
+	updateMacTunnelDiagnosticState(ready, busy, portOccupied, tunnel.ClientReconnecting, nil)
+	if !busy.Load() {
+		t.Fatal("reconnecting cleared the confirmed peer-busy signal")
+	}
+	probe := macDiagnosticProbe{tunnelReady: ready, confirmedPeerBusy: busy}
+	if got := diagnostics.ReasonForError(probe.checkSession(context.Background()), diagnostics.ReasonCheckFailed); got != string(diagnostics.ReasonPeerBusy) {
+		t.Fatalf("Mac session reason = %q, want peer busy", got)
+	}
+	updateMacTunnelDiagnosticState(ready, busy, portOccupied, tunnel.ClientConnected, nil)
+	if busy.Load() || !ready.Load() {
+		t.Fatalf("connected state = ready:%t busy:%t", ready.Load(), busy.Load())
+	}
+	updateMacTunnelDiagnosticState(ready, busy, portOccupied, tunnel.ClientDisconnected, errors.New("host unreachable"))
+	if busy.Load() || ready.Load() {
+		t.Fatalf("non-busy failure retained stale state = ready:%t busy:%t", ready.Load(), busy.Load())
 	}
 }
 

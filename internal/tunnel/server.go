@@ -77,8 +77,13 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 			if active != nil {
 				s.state(ServerBusy)
+				_ = sendSessionAdmission(ctx, result.session, admissionPeerBusy)
 				_ = result.session.Close()
 				s.state(ServerConnected)
+				continue
+			}
+			if err := sendSessionAdmission(ctx, result.session, admissionAccepted); err != nil {
+				_ = result.session.Close()
 				continue
 			}
 			active = result.session

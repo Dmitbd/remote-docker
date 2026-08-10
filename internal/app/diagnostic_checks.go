@@ -32,6 +32,7 @@ type macDiagnosticProbe struct {
 	store             config.Store
 	secrets           credentials.Store
 	tunnelReady       *atomic.Bool
+	confirmedPeerBusy *atomic.Bool
 	localPortOccupied *atomic.Bool
 	dockerCLI         string
 	dockerContext     string
@@ -108,10 +109,35 @@ func (p macDiagnosticProbe) checkSession(ctx context.Context) error {
 	if connected {
 		return nil
 	}
+	if p.confirmedPeerBusy != nil && p.confirmedPeerBusy.Load() {
+		return tunnelSessionStateError(false, true)
+	}
 	if err := p.checkIdentity(ctx); err != nil {
 		return err
 	}
 	return tunnelSessionStateError(false, false)
+}
+
+func updateMacTunnelDiagnosticState(
+	ready, confirmedBusy, localPortOccupied *atomic.Bool,
+	state tunnel.ClientState,
+	err error,
+) {
+	ready.Store(state == tunnel.ClientConnected)
+	switch {
+	case state == tunnel.ClientConnected:
+		confirmedBusy.Store(false)
+		localPortOccupied.Store(false)
+	case errors.Is(err, tunnel.ErrPeerBusy):
+		confirmedBusy.Store(true)
+		localPortOccupied.Store(false)
+	case errors.Is(err, tunnel.ErrLocalPortOccupied):
+		confirmedBusy.Store(false)
+		localPortOccupied.Store(true)
+	case err != nil:
+		confirmedBusy.Store(false)
+		localPortOccupied.Store(false)
+	}
 }
 
 func tunnelSessionStateError(connected, confirmedBusy bool) error {
