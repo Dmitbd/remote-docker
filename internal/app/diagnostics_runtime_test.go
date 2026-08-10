@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Dmitbd/remote-docker/internal/config"
@@ -372,6 +373,16 @@ func TestTunnelDiagnosticsMapOnlyStableFailureClassesAndRedactInternals(t *testi
 		if strings.Contains(string(encoded), secret) {
 			t.Fatalf("diagnostics report leaked %q: %s", secret, encoded)
 		}
+	}
+}
+
+func TestMacDiagnosticsPreserveActualLocalRelayOwnershipFailure(t *testing.T) {
+	ready := &atomic.Bool{}
+	occupied := &atomic.Bool{}
+	occupied.Store(true)
+	err := (macDiagnosticProbe{tunnelReady: ready, localPortOccupied: occupied}).checkLocalRelays(context.Background())
+	if got := diagnostics.ReasonForError(err, diagnostics.ReasonCheckFailed); got != string(diagnostics.ReasonLocalPortOccupied) {
+		t.Fatalf("local relay failure = %q, want occupied-port reason", got)
 	}
 }
 

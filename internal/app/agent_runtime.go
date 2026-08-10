@@ -145,6 +145,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 	var windowsBridge localSyncLifecycle
 	var tunnelClient localSyncLifecycle
 	var tunnelReady *atomic.Bool
+	var tunnelPortOccupied *atomic.Bool
 	var tunnelServerState *atomic.Int32
 	if runtime.GOOS == "windows" {
 		installer := provision.WSLPairingInstaller{}
@@ -242,8 +243,14 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 		})
 		localSync = macSync
 		tunnelReady = &atomic.Bool{}
-		tunnelClient = tunnelClientLifecycle{client: newProductionTunnelClient(store, secrets, func(state tunnel.ClientState, _ error) {
+		tunnelPortOccupied = &atomic.Bool{}
+		tunnelClient = tunnelClientLifecycle{client: newProductionTunnelClient(store, secrets, func(state tunnel.ClientState, err error) {
 			tunnelReady.Store(state == tunnel.ClientConnected)
+			if state == tunnel.ClientConnected {
+				tunnelPortOccupied.Store(false)
+			} else if errors.Is(err, tunnel.ErrLocalPortOccupied) {
+				tunnelPortOccupied.Store(true)
+			}
 		})}
 	}
 
@@ -308,7 +315,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 		diagnosticsOptions.Windows = windowsDiagnostics
 	} else {
 		diagnosticsOptions = (macDiagnosticProbe{
-			store: store, secrets: secrets, tunnelReady: tunnelReady,
+			store: store, secrets: secrets, tunnelReady: tunnelReady, localPortOccupied: tunnelPortOccupied,
 			dockerCLI: dockerCLI, dockerContext: defaultContextName, dockerEnv: dockerEnv,
 			sync: syncInspector, remote: remoteDiagnostics,
 		}).checks()

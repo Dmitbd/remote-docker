@@ -23,15 +23,16 @@ import (
 const diagnosticProbeTimeout = 3 * time.Second
 
 type macDiagnosticProbe struct {
-	store         config.Store
-	secrets       credentials.Store
-	tunnelReady   *atomic.Bool
-	dockerCLI     string
-	dockerContext string
-	dockerEnv     []string
-	sync          productionSyncInspector
-	remote        remoteDiagnosticOperations
-	dialTunnel    systemtransport.DialContextFunc
+	store             config.Store
+	secrets           credentials.Store
+	tunnelReady       *atomic.Bool
+	localPortOccupied *atomic.Bool
+	dockerCLI         string
+	dockerContext     string
+	dockerEnv         []string
+	sync              productionSyncInspector
+	remote            remoteDiagnosticOperations
+	dialTunnel        systemtransport.DialContextFunc
 }
 
 func (p macDiagnosticProbe) checks() productionDiagnosticsOptions {
@@ -107,6 +108,9 @@ func (p macDiagnosticProbe) checkSession(ctx context.Context) error {
 }
 
 func (p macDiagnosticProbe) checkLocalRelays(ctx context.Context) error {
+	if p.localPortOccupied != nil && p.localPortOccupied.Load() {
+		return diagnostics.NewPublicError(diagnostics.ReasonLocalPortOccupied)
+	}
 	if p.tunnelReady == nil || !p.tunnelReady.Load() {
 		return p.checkSession(ctx)
 	}
