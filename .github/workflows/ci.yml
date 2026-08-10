@@ -116,13 +116,13 @@ jobs:
         shell: pwsh
         run: >-
           ./packaging/windows/build-installer.ps1
-          -Version 0.2.6
+          -Version 0.2.7
           -RootfsPath dist/remote-docker-rootfs.tar.zst
 
       - name: Confirm the development installer is unsigned
         shell: pwsh
         run: |
-          $installer = Get-Item -LiteralPath dist/windows/Remote-Docker-0.2.6-x64-Setup.exe
+          $installer = Get-Item -LiteralPath dist/windows/Remote-Docker-0.2.7-x64-Setup.exe
           $legacyPackages = @(Get-ChildItem -LiteralPath dist/windows -Recurse -File -Include '*.msi')
           if ($legacyPackages.Count -ne 0) { throw 'Legacy MSI output must not be produced.' }
           if ((Get-AuthenticodeSignature -LiteralPath $installer.FullName).Status -ne 'NotSigned') {
