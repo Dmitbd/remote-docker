@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -67,7 +68,7 @@ func TestTunnelSessionCarriesFourConcurrentTypedStreams(t *testing.T) {
 	}
 }
 
-func TestTunnelSessionRejectsMalformedAndUnknownHeadersAndCleansUpCancellation(t *testing.T) {
+func TestTunnelSessionSkipsStalledAndUnknownHeadersWithoutBlockingNextStream(t *testing.T) {
 	clientConnection, serverConnection := net.Pipe()
 	rawClient, _ := yamux.Client(clientConnection, yamuxConfig())
 	server, err := NewServerSession(serverConnection)
@@ -82,14 +83,75 @@ func TestTunnelSessionRejectsMalformedAndUnknownHeadersAndCleansUpCancellation(t
 			t.Fatalf("raw OpenStream() error = %v", openErr)
 		}
 		_, _ = stream.Write(header)
-		_ = stream.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		_, accepted, acceptErr := server.AcceptStream(ctx)
-		cancel()
-		if acceptErr == nil || accepted != nil {
-			t.Fatalf("AcceptStream(%x) = %v, %v", header, accepted, acceptErr)
+		valid, openErr := rawClient.OpenStream()
+		if openErr != nil {
+			t.Fatalf("valid raw OpenStream() error = %v", openErr)
 		}
+		if err := writeStreamHeader(valid, StreamControl); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		kind, accepted, acceptErr := server.AcceptStream(ctx)
+		cancel()
+		_ = stream.Close()
+		if acceptErr != nil || accepted == nil || kind != StreamControl {
+			t.Fatalf("AcceptStream after %x = %v, %v, %v", header, kind, accepted, acceptErr)
+		}
+		_ = accepted.Close()
 	}
+}
+
+func TestTunnelSessionHeaderReadHonorsCancellationAndClearsDeadline(t *testing.T) {
+	clientConnection, serverConnection := net.Pipe()
+	rawClient, _ := yamux.Client(clientConnection, yamuxConfig())
+	server, _ := NewServerSession(serverConnection)
+	defer rawClient.Close()
+	defer server.Close()
+
+	stalled, _ := rawClient.OpenStream()
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, _, err := server.AcceptStream(ctx)
+		result <- err
+	}()
+	_, _ = stalled.Write([]byte{'R'})
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("AcceptStream cancellation error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled header read remained blocked")
+	}
+	_ = stalled.Close()
+
+	valid, _ := rawClient.OpenStream()
+	if err := writeStreamHeader(valid, StreamMetrics); err != nil {
+		t.Fatal(err)
+	}
+	acceptCtx, acceptCancel := context.WithTimeout(context.Background(), time.Second)
+	_, accepted, err := server.AcceptStream(acceptCtx)
+	acceptCancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(streamHeaderReadTimeout + 50*time.Millisecond)
+	go func() { _, _ = valid.Write([]byte("after-deadline")) }()
+	payload := make([]byte, len("after-deadline"))
+	if _, err := io.ReadFull(accepted, payload); err != nil || string(payload) != "after-deadline" {
+		t.Fatalf("read after cleared header deadline = %q, %v", payload, err)
+	}
+	_ = accepted.Close()
+}
+
+func TestTunnelSessionCleansUpCancellationBeforeAccept(t *testing.T) {
+	clientConnection, serverConnection := net.Pipe()
+	rawClient, _ := yamux.Client(clientConnection, yamuxConfig())
+	server, _ := NewServerSession(serverConnection)
+	defer rawClient.Close()
+	defer server.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, _, err := server.AcceptStream(ctx); err == nil {

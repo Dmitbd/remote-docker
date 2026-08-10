@@ -47,6 +47,40 @@ func TestTunnelTLSRejectsWrongPinsUnknownClientsAndTLS12(t *testing.T) {
 	}
 }
 
+func TestTunnelTLSRenewsCertificatesForReconnectAfterOneDay(t *testing.T) {
+	serverIdentity := testIdentity(t)
+	clientIdentity := testIdentity(t)
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	clientConfig, err := clientTLSConfig(clientIdentity, serverIdentity.PublicKey, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverConfig, err := serverTLSConfig(serverIdentity, func(key ed25519.PublicKey) bool {
+		return subtle.ConstantTimeCompare(key, clientIdentity.PublicKey) == 1
+	}, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstClient, firstServer, err := handshakeConfigStates(clientConfig, serverConfig)
+	if err != nil {
+		t.Fatalf("initial handshake error = %v", err)
+	}
+	now = now.Add(25 * time.Hour)
+	secondClient, secondServer, err := handshakeConfigStates(clientConfig, serverConfig)
+	if err != nil {
+		t.Fatalf("reconnect after certificate lifetime error = %v", err)
+	}
+	if firstClient.PeerCertificates[0].SerialNumber.Cmp(secondClient.PeerCertificates[0].SerialNumber) == 0 ||
+		firstServer.PeerCertificates[0].SerialNumber.Cmp(secondServer.PeerCertificates[0].SerialNumber) == 0 {
+		t.Fatal("reconnect reused an expired ephemeral certificate")
+	}
+	if subtle.ConstantTimeCompare(firstClient.PeerCertificates[0].PublicKey.(ed25519.PublicKey), serverIdentity.PublicKey) != 1 ||
+		subtle.ConstantTimeCompare(secondClient.PeerCertificates[0].PublicKey.(ed25519.PublicKey), serverIdentity.PublicKey) != 1 {
+		t.Fatal("certificate rotation changed the stable Windows identity")
+	}
+}
+
 func testIdentity(t *testing.T) Identity {
 	t.Helper()
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
@@ -89,17 +123,27 @@ func handshakePair(t *testing.T, clientIdentity, serverIdentity Identity, allowe
 }
 
 func handshakeConfigs(clientConfig, serverConfig *tls.Config) error {
+	_, _, err := handshakeConfigStates(clientConfig, serverConfig)
+	return err
+}
+
+func handshakeConfigStates(clientConfig, serverConfig *tls.Config) (tls.ConnectionState, tls.ConnectionState, error) {
 	client, server := net.Pipe()
 	defer client.Close()
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	errors := make(chan error, 2)
-	go func() { errors <- tls.Server(server, serverConfig).HandshakeContext(ctx) }()
-	go func() { errors <- tls.Client(client, clientConfig).HandshakeContext(ctx) }()
+	tlsServer := tls.Server(server, serverConfig)
+	tlsClient := tls.Client(client, clientConfig)
+	go func() { errors <- tlsServer.HandshakeContext(ctx) }()
+	go func() { errors <- tlsClient.HandshakeContext(ctx) }()
 	first, second := <-errors, <-errors
 	if first != nil {
-		return first
+		return tls.ConnectionState{}, tls.ConnectionState{}, first
 	}
-	return second
+	if second != nil {
+		return tls.ConnectionState{}, tls.ConnectionState{}, second
+	}
+	return tlsClient.ConnectionState(), tlsServer.ConnectionState(), nil
 }

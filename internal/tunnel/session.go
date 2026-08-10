@@ -22,6 +22,8 @@ type yamuxSession struct {
 	session *yamux.Session
 }
 
+const streamHeaderReadTimeout = 500 * time.Millisecond
+
 func NewClientSession(connection net.Conn) (Session, error) {
 	if connection == nil {
 		return nil, errors.New("tunnel client connection is required")
@@ -77,22 +79,56 @@ func (s *yamuxSession) OpenStream(ctx context.Context, kind StreamKind) (net.Con
 }
 
 func (s *yamuxSession) AcceptStream(ctx context.Context) (StreamKind, net.Conn, error) {
-	stream, err := waitStream(ctx, func() (net.Conn, error) {
-		stream, err := s.session.AcceptStream()
+	for {
+		stream, err := waitStream(ctx, func() (net.Conn, error) {
+			stream, err := s.session.AcceptStream()
+			if err != nil {
+				return nil, err
+			}
+			return stream, nil
+		})
 		if err != nil {
-			return nil, err
+			return 0, nil, fmt.Errorf("accept tunnel stream: %w", err)
 		}
-		return stream, nil
-	})
-	if err != nil {
-		return 0, nil, fmt.Errorf("accept tunnel stream: %w", err)
-	}
-	kind, err := readStreamHeader(stream)
-	if err != nil {
+		kind, err := readStreamHeaderContext(ctx, stream)
+		if err == nil {
+			return kind, stream, nil
+		}
 		_ = stream.Close()
-		return 0, nil, err
+		if ctx.Err() != nil {
+			return 0, nil, ctx.Err()
+		}
 	}
-	return kind, stream, nil
+}
+
+func readStreamHeaderContext(ctx context.Context, stream net.Conn) (StreamKind, error) {
+	deadline := time.Now().Add(streamHeaderReadTimeout)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	if err := stream.SetReadDeadline(deadline); err != nil {
+		return 0, fmt.Errorf("set tunnel stream header deadline: %w", err)
+	}
+	stopWatch := make(chan struct{})
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		select {
+		case <-ctx.Done():
+			_ = stream.SetReadDeadline(time.Now())
+		case <-stopWatch:
+		}
+	}()
+	kind, err := readStreamHeader(stream)
+	close(stopWatch)
+	<-watchDone
+	if clearErr := stream.SetReadDeadline(time.Time{}); err == nil && clearErr != nil {
+		err = fmt.Errorf("clear tunnel stream header deadline: %w", clearErr)
+	}
+	if err != nil && ctx.Err() != nil {
+		return 0, ctx.Err()
+	}
+	return kind, err
 }
 
 func waitStream(ctx context.Context, operation func() (net.Conn, error)) (net.Conn, error) {

@@ -72,7 +72,15 @@ func (c *Client) Run(ctx context.Context) error {
 		if err != nil {
 			_ = session.Close()
 			c.state(ClientDisconnected, err)
-			return err
+			if errors.Is(err, ErrLocalPortOccupied) {
+				return err
+			}
+			if !wait(ctx, reconnectDelay(failures)) {
+				break
+			}
+			failures++
+			reconnecting = true
+			continue
 		}
 		c.state(ClientConnected, nil)
 		failures = 0

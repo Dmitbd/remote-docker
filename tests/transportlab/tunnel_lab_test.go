@@ -128,7 +128,12 @@ func newTunnelLab(t *testing.T, macIdentity, windowsIdentity tunnel.Identity) *t
 		defer lab.wait.Done()
 		lab.active.Add(1)
 		defer lab.active.Add(-1)
-		server := &tunnel.Server{Accept: lab.accept, Dialer: lab.dialer, OnState: func(state tunnel.ServerState) { lab.states <- state }}
+		server := &tunnel.Server{Accept: lab.accept, Dialer: lab.dialer, OnState: func(state tunnel.ServerState) {
+			select {
+			case lab.states <- state:
+			default:
+			}
+		}}
 		lab.done <- server.Run(ctx)
 	}()
 	return lab

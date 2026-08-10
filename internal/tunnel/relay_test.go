@@ -58,8 +58,8 @@ func TestLoopbackRelaysFailWithoutClosingUnrelatedPortOwner(t *testing.T) {
 		t.Fatalf("reserve port: %v", err)
 	}
 	defer owner.Close()
-	if _, err := StartLoopbackRelays(context.Background(), newRecordingOpenSession()); err == nil {
-		t.Fatal("StartLoopbackRelays accepted occupied port")
+	if _, err := StartLoopbackRelays(context.Background(), newRecordingOpenSession()); !errors.Is(err, ErrLocalPortOccupied) {
+		t.Fatalf("StartLoopbackRelays occupied port error = %v", err)
 	}
 	connection, err := net.Dial("tcp4", owner.Addr().String())
 	if err != nil {

@@ -2,10 +2,16 @@ package tunnel
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
 )
+
+// ErrLocalPortOccupied distinguishes a local ownership conflict from a
+// transient tunnel failure. The client must not retry indefinitely while a
+// foreign process owns one of its fixed loopback ports.
+var ErrLocalPortOccupied = errors.New("required local tunnel port is occupied")
 
 const (
 	SyncRelayPort    = 49220
@@ -32,7 +38,7 @@ func StartLoopbackRelays(ctx context.Context, session Session) ([]net.Listener, 
 		listener, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(target.port)))
 		if err != nil {
 			closeListeners(listeners)
-			return nil, fmt.Errorf("listen on loopback port %d: %w", target.port, err)
+			return nil, fmt.Errorf("%w: listen on loopback port %d", ErrLocalPortOccupied, target.port)
 		}
 		listeners = append(listeners, listener)
 		go acceptRelay(ctx, listener, session, target.kind)
