@@ -757,6 +757,10 @@ func (t discoveryPairingTransport) Revoke(ctx context.Context, device config.Dev
 	if err != nil {
 		return err
 	}
+	controlAlias, err := sshtransport.ControlAlias(alias)
+	if err != nil {
+		return err
+	}
 	binary := t.SSHBinary
 	if binary == "" {
 		binary = "ssh"
@@ -772,7 +776,7 @@ func (t discoveryPairingTransport) Revoke(ctx context.Context, device config.Dev
 	var output bytes.Buffer
 	command := sshtransport.Command{
 		Binary: binary,
-		Args:   []string{"-F", t.SSHConfigPath, "remote-docker-device-" + alias, "remote-docker-remote", "rpc"},
+		Args:   []string{"-F", t.SSHConfigPath, controlAlias, "remote-docker-remote", "rpc"},
 		Stdin:  bytes.NewReader(append(encoded, '\n')), Stdout: &output, Stderr: io.Discard,
 	}
 	if err := runSSHCommand(ctx, command); err != nil {

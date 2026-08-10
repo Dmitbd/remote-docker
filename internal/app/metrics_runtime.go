@@ -27,6 +27,10 @@ func (c sshRemoteMetrics) SampleRemote(ctx context.Context) (metrics.RemoteSampl
 	if _, ok := cfg.Devices[cfg.ActiveDevice]; !ok {
 		return metrics.RemoteSample{}, errors.New("managed metrics device is unavailable")
 	}
+	alias, err := sshtransport.MetricsAlias(cfg.ActiveDevice)
+	if err != nil {
+		return metrics.RemoteSample{}, errors.New("managed metrics device is invalid")
+	}
 	request, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "metrics.sample"})
 	if err != nil {
 		return metrics.RemoteSample{}, errors.New("encode managed metrics RPC")
@@ -39,7 +43,7 @@ func (c sshRemoteMetrics) SampleRemote(ctx context.Context) (metrics.RemoteSampl
 	command := sshtransport.Command{
 		Binary: binary,
 		Args: []string{
-			"-F", c.sshConfigPath, "remote-docker-device-" + cfg.ActiveDevice,
+			"-F", c.sshConfigPath, alias,
 			"remote-docker-remote", "rpc",
 		},
 		Stdin: bytes.NewReader(append(request, '\n')), Stdout: &output, Stderr: io.Discard,

@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Dmitbd/remote-docker/internal/config"
@@ -78,6 +79,7 @@ type AgentRuntime struct {
 	localSync      localSyncLifecycle
 	windowsBridge  localSyncLifecycle
 	tunnelClient   localSyncLifecycle
+	tunnelReady    *atomic.Bool
 	windowsStopper managedWindowsRuntimeStopper
 	connection     connectionSessionRuntime
 	startupRecover func(context.Context) error
@@ -142,6 +144,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 	var localSync localSyncLifecycle
 	var windowsBridge localSyncLifecycle
 	var tunnelClient localSyncLifecycle
+	var tunnelReady *atomic.Bool
 	if runtime.GOOS == "windows" {
 		installer := provision.WSLPairingInstaller{}
 		registry := windowsPairingRegistry{store: store, configTransactions: configTransactions}
@@ -223,7 +226,10 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 			ClientDeviceID: macSync.DeviceID,
 		})
 		localSync = macSync
-		tunnelClient = tunnelClientLifecycle{client: newProductionTunnelClient(store, secrets)}
+		tunnelReady = &atomic.Bool{}
+		tunnelClient = tunnelClientLifecycle{client: newProductionTunnelClient(store, secrets, func(state tunnel.ClientState, _ error) {
+			tunnelReady.Store(state == tunnel.ClientConnected)
+		})}
 	}
 
 	observer := &productionAgentObserver{
@@ -300,6 +306,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 		restorer: restorer, pairHost: pairHost, ssh: sshRuntime, localSync: localSync,
 		windowsBridge: windowsBridge,
 		tunnelClient: tunnelClient,
+		tunnelReady: tunnelReady,
 		windowsStopper: func() managedWindowsRuntimeStopper {
 			if runtime.GOOS == "windows" {
 				return windowsbridge.ManagedWSLOperations{}
@@ -341,7 +348,9 @@ func (r *AgentRuntime) BindLifecycle(machine *lifecycle.Machine, appVersion stri
 	}
 	r.connection = &clientConnectionRuntime{
 		machine: machine,
-		ready:   func() bool { return r.agent != nil && r.agent.Status().State == AgentReady },
+		ready: func() bool {
+			return r.agent != nil && r.agent.Status().State == AgentReady && r.tunnelReady != nil && r.tunnelReady.Load()
+		},
 		clientDeviceID: func() string {
 			cfg, err := loadAgentConfig(r.store)
 			if err != nil {
@@ -353,6 +362,21 @@ func (r *AgentRuntime) BindLifecycle(machine *lifecycle.Machine, appVersion stri
 		transport: func(ctx context.Context) (PresenceTransport, error) {
 			return newProductionSSHPresenceTransport(r.store, r.sshConfigPath), nil
 		},
+	}
+	if tunnelRuntime, ok := r.tunnelClient.(tunnelClientLifecycle); ok && tunnelRuntime.client != nil {
+		previous := tunnelRuntime.client.OnState
+		tunnelRuntime.client.OnState = func(state tunnel.ClientState, err error) {
+			if previous != nil {
+				previous(state, err)
+			}
+			snapshot := machine.Snapshot()
+			switch state {
+			case tunnel.ClientDisconnected, tunnel.ClientReconnecting:
+				if snapshot.State == lifecycle.StateConnected {
+					_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventNetworkLost})
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -568,8 +592,9 @@ func (r tunnelClientLifecycle) Run(ctx context.Context, _ time.Duration) error {
 	return r.client.Run(ctx)
 }
 
-func newProductionTunnelClient(store config.Store, secrets credentials.Store) *tunnel.Client {
+func newProductionTunnelClient(store config.Store, secrets credentials.Store, onState func(tunnel.ClientState, error)) *tunnel.Client {
 	return &tunnel.Client{
+		OnState: onState,
 		Dial: func(ctx context.Context) (net.Conn, error) {
 			cfg, err := loadAgentConfig(store)
 			if err != nil || cfg.ActiveDevice == "" {
@@ -1002,7 +1027,7 @@ func (o *productionAgentObserver) Observe(ctx context.Context) AgentObservation 
 	if cfg.ActiveDevice == "" {
 		return AgentObservation{}
 	}
-	_, ok := cfg.Devices[cfg.ActiveDevice]
+	device, ok := cfg.Devices[cfg.ActiveDevice]
 	if !ok {
 		return AgentObservation{Paired: true, NeedsAction: "active paired device is missing"}
 	}
@@ -1067,7 +1092,7 @@ type productionSyncInspector struct {
 }
 
 func (i productionSyncInspector) client(cfg config.Config) (*syncer.Client, config.Device, error) {
-	device, ok := cfg.Devices[cfg.ActiveDevice]
+	_, ok := cfg.Devices[cfg.ActiveDevice]
 	if cfg.ActiveDevice == "" || !ok || strings.TrimSpace(device.SyncthingDeviceID) == "" {
 		return nil, config.Device{}, errors.New("paired Syncthing device is unavailable")
 	}
@@ -1249,7 +1274,7 @@ func (r *managedSSHRuntime) Ensure(ctx context.Context) error {
 	if err != nil || cfg.ActiveDevice == "" {
 		return errors.New("paired SSH device is unavailable")
 	}
-	device, ok := cfg.Devices[cfg.ActiveDevice]
+	_, ok := cfg.Devices[cfg.ActiveDevice]
 	if !ok {
 		return errors.New("paired SSH device is unavailable")
 	}
@@ -1471,16 +1496,24 @@ func (h *windowsPairingHost) serve(
 	go func() {
 		serveDone <- server.Serve(routed.Pairing)
 	}()
+	var tunnelDone chan error
 	if h.serveTunnel == nil {
 		_ = routed.Tunnel.Close()
 	} else {
-		go func() { _ = h.serveTunnel(ctx, routed.Tunnel) }()
+		tunnelDone = make(chan error, 1)
+		go func() { tunnelDone <- h.serveTunnel(ctx, routed.Tunnel) }()
 	}
 	serveFinished := false
+	tunnelFinished := false
 	defer func() {
 		_ = server.Close()
+		_ = routed.Pairing.Close()
+		_ = routed.Tunnel.Close()
 		if !serveFinished {
 			<-serveDone
+		}
+		if tunnelDone != nil && !tunnelFinished {
+			<-tunnelDone
 		}
 	}()
 
@@ -1499,6 +1532,10 @@ func (h *windowsPairingHost) serve(
 				serveFinished = true
 				stopTimer(timer)
 				return false
+			case <-tunnelDone:
+				tunnelFinished = true
+				stopTimer(timer)
+				return false
 			case <-timer.C:
 			}
 			backoff = nextPairingHostBackoff(backoff, maxBackoff)
@@ -1515,6 +1552,12 @@ func (h *windowsPairingHost) serve(
 			return true
 		case <-serveDone:
 			serveFinished = true
+			stopTimer(timer)
+			cancelPublish()
+			registration.Shutdown()
+			return false
+		case <-tunnelDone:
+			tunnelFinished = true
 			stopTimer(timer)
 			cancelPublish()
 			registration.Shutdown()

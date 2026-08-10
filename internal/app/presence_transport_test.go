@@ -16,9 +16,9 @@ func TestPresenceSSHArgsUsePinnedConfigAndDedicatedAllowedCommand(t *testing.T) 
 		"-o", "BatchMode=yes",
 		"-o", "ClearAllForwardings=yes",
 		"-o", "RequestTTY=no",
-		"remote-docker-device-pc-1", "remote-docker-remote", "rpc",
+		"remote-docker-device-pc-1-control", "remote-docker-remote", "rpc",
 	}
-	if got := presenceSSHArgs("/managed/ssh_config", "remote-docker-device-pc-1"); !reflect.DeepEqual(got, want) {
+	if got := presenceSSHArgs("/managed/ssh_config", "remote-docker-device-pc-1-control"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("presence SSH args = %#v, want %#v", got, want)
 	}
 }
