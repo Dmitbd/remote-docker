@@ -49,11 +49,11 @@ func RenderConfig(config Config) (string, error) {
 		return "", err
 	}
 	ip := net.ParseIP(config.HostName)
-	if ip == nil || ip.IsUnspecified() || (!ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast()) {
-		return "", errors.New("SSH host must be a literal private or local IP")
+	if ip == nil || !ip.IsLoopback() || ip.To4() == nil {
+		return "", errors.New("SSH host must be IPv4 loopback")
 	}
-	if config.Port <= 0 || config.Port > 65535 {
-		return "", errors.New("invalid SSH port")
+	if config.Port != 49222 {
+		return "", errors.New("Docker SSH alias must use loopback port 49222")
 	}
 	for name, path := range map[string]string{
 		"agent socket":     config.AgentSocket,
@@ -65,10 +65,7 @@ func RenderConfig(config Config) (string, error) {
 		}
 	}
 
-	lines := []string{
-		"Host " + alias,
-		"  HostName " + config.HostName,
-		"  Port " + strconv.Itoa(config.Port),
+	common := []string{
 		"  User remote-docker",
 		"  IdentityAgent " + sshToken(config.AgentSocket),
 		"  IdentityFile none",
@@ -82,7 +79,31 @@ func RenderConfig(config Config) (string, error) {
 		"  ControlPersist 60",
 		"  ControlPath " + sshToken(filepath.Join(config.ControlDir, "%C")),
 	}
+	lines := make([]string, 0, 3*(len(common)+3))
+	for _, endpoint := range []struct {
+		alias string
+		port int
+	}{
+		{alias, 49222},
+		{alias + "-control", 49223},
+		{alias + "-metrics", 49224},
+	} {
+		lines = append(lines, "Host "+endpoint.alias, "  HostName 127.0.0.1", "  Port "+strconv.Itoa(endpoint.port))
+		lines = append(lines, common...)
+	}
 	return strings.Join(lines, "\n") + "\n", nil
+}
+
+func DockerAlias(deviceID string) (string, error) { return hostAlias(deviceID) }
+
+func ControlAlias(deviceID string) (string, error) {
+	alias, err := hostAlias(deviceID)
+	return alias + "-control", err
+}
+
+func MetricsAlias(deviceID string) (string, error) {
+	alias, err := hostAlias(deviceID)
+	return alias + "-metrics", err
 }
 
 // WriteConfig atomically writes a private app-managed SSH config file.

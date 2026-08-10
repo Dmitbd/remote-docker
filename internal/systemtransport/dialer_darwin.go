@@ -38,6 +38,21 @@ func PairingDialContext() DialContextFunc {
 	return (netcatDialer{command: exec.Command}).DialContext
 }
 
+// TunnelDialContext permits only the single private-LAN tunnel port.
+func TunnelDialContext() DialContextFunc {
+	base := (netcatDialer{command: exec.Command}).DialContext
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		_, port, err := validatePairingTarget(network, address)
+		if err != nil {
+			return nil, err
+		}
+		if port != 49221 {
+			return nil, errors.New("tunnel target must use TCP 49221")
+		}
+		return base(ctx, network, address)
+	}
+}
+
 func (d netcatDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

@@ -543,12 +543,20 @@ func TestMacPairingCoordinatorPersistsPinnedDeviceAndRevokesBeforeLocalRemoval(t
 	device := cfg.Devices[confirmed.ID]
 	if cfg.ActiveDevice != confirmed.ID || device.SSHHostPublicKey != transport.hostKey ||
 		device.SyncthingDeviceID != "WINDOWS-SYNC" || device.ClientDeviceID != "LOCAL-SYNC" ||
-		device.SSHPort != 49222 || device.SyncPort != 49220 {
+		device.SSHPort != 49222 || device.SyncPort != 49220 || device.TunnelPort != tunnel.TunnelPort ||
+		device.TransportVersion != tunnel.CurrentTransportVersion || device.TunnelPeerPublicKey == "" {
 		t.Fatalf("persisted device = %#v config=%#v", device, cfg)
 	}
 	privateKey, err := secrets.Get(confirmed.ID, sshtransport.SSHPrivateKeyCredential)
 	if err != nil || len(privateKey) == 0 {
 		t.Fatalf("stored private key length=%d error=%v", len(privateKey), err)
+	}
+	encodedTunnelIdentity, err := secrets.Get(confirmed.ID, tunnel.IdentityCredential)
+	if err != nil {
+		t.Fatalf("stored tunnel identity error = %v", err)
+	}
+	if _, err := tunnel.IdentityFromPKCS8(encodedTunnelIdentity); err != nil {
+		t.Fatalf("stored tunnel identity is invalid: %v", err)
 	}
 	knownHosts, _ := os.ReadFile(filepath.Join(root, "known_hosts"))
 	if !strings.Contains(string(knownHosts), transport.hostKey) {

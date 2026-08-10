@@ -58,9 +58,7 @@ func (r productionSyncReadiness) EnsureFolder(ctx context.Context, requested wor
 	if err := waitLocalSyncthingAPI(ctx, client, interval); err != nil {
 		return errors.New("local Syncthing API is not ready")
 	}
-	remoteDevice, err := syncer.NewDeviceConfig(
-		device.SyncthingDeviceID, device.Name, device.Address, device.SyncPort,
-	)
+	remoteDevice, err := syncer.NewDeviceConfig(device.SyncthingDeviceID, device.Name)
 	if err != nil {
 		return errors.New("paired Syncthing bridge is invalid")
 	}

@@ -77,6 +77,7 @@ type AgentRuntime struct {
 	ssh            *managedSSHRuntime
 	localSync      localSyncLifecycle
 	windowsBridge  localSyncLifecycle
+	tunnelClient   localSyncLifecycle
 	windowsStopper managedWindowsRuntimeStopper
 	connection     connectionSessionRuntime
 	startupRecover func(context.Context) error
@@ -140,6 +141,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 	var pairHost *windowsPairingHost
 	var localSync localSyncLifecycle
 	var windowsBridge localSyncLifecycle
+	var tunnelClient localSyncLifecycle
 	if runtime.GOOS == "windows" {
 		installer := provision.WSLPairingInstaller{}
 		registry := windowsPairingRegistry{store: store, configTransactions: configTransactions}
@@ -221,6 +223,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 			ClientDeviceID: macSync.DeviceID,
 		})
 		localSync = macSync
+		tunnelClient = tunnelClientLifecycle{client: newProductionTunnelClient(store, secrets)}
 	}
 
 	observer := &productionAgentObserver{
@@ -296,6 +299,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 		agent: agent, store: store, sshConfigPath: sshConfigPath,
 		restorer: restorer, pairHost: pairHost, ssh: sshRuntime, localSync: localSync,
 		windowsBridge: windowsBridge,
+		tunnelClient: tunnelClient,
 		windowsStopper: func() managedWindowsRuntimeStopper {
 			if runtime.GOOS == "windows" {
 				return windowsbridge.ManagedWSLOperations{}
@@ -488,6 +492,11 @@ func (r *AgentRuntime) Run(ctx context.Context, interval time.Duration) error {
 		windowsBridgeDone = make(chan error, 1)
 		go func() { windowsBridgeDone <- r.windowsBridge.Run(lifecycleCtx, interval) }()
 	}
+	var tunnelDone chan error
+	if r.tunnelClient != nil {
+		tunnelDone = make(chan error, 1)
+		go func() { tunnelDone <- r.tunnelClient.Run(lifecycleCtx, interval) }()
+	}
 	recoveryCtx, cancel := context.WithTimeout(lifecycleCtx, startupRecoveryTimeout)
 	startupRecover := r.startupRecover
 	if startupRecover == nil {
@@ -495,10 +504,11 @@ func (r *AgentRuntime) Run(ctx context.Context, interval time.Duration) error {
 	}
 	_ = startupRecover(recoveryCtx)
 	cancel()
-	if localSyncDone == nil && windowsBridgeDone == nil && connectionDone == nil {
+	if localSyncDone == nil && windowsBridgeDone == nil && connectionDone == nil && tunnelDone == nil {
 		err := r.agent.Run(lifecycleCtx, interval)
 		cancelLifecycle()
 		waitLifecycle(pairHostDone)
+		waitLifecycle(tunnelDone)
 		return err
 	}
 	agentDone := make(chan error, 1)
@@ -510,6 +520,7 @@ func (r *AgentRuntime) Run(ctx context.Context, interval time.Duration) error {
 		waitLifecycle(windowsBridgeDone)
 		waitLifecycle(connectionDone)
 		waitLifecycle(pairHostDone)
+		waitLifecycle(tunnelDone)
 		return err
 	case err := <-localSyncDone:
 		cancelLifecycle()
@@ -517,6 +528,7 @@ func (r *AgentRuntime) Run(ctx context.Context, interval time.Duration) error {
 		waitLifecycle(windowsBridgeDone)
 		waitLifecycle(connectionDone)
 		waitLifecycle(pairHostDone)
+		waitLifecycle(tunnelDone)
 		return err
 	case err := <-windowsBridgeDone:
 		cancelLifecycle()
@@ -524,6 +536,7 @@ func (r *AgentRuntime) Run(ctx context.Context, interval time.Duration) error {
 		waitLifecycle(localSyncDone)
 		waitLifecycle(connectionDone)
 		waitLifecycle(pairHostDone)
+		waitLifecycle(tunnelDone)
 		return err
 	case err := <-connectionDone:
 		cancelLifecycle()
@@ -531,7 +544,80 @@ func (r *AgentRuntime) Run(ctx context.Context, interval time.Duration) error {
 		waitLifecycle(localSyncDone)
 		waitLifecycle(windowsBridgeDone)
 		waitLifecycle(pairHostDone)
+		waitLifecycle(tunnelDone)
 		return err
+	case err := <-tunnelDone:
+		cancelLifecycle()
+		<-agentDone
+		waitLifecycle(localSyncDone)
+		waitLifecycle(windowsBridgeDone)
+		waitLifecycle(connectionDone)
+		waitLifecycle(pairHostDone)
+		return err
+	}
+}
+
+type tunnelClientLifecycle struct {
+	client *tunnel.Client
+}
+
+func (r tunnelClientLifecycle) Run(ctx context.Context, _ time.Duration) error {
+	if r.client == nil {
+		return errors.New("Mac tunnel client is unavailable")
+	}
+	return r.client.Run(ctx)
+}
+
+func newProductionTunnelClient(store config.Store, secrets credentials.Store) *tunnel.Client {
+	return &tunnel.Client{
+		Dial: func(ctx context.Context) (net.Conn, error) {
+			cfg, err := loadAgentConfig(store)
+			if err != nil || cfg.ActiveDevice == "" {
+				return nil, errors.New("paired tunnel device is unavailable")
+			}
+			device, ok := cfg.Devices[cfg.ActiveDevice]
+			if !ok || device.TunnelPort != tunnel.TunnelPort || device.TransportVersion != tunnel.CurrentTransportVersion {
+				return nil, errors.New("paired tunnel metadata is unavailable")
+			}
+			encodedIdentity, err := secrets.Get(cfg.ActiveDevice, tunnel.IdentityCredential)
+			if err != nil {
+				return nil, err
+			}
+			defer clearSecret(encodedIdentity)
+			identity, err := tunnel.IdentityFromPKCS8(encodedIdentity)
+			if err != nil {
+				return nil, err
+			}
+			peer, err := tunnel.ParsePublicKey(device.TunnelPeerPublicKey)
+			if err != nil {
+				return nil, err
+			}
+			tlsConfig, err := tunnel.ClientTLSConfig(identity, peer)
+			if err != nil {
+				return nil, err
+			}
+			raw, err := systemtransport.TunnelDialContext()(ctx, "tcp", net.JoinHostPort(device.Address, "49221"))
+			if err != nil {
+				return nil, err
+			}
+			secured := tls.Client(raw, tlsConfig)
+			if err := secured.HandshakeContext(ctx); err != nil {
+				_ = raw.Close()
+				return nil, err
+			}
+			return secured, nil
+		},
+		OpenRelays: func(session tunnel.Session) ([]io.Closer, error) {
+			listeners, err := tunnel.StartLoopbackRelays(context.Background(), session)
+			if err != nil {
+				return nil, err
+			}
+			closers := make([]io.Closer, 0, len(listeners))
+			for _, listener := range listeners {
+				closers = append(closers, listener)
+			}
+			return closers, nil
+		},
 	}
 }
 
@@ -916,7 +1002,7 @@ func (o *productionAgentObserver) Observe(ctx context.Context) AgentObservation 
 	if cfg.ActiveDevice == "" {
 		return AgentObservation{}
 	}
-	device, ok := cfg.Devices[cfg.ActiveDevice]
+	_, ok := cfg.Devices[cfg.ActiveDevice]
 	if !ok {
 		return AgentObservation{Paired: true, NeedsAction: "active paired device is missing"}
 	}
@@ -1216,7 +1302,7 @@ func (r *managedSSHRuntime) Ensure(ctx context.Context) error {
 		return err
 	}
 	if err := sshtransport.WriteConfig(r.sshConfigPath, sshtransport.Config{
-		DeviceID: cfg.ActiveDevice, HostName: device.Address, Port: device.SSHPort,
+		DeviceID: cfg.ActiveDevice, HostName: "127.0.0.1", Port: tunnel.DockerRelayPort,
 		AgentSocket: r.agentSocketPath, KnownHostsFile: r.knownHostsPath, ControlDir: r.controlDir,
 	}); err != nil {
 		_ = managed.Close()

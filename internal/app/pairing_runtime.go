@@ -396,7 +396,7 @@ func (c *macPairingCoordinator) complete(ctx context.Context, sessionID string, 
 		return localapi.Device{}, unavailable("cannot pin paired SSH identity")
 	}
 	if err := sshtransport.WriteConfig(c.options.SSHConfigPath, sshtransport.Config{
-		DeviceID: remoteDeviceID, HostName: pending.target.Address, Port: record.SSHPort,
+		DeviceID: remoteDeviceID, HostName: "127.0.0.1", Port: tunnel.DockerRelayPort,
 		AgentSocket: c.options.AgentSocketPath, KnownHostsFile: c.options.KnownHostsPath, ControlDir: c.options.ControlDir,
 	}); err != nil {
 		clearSecret(pending.privateKeyPEM)
