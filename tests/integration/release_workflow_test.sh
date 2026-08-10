@@ -55,7 +55,8 @@ for required in \
   'bash tests/integration/macos_package_test.sh' \
   'packaging/macos/build-pkg.sh' \
   'packaging/macos/inspect-pkg.sh' \
-  'REMOTE_DOCKER_VERSION="0.1.${GITHUB_RUN_NUMBER}"' \
+  "REMOTE_DOCKER_VERSION: '0.2.7'" \
+  'REMOTE_DOCKER_BUILD_VERSION="${GITHUB_RUN_NUMBER}"' \
   'package_name="$(basename "${packages[0]}")"' \
   'remote-docker-macos-unsigned'; do
   grep -F "${required}" "${ci_workflow}" >/dev/null || fail "missing macOS CI evidence: ${required}"
@@ -71,8 +72,8 @@ for required_path in \
   grep -F "${required_path}" "${ci_workflow}" >/dev/null || fail "package CI path filter is missing: ${required_path}"
 done
 
-grep -F -- '-Version 0.2.7' "${ci_workflow}" >/dev/null || fail "Windows CI preview version must use the desktop application generation"
-grep -F 'Remote-Docker-0.2.7-x64-Setup.exe' "${ci_workflow}" >/dev/null || fail "Windows CI must verify exactly one Setup EXE"
+grep -F -- '-Version $env:REMOTE_DOCKER_VERSION' "${ci_workflow}" >/dev/null || fail "Windows CI preview version must use the shared product version"
+grep -F 'Remote-Docker-$env:REMOTE_DOCKER_VERSION-x64-Setup.exe' "${ci_workflow}" >/dev/null || fail "Windows CI must verify the shared-version Setup EXE"
 if grep -F 'build-msi.ps1' "${workflow}" "${ci_workflow}" >/dev/null; then
   fail "legacy MSI build remains in a release workflow"
 fi
