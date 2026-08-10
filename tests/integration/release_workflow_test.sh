@@ -48,6 +48,7 @@ done
 
 [[ "$(grep -c 'uses: actions/upload-artifact@' "${workflow}")" -ge 3 ]] || fail "expected rootfs and two desktop uploads"
 grep -F 'gh release create "$GITHUB_REF_NAME"' "${workflow}" >/dev/null || fail "release publication is missing"
+grep -F -- '--repo "$GITHUB_REPOSITORY"' "${workflow}" >/dev/null || fail "release publication must identify the repository without a checkout"
 
 for required in \
   'runs-on: macos-14' \

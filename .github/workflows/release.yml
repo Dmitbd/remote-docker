@@ -255,4 +255,4 @@ jobs:
           set -euo pipefail
           mapfile -d '' artifacts < <(find release -type f -print0 | sort -z)
           [[ ${#artifacts[@]} -gt 0 ]]
-          gh release create "$GITHUB_REF_NAME" "${artifacts[@]}" --verify-tag --generate-notes
+          gh release create "$GITHUB_REF_NAME" "${artifacts[@]}" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
