@@ -1,12 +1,18 @@
 #!/bin/bash
 set -euo pipefail
 
-[[ $# -eq 1 ]] || {
-  printf '%s\n' "usage: inspect-pkg.sh PACKAGE" >&2
+[[ $# -eq 1 || $# -eq 3 ]] || {
+  printf '%s\n' "usage: inspect-pkg.sh PACKAGE [EXPECTED_PRODUCT_VERSION EXPECTED_BUILD_VERSION]" >&2
   exit 2
 }
 
 package_path="$1"
+expected_product_version="${2:-}"
+expected_build_version="${3:-}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -n "${expected_product_version}" ]]; then
+  "${script_dir}/verify-package-version.sh" "${package_path}" "${expected_product_version}" "${expected_build_version}"
+fi
 inspection_root="$(mktemp -d "${TMPDIR:-/private/tmp}/remote-docker-pkg-inspect.XXXXXX")"
 trap 'rm -rf -- "${inspection_root}"' EXIT
 
