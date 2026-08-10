@@ -1247,6 +1247,8 @@ type windowsPairingHost struct {
 	minRetryBackoff   time.Duration
 	maxRetryBackoff   time.Duration
 	republishInterval time.Duration
+	tunnelTLSConfig   *tls.Config
+	serveTunnel       func(context.Context, net.Listener) error
 }
 
 func newWindowsPairingHost(installer pairing.Installer) (*windowsPairingHost, error) {
@@ -1337,11 +1339,26 @@ func (h *windowsPairingHost) serve(
 	if err != nil {
 		return false
 	}
+	routerConfig, err := tunnel.RoutingTLSConfig(tlsConfig, h.tunnelTLSConfig)
+	if err != nil {
+		return false
+	}
+	routed, err := tunnel.RouteTLS(ctx, privatePeerListener{Listener: listener}, routerConfig)
+	if err != nil {
+		return false
+	}
+	defer routed.Pairing.Close()
+	defer routed.Tunnel.Close()
 	server := &http.Server{Handler: h.server, ReadHeaderTimeout: 5 * time.Second}
 	serveDone := make(chan error, 1)
 	go func() {
-		serveDone <- server.Serve(tls.NewListener(privatePeerListener{Listener: listener}, tlsConfig))
+		serveDone <- server.Serve(routed.Pairing)
 	}()
+	if h.serveTunnel == nil {
+		_ = routed.Tunnel.Close()
+	} else {
+		go func() { _ = h.serveTunnel(ctx, routed.Tunnel) }()
+	}
 	serveFinished := false
 	defer func() {
 		_ = server.Close()

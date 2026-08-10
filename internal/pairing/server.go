@@ -494,7 +494,8 @@ func (s *Server) finishLocked(state SessionState, httpStatus int, deviceID strin
 
 func (s *Server) TLSConfig() (*tls.Config, error) {
 	return &tls.Config{
-		MinVersion: tls.VersionTLS13,
+		MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13,
+		NextProtos: []string{tunnel.PairingALPN},
 		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 			return s.ephemeralCertificate()
 		},

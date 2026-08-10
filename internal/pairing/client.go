@@ -15,6 +15,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/Dmitbd/remote-docker/internal/tunnel"
 )
 
 type confirmRequest struct {
@@ -87,7 +89,8 @@ func Inspect(ctx context.Context, baseURL, expectedInstanceID string, httpClient
 	}
 	if !validDisplayName(info.DisplayName) || info.InstanceID != expectedInstanceID ||
 		InstanceIDFromPublicKey(info.ServerPublicKey) != expectedInstanceID || response.TLS == nil ||
-		response.TLS.Version != tls.VersionTLS13 || len(response.TLS.PeerCertificates) != 1 {
+		response.TLS.Version != tls.VersionTLS13 || response.TLS.NegotiatedProtocol != tunnel.PairingALPN ||
+		len(response.TLS.PeerCertificates) != 1 {
 		return Info{}, errors.New("pairing info discovery identity does not match TLS")
 	}
 	certificate := response.TLS.PeerCertificates[0]
@@ -143,7 +146,9 @@ func Bootstrap(ctx context.Context, baseURL string, clientPublicKey ed25519.Publ
 	if err := json.Unmarshal(raw, &descriptor); err != nil {
 		return SessionDescriptor{}, fmt.Errorf("decode pairing session response: %w", err)
 	}
-	if !bytes.Equal(descriptor.ClientPublicKey, clientPublicKey) || response.TLS == nil || response.TLS.Version != tls.VersionTLS13 || len(response.TLS.PeerCertificates) != 1 {
+	if !bytes.Equal(descriptor.ClientPublicKey, clientPublicKey) || response.TLS == nil ||
+		response.TLS.Version != tls.VersionTLS13 || response.TLS.NegotiatedProtocol != tunnel.PairingALPN ||
+		len(response.TLS.PeerCertificates) != 1 {
 		return SessionDescriptor{}, ErrInvalidSession
 	}
 	serverPublicKey, ok := response.TLS.PeerCertificates[0].PublicKey.(ed25519.PublicKey)
@@ -169,6 +174,8 @@ func NewDiscoveryHTTPClient(timeout time.Duration, dialContext func(context.Cont
 	}
 	transport.TLSClientConfig = &tls.Config{
 		MinVersion: tls.VersionTLS13,
+		MaxVersion: tls.VersionTLS13,
+		NextProtos: []string{tunnel.PairingALPN},
 		// Trust is completed by binding the certificate key to mDNS and then
 		// authenticating that key with the six-digit OOB comparison.
 		InsecureSkipVerify: true, //nolint:gosec
@@ -344,11 +351,13 @@ func NewPinnedHTTPClient(serverPublicKey ed25519.PublicKey, dialContext func(con
 	}
 	transport.TLSClientConfig = &tls.Config{
 		MinVersion: tls.VersionTLS13,
+		MaxVersion: tls.VersionTLS13,
+		NextProtos: []string{tunnel.PairingALPN},
 		// The certificate is intentionally self-signed and addressed by a
 		// changing LAN IP. VerifyConnection pins its Ed25519 identity instead.
 		InsecureSkipVerify: true, //nolint:gosec
 		VerifyConnection: func(state tls.ConnectionState) error {
-			if state.Version != tls.VersionTLS13 || len(state.PeerCertificates) != 1 {
+			if state.Version != tls.VersionTLS13 || state.NegotiatedProtocol != tunnel.PairingALPN || len(state.PeerCertificates) != 1 {
 				return fmt.Errorf("pairing server presented an invalid TLS chain")
 			}
 			certificate := state.PeerCertificates[0]
