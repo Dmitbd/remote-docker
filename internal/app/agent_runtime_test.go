@@ -2001,3 +2001,31 @@ func (a *recordingManagedSSHAgent) Close() error {
 	a.closes.Add(1)
 	return nil
 }
+
+func TestLegacyPairRequiresExplicitUpgradeWithoutRawLANFallback(t *testing.T) {
+	store := config.Store{Path: filepath.Join(t.TempDir(), "config.json")}
+	legacy := config.Device{
+		Name: "Windows", Address: "192.168.1.20", SSHPort: 49222, SyncPort: 49220,
+		SSHHostPublicKey: "legacy-host-key", SyncthingDeviceID: "legacy-sync",
+	}
+	seed := config.Config{
+		SchemaVersion: config.CurrentSchemaVersion, ActiveDevice: "legacy-windows",
+		Devices: map[string]config.Device{"legacy-windows": legacy},
+	}
+	if err := store.Save(seed); err != nil {
+		t.Fatalf("seed legacy config: %v", err)
+	}
+	problem := transportUpgradeProblem(store)
+	if problem == nil || problem.Code != lifecycle.ProblemTransportUpgradeRequired ||
+		problem.Message != lifecycle.TransportUpgradeMessage || problem.Action != lifecycle.TransportUpgradeAction {
+		t.Fatalf("transport upgrade problem = %#v", problem)
+	}
+	client := newProductionTunnelClient(store, credentials.NewMemoryStore(), nil)
+	if _, err := client.Dial(context.Background()); err == nil || !strings.Contains(err.Error(), "tunnel metadata") {
+		t.Fatalf("legacy tunnel Dial() error = %v, want metadata rejection before network fallback", err)
+	}
+	after, err := store.Load()
+	if err != nil || !reflect.DeepEqual(after, seed) {
+		t.Fatalf("legacy trust changed without explicit forget: config=%#v err=%v", after, err)
+	}
+}

@@ -126,6 +126,21 @@ func TestBuildViewModelExplainsWhoEndedTheConnection(t *testing.T) {
 	}
 }
 
+func TestBuildViewModelExplainsSecureTransportRepair(t *testing.T) {
+	model := BuildViewModel(lifecycle.Snapshot{
+		Role: lifecycle.RoleMacClient, State: lifecycle.StateNeedsAction, TrustedPeers: 1,
+		Peer: &lifecycle.Peer{ID: "legacy", Name: "Windows"},
+		Problem: &lifecycle.Problem{
+			Code: lifecycle.ProblemTransportUpgradeRequired, Message: lifecycle.TransportUpgradeMessage,
+			Action: lifecycle.TransportUpgradeAction,
+		},
+	}, SectionConnection, time.Now())
+	if model.Status != "Нужно обновить подключение" || model.Headline != "Повторите безопасное сопряжение" ||
+		model.Detail != lifecycle.TransportUpgradeMessage || model.Notice != lifecycle.TransportUpgradeAction {
+		t.Fatalf("transport upgrade model = %#v", model)
+	}
+}
+
 func TestResourceRoleLabelsExplainWhereDockerRuns(t *testing.T) {
 	roles := ResourceRoleLabels()
 	if roles.Mac != "Mac передаёт исходники и команды" || roles.Windows != "Windows выполняет Docker-нагрузку" {

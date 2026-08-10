@@ -52,7 +52,7 @@ type HTTPError struct {
 // The display name remains unverified until the user confirms the OOB code.
 func Inspect(ctx context.Context, baseURL, expectedInstanceID string, httpClient *http.Client) (Info, error) {
 	parsed, err := url.Parse(baseURL)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || expectedInstanceID == "" {
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
 		return Info{}, errorsNewSecureURL()
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+pairInfoPath, nil)
@@ -86,6 +86,9 @@ func Inspect(ctx context.Context, baseURL, expectedInstanceID string, httpClient
 	}
 	if decoder.Decode(&struct{}{}) != io.EOF {
 		return Info{}, errors.New("decode pairing info response: trailing data")
+	}
+	if expectedInstanceID == "" {
+		expectedInstanceID = info.InstanceID
 	}
 	if !validDisplayName(info.DisplayName) || info.InstanceID != expectedInstanceID ||
 		InstanceIDFromPublicKey(info.ServerPublicKey) != expectedInstanceID || response.TLS == nil ||

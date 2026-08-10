@@ -616,6 +616,7 @@ func (c *macPairingCoordinator) forgetLocal(deviceID string) error {
 }
 
 type discoveryPairingTransport struct {
+	Store         config.Store
 	SSHConfigPath string
 	SSHBinary     string
 	DialContext   systemtransport.DialContextFunc
@@ -656,17 +657,39 @@ func (t discoveryPairingTransport) Bootstrap(ctx context.Context, selector strin
 	if strings.TrimSpace(selector) == "" {
 		return pairingTarget{}, pairing.SessionDescriptor{}, errors.New("select a pairing peer before starting")
 	}
-	peers, err := t.discoverPeers(ctx)
-	if err != nil {
-		return pairingTarget{}, pairing.SessionDescriptor{}, err
-	}
-	peer, addresses, err := selectPairingPeer(peers, selector)
-	if err != nil {
-		return pairingTarget{}, pairing.SessionDescriptor{}, err
-	}
-	target, err := t.inspectPeer(ctx, peer, addresses)
-	if err != nil {
-		return pairingTarget{}, pairing.SessionDescriptor{}, err
+	var target pairingTarget
+	selectorIP := net.ParseIP(selector)
+	if selectorIP != nil {
+		if !selectorIP.IsPrivate() || selectorIP.IsLoopback() || selectorIP.IsUnspecified() {
+			return pairingTarget{}, pairing.SessionDescriptor{}, errors.New("manual pairing requires a private IP address")
+		}
+		inspect := t.inspect
+		if inspect == nil {
+			inspect = func(ctx context.Context, endpoint, instanceID string) (pairing.Info, error) {
+				return pairing.Inspect(ctx, endpoint, instanceID, pairing.NewDiscoveryHTTPClient(5*time.Second, t.DialContext))
+			}
+		}
+		manual := pairingTarget{Address: selectorIP.String(), PairingPort: tunnel.TunnelPort}
+		info, err := inspect(ctx, pairingEndpoint(manual), "")
+		if err != nil {
+			return pairingTarget{}, pairing.SessionDescriptor{}, fmt.Errorf("inspect manual pairing peer: %w", err)
+		}
+		manual.InstanceID, manual.Name = info.InstanceID, info.DisplayName
+		manual.ServerPublicKey = append(ed25519.PublicKey(nil), info.ServerPublicKey...)
+		target = manual
+	} else {
+		peers, err := t.discoverPeers(ctx)
+		if err != nil {
+			return pairingTarget{}, pairing.SessionDescriptor{}, err
+		}
+		peer, addresses, err := selectPairingPeer(peers, selector)
+		if err != nil {
+			return pairingTarget{}, pairing.SessionDescriptor{}, err
+		}
+		target, err = t.inspectPeer(ctx, peer, addresses)
+		if err != nil {
+			return pairingTarget{}, pairing.SessionDescriptor{}, err
+		}
 	}
 	bootstrap := t.bootstrap
 	if bootstrap == nil {
@@ -718,12 +741,33 @@ func (t discoveryPairingTransport) discoverPeers(ctx context.Context) ([]discove
 		return t.discover(ctx)
 	}
 	browser, err := discovery.NewBrowser()
-	if err != nil {
-		return nil, err
-	}
 	discoveryCtx, cancel := context.WithTimeout(ctx, pairingDiscoveryTimeout)
 	defer cancel()
-	return (discovery.Service{Browser: browser}).Discover(discoveryCtx)
+	service := discovery.Service{UDP: discovery.DiscoverUDP, Saved: t.savedPeers()}
+	if err == nil {
+		service.Browser = browser
+	}
+	return service.Discover(discoveryCtx)
+}
+
+func (t discoveryPairingTransport) savedPeers() []discovery.Peer {
+	if strings.TrimSpace(t.Store.Path) == "" {
+		return nil
+	}
+	cfg, err := loadAgentConfig(t.Store)
+	if err != nil || cfg.ActiveDevice == "" {
+		return nil
+	}
+	device, ok := cfg.Devices[cfg.ActiveDevice]
+	address := net.ParseIP(device.Address)
+	if !ok || address == nil || !address.IsPrivate() || address.IsLoopback() ||
+		device.TunnelPort != tunnel.TunnelPort || device.TransportVersion != tunnel.CurrentTransportVersion {
+		return nil
+	}
+	return []discovery.Peer{{
+		InstanceID: cfg.ActiveDevice, DeviceID: cfg.ActiveDevice, Port: tunnel.TunnelPort,
+		Addresses: []net.IP{address},
+	}}
 }
 
 func (t discoveryPairingTransport) Confirm(ctx context.Context, target pairingTarget, descriptor pairing.SessionDescriptor, clientDeviceID, authorizedKey, code string) (pairing.DeviceRecord, error) {

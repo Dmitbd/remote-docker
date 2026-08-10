@@ -216,6 +216,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 			Store: store, Secrets: secrets,
 			ConfigTransactions: configTransactions,
 			Transport: discoveryPairingTransport{
+				Store:         store,
 				SSHConfigPath: sshConfigPath,
 				DialContext:   systemtransport.PairingDialContext(),
 			},
@@ -332,6 +333,13 @@ func (r *AgentRuntime) BindLifecycle(machine *lifecycle.Machine, appVersion stri
 		return errors.New("production lifecycle cannot be rebound while running")
 	}
 	snapshot := machine.Snapshot()
+	if problem := transportUpgradeProblem(r.store); problem != nil {
+		var err error
+		snapshot, err = machine.Apply(lifecycle.Event{Type: lifecycle.EventProblemDetected, Problem: problem})
+		if err != nil {
+			return fmt.Errorf("publish transport upgrade requirement: %w", err)
+		}
+	}
 	if strings.TrimSpace(appVersion) == "" {
 		appVersion = "dev"
 	}
@@ -786,7 +794,11 @@ func (c *productionAgentController) Handle(ctx context.Context, method localapi.
 		if err := decodeControlParams(raw, &params); err != nil {
 			return nil, err
 		}
-		return c.pairing.Start(ctx, params.Device)
+		target, err := params.Target()
+		if err != nil {
+			return nil, needsAction(err.Error())
+		}
+		return c.pairing.Start(ctx, target)
 	case localapi.MethodPairStatus:
 		var params localapi.PairSessionParams
 		if err := decodeControlParams(raw, &params); err != nil {
@@ -1032,6 +1044,10 @@ func (o *productionAgentObserver) Observe(ctx context.Context) AgentObservation 
 		return AgentObservation{Paired: true, NeedsAction: "active paired device is missing"}
 	}
 	observation := AgentObservation{Paired: true}
+	if !hasCurrentTunnelTrust(device) {
+		observation.NeedsAction = lifecycle.TransportUpgradeMessage
+		return observation
+	}
 	if strings.TrimSpace(device.SSHHostPublicKey) == "" || strings.TrimSpace(device.SyncthingDeviceID) == "" {
 		observation.NeedsAction = "paired device metadata is incomplete; pair the device again"
 		return observation
@@ -1092,7 +1108,7 @@ type productionSyncInspector struct {
 }
 
 func (i productionSyncInspector) client(cfg config.Config) (*syncer.Client, config.Device, error) {
-	_, ok := cfg.Devices[cfg.ActiveDevice]
+	device, ok := cfg.Devices[cfg.ActiveDevice]
 	if cfg.ActiveDevice == "" || !ok || strings.TrimSpace(device.SyncthingDeviceID) == "" {
 		return nil, config.Device{}, errors.New("paired Syncthing device is unavailable")
 	}
@@ -1102,6 +1118,29 @@ func (i productionSyncInspector) client(cfg config.Config) (*syncer.Client, conf
 	}
 	client, err := syncer.NewClient(endpoint, localSyncthingCredentialOwner, i.secrets, i.httpClient)
 	return client, device, err
+}
+
+func hasCurrentTunnelTrust(device config.Device) bool {
+	if device.TunnelPort != tunnel.TunnelPort || device.TransportVersion != tunnel.CurrentTransportVersion {
+		return false
+	}
+	_, err := tunnel.ParsePublicKey(device.TunnelPeerPublicKey)
+	return err == nil
+}
+
+func transportUpgradeProblem(store config.Store) *lifecycle.Problem {
+	cfg, err := loadAgentConfig(store)
+	if err != nil || cfg.ActiveDevice == "" {
+		return nil
+	}
+	device, ok := cfg.Devices[cfg.ActiveDevice]
+	if !ok || hasCurrentTunnelTrust(device) {
+		return nil
+	}
+	return &lifecycle.Problem{
+		Code: lifecycle.ProblemTransportUpgradeRequired, Device: lifecycle.InitiatorSystem,
+		Message: lifecycle.TransportUpgradeMessage, Action: lifecycle.TransportUpgradeAction,
+	}
 }
 
 func (i productionSyncInspector) Connected(ctx context.Context, cfg config.Config) (bool, error) {
@@ -1391,6 +1430,8 @@ type windowsPairingHost struct {
 	republishInterval time.Duration
 	tunnelTLSConfig   *tls.Config
 	serveTunnel       func(context.Context, net.Listener) error
+	identity          tunnel.Identity
+	displayName       string
 }
 
 func newWindowsPairingHost(installer pairing.Installer) (*windowsPairingHost, error) {
@@ -1433,6 +1474,7 @@ func newWindowsPairingHostWithRegistryAndIdentity(installer pairing.Installer, r
 		server: server, publisher: discovery.ZeroconfPublisher{}, listen: net.Listen,
 		minRetryBackoff: pairingHostMinRetryBackoff, maxRetryBackoff: pairingHostMaxRetryBackoff,
 		republishInterval: pairingHostRepublishInterval,
+		identity: identity, displayName: strings.TrimSpace(deviceName),
 	}, nil
 }
 
@@ -1445,6 +1487,13 @@ func (h *windowsPairingHost) Run(ctx context.Context) {
 	if instanceID == "" {
 		return
 	}
+	udpCtx, stopUDP := context.WithCancel(ctx)
+	udpDone := make(chan error, 1)
+	go func() { udpDone <- discovery.ServeUDP(udpCtx, h.identity, h.displayName) }()
+	defer func() {
+		stopUDP()
+		<-udpDone
+	}()
 	minBackoff, maxBackoff, republishInterval := h.durations()
 	backoff := minBackoff
 	for ctx.Err() == nil {

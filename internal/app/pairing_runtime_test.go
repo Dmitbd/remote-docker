@@ -3,14 +3,17 @@ package app
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"net"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/Dmitbd/remote-docker/internal/config"
 	"github.com/Dmitbd/remote-docker/internal/discovery"
 	"github.com/Dmitbd/remote-docker/internal/pairing"
+	"github.com/Dmitbd/remote-docker/internal/tunnel"
 )
 
 func TestDiscoveryPairingCandidatesResolveNameThroughTLSWithoutStartingSession(t *testing.T) {
@@ -46,6 +49,55 @@ func TestDiscoveryPairingCandidatesResolveNameThroughTLSWithoutStartingSession(t
 	}}
 	if !reflect.DeepEqual(targets, want) || inspectCalls != 1 || bootstrapCalls != 0 {
 		t.Fatalf("targets=%#v inspect=%d bootstrap=%d, want %#v/1/0", targets, inspectCalls, bootstrapCalls, want)
+	}
+}
+
+func TestDiscoveryPairingBootstrapSupportsOnlyLiteralPrivateManualTarget(t *testing.T) {
+	serverKey := make(ed25519.PublicKey, ed25519.PublicKeySize)
+	serverKey[0] = 3
+	var inspected string
+	transport := discoveryPairingTransport{
+		inspect: func(_ context.Context, endpoint, instanceID string) (pairing.Info, error) {
+			inspected = endpoint
+			if instanceID != "" {
+				t.Fatalf("manual expected instance = %q, want empty self-bound identity", instanceID)
+			}
+			return pairing.Info{InstanceID: "manual-crypto-id", DisplayName: "Windows", ServerPublicKey: serverKey}, nil
+		},
+		bootstrap: func(_ context.Context, endpoint string, _ ed25519.PublicKey) (pairing.SessionDescriptor, error) {
+			return pairing.SessionDescriptor{ID: "manual", ServerPublicKey: serverKey}, nil
+		},
+	}
+	target, _, err := transport.Bootstrap(context.Background(), "192.168.1.20", make(ed25519.PublicKey, ed25519.PublicKeySize))
+	if err != nil || inspected != "https://192.168.1.20:49221" || target.PairingPort != tunnel.TunnelPort || target.InstanceID != "manual-crypto-id" {
+		t.Fatalf("manual Bootstrap() = %#v, inspected=%q, err=%v", target, inspected, err)
+	}
+	for _, selector := range []string{"example.test", "8.8.8.8", "127.0.0.1", "::1"} {
+		if _, _, err := transport.Bootstrap(context.Background(), selector, make(ed25519.PublicKey, ed25519.PublicKeySize)); err == nil {
+			t.Fatalf("Bootstrap(%q) accepted unsafe manual target", selector)
+		}
+	}
+}
+
+func TestDiscoveryPairingSavedPeerRequiresCurrentTunnelMetadata(t *testing.T) {
+	store := config.Store{Path: t.TempDir() + "/config.json"}
+	legacy := config.Device{Name: "Windows", Address: "192.168.1.20", SSHPort: 49222}
+	if err := store.Save(config.Config{SchemaVersion: config.CurrentSchemaVersion, ActiveDevice: "windows", Devices: map[string]config.Device{"windows": legacy}}); err != nil {
+		t.Fatal(err)
+	}
+	transport := discoveryPairingTransport{Store: store}
+	if peers := transport.savedPeers(); len(peers) != 0 {
+		t.Fatalf("legacy saved peers = %#v, want none", peers)
+	}
+	publicKey, _, _ := ed25519.GenerateKey(rand.Reader)
+	legacy.TunnelPort = tunnel.TunnelPort
+	legacy.TransportVersion = tunnel.CurrentTransportVersion
+	legacy.TunnelPeerPublicKey = tunnel.EncodePublicKey(publicKey)
+	if err := store.Save(config.Config{SchemaVersion: config.CurrentSchemaVersion, ActiveDevice: "windows", Devices: map[string]config.Device{"windows": legacy}}); err != nil {
+		t.Fatal(err)
+	}
+	if peers := transport.savedPeers(); len(peers) != 1 || peers[0].DeviceID != "windows" || peers[0].Port != tunnel.TunnelPort {
+		t.Fatalf("current saved peers = %#v", peers)
 	}
 }
 

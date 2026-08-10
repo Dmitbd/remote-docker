@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 
 	"github.com/Dmitbd/remote-docker/internal/metrics"
 )
@@ -203,6 +204,32 @@ type PairCandidatesResult struct {
 
 type PairStartParams struct {
 	Device string `json:"device,omitempty"`
+	Address string `json:"address,omitempty"`
+	Port int `json:"port,omitempty"`
+}
+
+func (p PairStartParams) Target() (string, error) {
+	if p.Address == "" {
+		if p.Port != 0 {
+			return "", fmt.Errorf("manual pairing port requires an address")
+		}
+		return p.Device, nil
+	}
+	if p.Device != "" {
+		return "", fmt.Errorf("choose either a discovered device or a manual address")
+	}
+	ip := net.ParseIP(p.Address)
+	if ip == nil || !ip.IsPrivate() || ip.IsLoopback() || ip.IsUnspecified() {
+		return "", fmt.Errorf("manual pairing requires a literal private IP address")
+	}
+	port := p.Port
+	if port == 0 {
+		port = 49221
+	}
+	if port != 49221 {
+		return "", fmt.Errorf("manual pairing requires TCP 49221")
+	}
+	return ip.String(), nil
 }
 
 type ReplaceDeviceParams struct {

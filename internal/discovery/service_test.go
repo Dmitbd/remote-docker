@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"net"
 	"reflect"
 	"sort"
@@ -66,6 +67,54 @@ func TestDiscoverFiltersAndDeduplicatesRecords(t *testing.T) {
 	pairedPeer := findPeer(t, peers, "stable-device")
 	if pairedPeer.Pairing || pairedPeer.DeviceID != "stable-device" {
 		t.Fatalf("paired peer = %#v", pairedPeer)
+	}
+}
+
+func TestDiscoverDeduplicatesMDNSUDPAndSavedByCryptographicInstanceID(t *testing.T) {
+	records := make(chan Record, 1)
+	records <- Record{Port: 49221, TXT: []string{"version=1", "instance=crypto-id", "pairing=1"}, Addresses: []net.IP{net.ParseIP("192.168.1.20")}}
+	close(records)
+	service := Service{
+		Browser: fakeBrowser{records: records},
+		UDP: func(context.Context) ([]Peer, error) {
+			return []Peer{{InstanceID: "crypto-id", Pairing: true, Port: 49221, Addresses: []net.IP{net.ParseIP("10.0.0.20")}}}, nil
+		},
+		Saved: []Peer{{InstanceID: "crypto-id", Pairing: true, Port: 49221, Addresses: []net.IP{net.ParseIP("172.16.0.20")}}},
+	}
+	peers, err := service.Discover(context.Background())
+	if err != nil || len(peers) != 1 {
+		t.Fatalf("Discover() = %#v, %v", peers, err)
+	}
+	if want := []string{"10.0.0.20", "172.16.0.20", "192.168.1.20"}; !reflect.DeepEqual(ipStrings(peers[0].Addresses), want) {
+		t.Fatalf("merged addresses = %#v, want %#v", ipStrings(peers[0].Addresses), want)
+	}
+}
+
+func TestDiscoverSavedTrustWinsOverPairingAdvertisementForSameIdentity(t *testing.T) {
+	records := make(chan Record, 1)
+	records <- Record{Port: 49221, TXT: []string{"version=1", "instance=crypto-id", "pairing=1"}, Addresses: []net.IP{net.ParseIP("192.168.1.20")}}
+	close(records)
+	peers, err := (Service{
+		Browser: fakeBrowser{records: records},
+		Saved: []Peer{{InstanceID: "crypto-id", DeviceID: "crypto-id", Port: 49221, Addresses: []net.IP{net.ParseIP("10.0.0.20")}}},
+	}).Discover(context.Background())
+	if err != nil || len(peers) != 1 {
+		t.Fatalf("Discover() = %#v, %v", peers, err)
+	}
+	if peers[0].Pairing || peers[0].DeviceID != "crypto-id" {
+		t.Fatalf("saved trust was downgraded by discovery: %#v", peers[0])
+	}
+}
+
+func TestDiscoverUsesUDPFallbackWhenMDNSIsUnavailable(t *testing.T) {
+	peers, err := (Service{
+		Browser: fakeBrowser{err: errors.New("multicast unavailable")},
+		UDP: func(context.Context) ([]Peer, error) {
+			return []Peer{{InstanceID: "crypto-id", Pairing: true, Port: 49221, Addresses: []net.IP{net.ParseIP("192.168.1.20")}}}, nil
+		},
+	}).Discover(context.Background())
+	if err != nil || len(peers) != 1 || peers[0].InstanceID != "crypto-id" {
+		t.Fatalf("UDP fallback = %#v, %v", peers, err)
 	}
 }
 

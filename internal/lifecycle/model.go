@@ -4,6 +4,12 @@ package lifecycle
 
 import "time"
 
+const (
+	ProblemTransportUpgradeRequired = "transport_upgrade_required"
+	TransportUpgradeMessage         = "Сохранённое подключение использует старый транспорт. Забудьте устройство на Mac и Windows, затем выполните сопряжение ещё раз."
+	TransportUpgradeAction          = "Забудьте старое доверие на обоих устройствах и один раз выполните безопасное сопряжение."
+)
+
 type Role string
 
 const (

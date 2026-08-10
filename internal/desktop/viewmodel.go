@@ -199,6 +199,11 @@ func BuildViewModel(snapshot lifecycle.Snapshot, selected Section, now time.Time
 		model.Headline = "Remote Docker требует внимания"
 		if snapshot.Problem != nil {
 			model.Detail = snapshot.Problem.Message
+			if snapshot.Problem.Code == lifecycle.ProblemTransportUpgradeRequired {
+				model.Status = "Нужно обновить подключение"
+				model.Headline = "Повторите безопасное сопряжение"
+				model.Notice = snapshot.Problem.Action
+			}
 		}
 		model.Actions = append(model.Actions, enabledAction(ActionDiagnostics, "Открыть диагностику"))
 	default:
