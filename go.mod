@@ -6,6 +6,7 @@ require (
 	fyne.io/fyne/v2 v2.8.0
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/grandcat/zeroconf v1.0.0
+	github.com/hashicorp/yamux v0.1.2
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/crypto v0.54.0
 	golang.org/x/sys v0.47.0
