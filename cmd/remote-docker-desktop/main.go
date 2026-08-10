@@ -44,6 +44,9 @@ func main() {
 }
 
 func run() error {
+	if err := configureDesktopShell(runtime.GOOS, setAccessoryActivationPolicy); err != nil {
+		return err
+	}
 	rootCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt)
 	ctx, cancel := context.WithCancel(rootCtx)
 	defer stopSignals()
@@ -168,6 +171,16 @@ func run() error {
 		return fmt.Errorf("stop desktop runtime: %w", err)
 	}
 	return nil
+}
+
+func configureDesktopShell(platform string, setAccessory func() error) error {
+	if platform != "darwin" {
+		return nil
+	}
+	if setAccessory == nil {
+		return errors.New("configure macOS accessory application")
+	}
+	return setAccessory()
 }
 
 func completeDesktopShutdown(

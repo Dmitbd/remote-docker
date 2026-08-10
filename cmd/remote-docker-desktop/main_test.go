@@ -55,6 +55,25 @@ func TestUIExecutableLivesBesideDesktopHost(t *testing.T) {
 	}
 }
 
+func TestConfigureDesktopShellUsesAccessoryPolicyOnlyOnDarwin(t *testing.T) {
+	calls := 0
+	setAccessory := func() error {
+		calls++
+		return nil
+	}
+	if err := configureDesktopShell("darwin", setAccessory); err != nil || calls != 1 {
+		t.Fatalf("darwin shell configuration calls=%d error=%v", calls, err)
+	}
+	calls = 0
+	if err := configureDesktopShell("windows", setAccessory); err != nil || calls != 0 {
+		t.Fatalf("windows shell configuration calls=%d error=%v", calls, err)
+	}
+	wantErr := errors.New("accessory policy unavailable")
+	if err := configureDesktopShell("darwin", func() error { return wantErr }); !errors.Is(err, wantErr) {
+		t.Fatalf("darwin shell configuration error=%v, want %v", err, wantErr)
+	}
+}
+
 func TestCompleteDesktopShutdownPreservesOwnedCleanupOrder(t *testing.T) {
 	events := []string{}
 	err := completeDesktopShutdown(
