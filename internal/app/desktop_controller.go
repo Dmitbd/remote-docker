@@ -13,6 +13,8 @@ import (
 	"github.com/Dmitbd/remote-docker/internal/pairing"
 )
 
+const pairingRollbackTimeout = 5 * time.Second
+
 // DesktopController is the single mutation boundary shared by the window,
 // tray, and command-line client. Presentation code never controls processes.
 type DesktopController struct {
@@ -98,13 +100,19 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 			return nil, unavailable("pairing returned an invalid response")
 		}
 		if err := c.startPairing(started); err != nil {
-			cancelRaw, _ := json.Marshal(localapi.PairSessionParams{SessionID: started.SessionID})
-			if _, cancelErr := c.delegate(ctx, localapi.MethodPairCancel, cancelRaw); cancelErr != nil {
-				return nil, unavailable("pairing rollback could not cancel the created remote session")
-			}
-			return nil, err
+			return c.rollbackStartedPairing(started, err)
 		}
 		return started, nil
+	case localapi.MethodReplaceDevice:
+		if !c.operations.TryLock() {
+			return nil, needsAction("wait for the active lifecycle operation to finish")
+		}
+		defer c.operations.Unlock()
+		var params localapi.ReplaceDeviceParams
+		if err := decodeOptionalControlParams(raw, &params); err != nil {
+			return nil, err
+		}
+		return c.replaceDeviceLocked(ctx, params)
 	case localapi.MethodConnect:
 		if !c.operations.TryLock() {
 			return nil, needsAction("wait for the active lifecycle operation to finish")
@@ -154,34 +162,7 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 		if err := decodeOptionalControlParams(raw, &params); err != nil {
 			return nil, err
 		}
-		snapshot := c.supervisor.Snapshot()
-		if snapshot.Peer == nil || strings.TrimSpace(params.DeviceID) != "" && params.DeviceID != snapshot.Peer.ID {
-			return nil, needsAction("trusted device was not found")
-		}
-		if c.fallback == nil {
-			return nil, unavailable("paired device cleanup is unavailable")
-		}
-		reserved, err := c.supervisor.machine.Apply(lifecycle.Event{
-			Type: lifecycle.EventTrustForgetStarted,
-			Peer: &lifecycle.Peer{ID: snapshot.Peer.ID},
-		})
-		if err != nil || reserved.Peer == nil {
-			return nil, needsAction("disconnect before forgetting the trusted device")
-		}
-		rollback := func(cause error) (any, error) {
-			if _, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventTrustForgetCancelled}); err != nil {
-				return nil, unavailable("trusted-device cleanup reservation could not be released")
-			}
-			return nil, cause
-		}
-		unpairRaw, _ := json.Marshal(localapi.UnpairParams{DeviceID: reserved.Peer.ID, LocalOnly: params.LocalOnly})
-		if _, err := c.fallback.Handle(ctx, localapi.MethodUnpair, unpairRaw); err != nil {
-			return rollback(err)
-		}
-		if _, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventTrustForgotten}); err != nil {
-			return rollback(unavailable("trusted-device cleanup could not be committed"))
-		}
-		return c.actionResult(), nil
+		return c.forgetDeviceLocked(ctx, params)
 	case localapi.MethodUnpair:
 		return nil, &localapi.PublicError{Code: localapi.ErrorInvalidRequest, Message: "Unpair is an internal cleanup operation"}
 	case localapi.MethodShutdown:
@@ -215,6 +196,93 @@ func connectionLimitOccupied(snapshot lifecycle.Snapshot) bool {
 		limit = 1
 	}
 	return snapshot.TrustedPeers >= limit
+}
+
+func (c *DesktopController) forgetDeviceLocked(ctx context.Context, params localapi.ForgetDeviceParams) (any, error) {
+	snapshot := c.supervisor.Snapshot()
+	deviceID := strings.TrimSpace(params.DeviceID)
+	if snapshot.Peer == nil || deviceID != "" && deviceID != snapshot.Peer.ID {
+		return nil, needsAction("trusted device was not found")
+	}
+	if c.fallback == nil {
+		return nil, unavailable("paired device cleanup is unavailable")
+	}
+	reserved, err := c.supervisor.machine.Apply(lifecycle.Event{
+		Type: lifecycle.EventTrustForgetStarted,
+		Peer: &lifecycle.Peer{ID: snapshot.Peer.ID},
+	})
+	if err != nil || reserved.Peer == nil {
+		return nil, needsAction("disconnect before forgetting the trusted device")
+	}
+	rollback := func(cause error) (any, error) {
+		if _, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventTrustForgetCancelled}); err != nil {
+			return nil, unavailable("trusted-device cleanup reservation could not be released")
+		}
+		return nil, cause
+	}
+	unpairRaw, _ := json.Marshal(localapi.UnpairParams{DeviceID: reserved.Peer.ID, LocalOnly: params.LocalOnly})
+	if _, err := c.fallback.Handle(ctx, localapi.MethodUnpair, unpairRaw); err != nil {
+		return rollback(err)
+	}
+	if _, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventTrustForgotten}); err != nil {
+		return rollback(unavailable("trusted-device cleanup could not be committed"))
+	}
+	return c.actionResult(), nil
+}
+
+func (c *DesktopController) replaceDeviceLocked(ctx context.Context, params localapi.ReplaceDeviceParams) (any, error) {
+	oldDeviceID := strings.TrimSpace(params.OldDeviceID)
+	newDevice := strings.TrimSpace(params.NewDevice)
+	snapshot := c.supervisor.Snapshot()
+	if snapshot.Role != lifecycle.RoleMacClient || snapshot.State != lifecycle.StateSearching ||
+		snapshot.Pairing != nil || snapshot.Peer == nil || snapshot.TrustedPeers != 1 ||
+		oldDeviceID == "" || snapshot.Peer.ID != oldDeviceID || newDevice == "" || newDevice == oldDeviceID {
+		return nil, needsAction("device replacement requires active search and the exact saved device")
+	}
+	if _, err := c.forgetDeviceLocked(ctx, localapi.ForgetDeviceParams{
+		DeviceID: oldDeviceID, LocalOnly: params.LocalOnly,
+	}); err != nil {
+		return nil, err
+	}
+	pairRaw, _ := json.Marshal(localapi.PairStartParams{Device: newDevice})
+	result, err := c.delegate(ctx, localapi.MethodPairStart, pairRaw)
+	if err != nil {
+		return nil, err
+	}
+	started, ok := result.(localapi.PairStartResult)
+	if !ok {
+		return nil, unavailable("pairing returned an invalid response")
+	}
+	if err := c.startPairing(started); err != nil {
+		return c.rollbackStartedPairing(started, err)
+	}
+	return started, nil
+}
+
+func (c *DesktopController) rollbackStartedPairing(started localapi.PairStartResult, cause error) (any, error) {
+	cancelCtx, cancel := context.WithTimeout(context.Background(), pairingRollbackTimeout)
+	defer cancel()
+	cancelRaw, _ := json.Marshal(localapi.PairSessionParams{SessionID: started.SessionID})
+	if _, err := c.delegate(cancelCtx, localapi.MethodPairCancel, cancelRaw); err != nil {
+		if preserveErr := c.preserveRollbackPairing(started); preserveErr != nil {
+			return nil, unavailable("pairing rollback was not confirmed; retry cancellation from the current pairing session")
+		}
+		return nil, unavailable("pairing cancellation was not confirmed; the request remains visible for retry")
+	}
+	return nil, cause
+}
+
+func (c *DesktopController) preserveRollbackPairing(started localapi.PairStartResult) error {
+	expiresAt, err := time.Parse(time.RFC3339Nano, started.ExpiresAt)
+	if err != nil {
+		expiresAt = time.Now().Add(time.Minute)
+	}
+	pairing := lifecycle.Pairing{
+		SessionID: started.SessionID, Peer: peerFromLocalAPI(started.Peer), Code: started.Code,
+		Status: lifecycle.PairingPending, ExpiresAt: expiresAt,
+	}
+	_, err = c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &pairing})
+	return err
 }
 
 func (c *DesktopController) startTrustedConnection(ctx context.Context, foreground func() (any, error)) (any, error) {

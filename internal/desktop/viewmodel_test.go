@@ -53,6 +53,21 @@ func TestBuildViewModelShowsSamePairCodeAndRoleCorrectActions(t *testing.T) {
 	}
 }
 
+func TestBuildViewModelKeepsProblemPairingVisibleAndCancelable(t *testing.T) {
+	pairing := &lifecycle.Pairing{
+		SessionID: "session", Peer: lifecycle.Peer{ID: "peer", Name: "Windows"},
+		Code: "123456", Status: lifecycle.PairingPending, ExpiresAt: time.Now().Add(time.Minute),
+	}
+	model := BuildViewModel(lifecycle.Snapshot{
+		Role: lifecycle.RoleMacClient, State: lifecycle.StatePairing, Pairing: pairing,
+		Problem: &lifecycle.Problem{Code: "runtime_stopped", Message: "Фоновый процесс остановился"},
+	}, SectionConnection, time.Now())
+	if model.Status != "Подтверждение устройства" || model.PairCode != "123 456" ||
+		model.Notice != "Фоновый процесс остановился" || !hasViewAction(model.Actions, ActionCancelPair) {
+		t.Fatalf("problem pairing model = %#v", model)
+	}
+}
+
 func TestBuildViewModelShowsRolesConnectionLimitAndRecoveryCountdown(t *testing.T) {
 	connected := BuildViewModel(lifecycle.Snapshot{
 		Role: lifecycle.RoleMacClient, State: lifecycle.StateConnected, TrustedPeers: 1, ConnectionLimit: 1,
@@ -102,8 +117,12 @@ func TestBuildDeviceRowsShowsActionsByDeviceKind(t *testing.T) {
 		t.Fatalf("row order = %#v", got)
 	}
 	if got := deviceRowByID(t, rows, "new"); got.Status != "Новое устройство" || got.Kind != "new" ||
-		!reflect.DeepEqual(got.Actions, []Action{enabledAction(ActionConnect, "Подключиться")}) {
+		!reflect.DeepEqual(got.Actions, []Action{{ID: ActionConnect, Label: "Подключиться", Enabled: false}}) {
 		t.Fatalf("new row = %#v", got)
+	}
+	searching := BuildDeviceRows(lifecycle.Snapshot{State: lifecycle.StateSearching}, []localapi.PairingCandidate{newDevice})
+	if got := deviceRowByID(t, searching, "new"); !reflect.DeepEqual(got.Actions, []Action{enabledAction(ActionConnect, "Подключиться")}) {
+		t.Fatalf("searching new row = %#v", got)
 	}
 	if got := deviceRowByID(t, rows, "saved"); got.Status != "Сохранено · доступно" || got.Kind != "saved" ||
 		!reflect.DeepEqual(got.Actions, []Action{

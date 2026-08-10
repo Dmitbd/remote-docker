@@ -84,10 +84,11 @@ type pendingPairing struct {
 }
 
 type macPairingCoordinator struct {
-	options  macPairingOptions
-	mu       sync.Mutex
-	pending  *pendingPairing
-	starting bool
+	options            macPairingOptions
+	mu                 sync.Mutex
+	pending            *pendingPairing
+	starting           bool
+	previousDockerHost string
 }
 
 func newMacPairingCoordinator(options macPairingOptions) *macPairingCoordinator {
@@ -338,8 +339,11 @@ func (c *macPairingCoordinator) complete(ctx context.Context, sessionID string, 
 		clearSecret(pending.privateKeyPEM)
 		return localapi.Device{}, unavailable("cannot write managed SSH configuration")
 	}
+	c.mu.Lock()
+	expectedPreviousHost := c.previousDockerHost
+	c.mu.Unlock()
 	contextChange, err := dockercli.EnsureContext(
-		ctx, c.options.Docker, c.options.DockerCLI, c.options.DockerContext, "ssh://"+alias,
+		ctx, c.options.Docker, c.options.DockerCLI, c.options.DockerContext, "ssh://"+alias, expectedPreviousHost,
 	)
 	if err != nil {
 		clearSecret(pending.privateKeyPEM)
@@ -397,6 +401,7 @@ func (c *macPairingCoordinator) complete(ctx context.Context, sessionID string, 
 		clearSecret(c.pending.privateKeyPEM)
 	}
 	c.pending = nil
+	c.previousDockerHost = ""
 	c.mu.Unlock()
 	return localapi.Device{ID: remoteDeviceID, Name: device.Name, Address: device.Address}, nil
 }
@@ -423,11 +428,11 @@ func (c *macPairingCoordinator) Cancel(ctx context.Context, sessionID string) (l
 	pending.privateKeyPEM = append([]byte(nil), c.pending.privateKeyPEM...)
 	c.mu.Unlock()
 	cancelErr := c.options.Transport.Cancel(ctx, pending.target, pending.descriptor)
-	c.clearPending(sessionID)
 	clearSecret(pending.privateKeyPEM)
 	if cancelErr != nil {
 		return localapi.PairingStatusResult{}, unavailable("cannot cancel the pairing request")
 	}
+	c.clearPending(sessionID)
 	return pairingStatusResult(pending, pairing.SessionStatus{
 		SessionID: sessionID, State: pairing.SessionCancelled, ExpiresAt: pending.descriptor.ExpiresAt,
 	}), nil
@@ -498,7 +503,7 @@ func (c *macPairingCoordinator) forgetLocal(deviceID string) error {
 	if c.options.BeforeConfigTransaction != nil {
 		c.options.BeforeConfigTransaction()
 	}
-	return c.options.ConfigTransactions.Run(func() error {
+	err = c.options.ConfigTransactions.Run(func() error {
 		cfg, err = loadAgentConfig(c.options.Store)
 		if err != nil {
 			return unavailable("cannot refresh paired device configuration")
@@ -515,6 +520,13 @@ func (c *macPairingCoordinator) forgetLocal(deviceID string) error {
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.previousDockerHost = "ssh://" + alias
+	c.mu.Unlock()
+	return nil
 }
 
 type discoveryPairingTransport struct {

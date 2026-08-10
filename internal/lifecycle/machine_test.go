@@ -117,6 +117,44 @@ func TestPairingAndConnectionEnforceOneTrustedPeer(t *testing.T) {
 	}
 }
 
+func TestPairingProblemNeverHidesPendingSession(t *testing.T) {
+	pairing := Pairing{
+		SessionID: "session-1", Peer: Peer{ID: "windows", Name: "Windows"},
+		Code: "123456", Status: PairingPending, ExpiresAt: time.Now().Add(time.Minute),
+	}
+	problem := &Problem{Code: "runtime_stopped", Device: InitiatorLocal, Message: "Runtime stopped", Action: "Retry"}
+
+	t.Run("problem before pairing commit", func(t *testing.T) {
+		machine := mustMachine(t, RoleMacClient)
+		mustApply(t, machine, Event{Type: EventEnabled})
+		mustApply(t, machine, Event{Type: EventSearchStarted})
+		mustApply(t, machine, Event{Type: EventProblemDetected, Problem: problem})
+		visible := mustApply(t, machine, Event{Type: EventPairingStarted, Pairing: &pairing})
+		if visible.State != StatePairing || visible.Pairing == nil || visible.Pairing.SessionID != pairing.SessionID || visible.Problem == nil {
+			t.Fatalf("pairing hidden by preceding problem = %#v", visible)
+		}
+		cancelled := mustApply(t, machine, Event{Type: EventPairingCancelled})
+		if cancelled.State != StateNeedsAction || cancelled.Pairing != nil || cancelled.Problem == nil {
+			t.Fatalf("cancelled problem pairing = %#v", cancelled)
+		}
+	})
+
+	t.Run("problem after pairing commit", func(t *testing.T) {
+		machine := mustMachine(t, RoleMacClient)
+		mustApply(t, machine, Event{Type: EventEnabled})
+		mustApply(t, machine, Event{Type: EventSearchStarted})
+		mustApply(t, machine, Event{Type: EventPairingStarted, Pairing: &pairing})
+		visible := mustApply(t, machine, Event{Type: EventProblemDetected, Problem: problem})
+		if visible.State != StatePairing || visible.Pairing == nil || visible.Pairing.SessionID != pairing.SessionID || visible.Problem == nil {
+			t.Fatalf("pairing hidden by subsequent problem = %#v", visible)
+		}
+		expired := mustApply(t, machine, Event{Type: EventPairingExpired})
+		if expired.State != StateNeedsAction || expired.Pairing != nil || expired.Problem == nil {
+			t.Fatalf("expired problem pairing = %#v", expired)
+		}
+	})
+}
+
 func TestPairingTerminalDecisionIsObservedOnEitherDevice(t *testing.T) {
 	for _, tt := range []struct {
 		name  string

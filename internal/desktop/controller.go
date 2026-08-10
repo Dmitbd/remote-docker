@@ -12,7 +12,10 @@ import (
 
 type SnapshotProvider func() lifecycle.Snapshot
 
-var ErrConnectionLimit = errors.New("trusted-device connection limit is occupied")
+var (
+	ErrConnectionLimit  = errors.New("trusted-device connection limit is occupied")
+	ErrPairingNotActive = errors.New("new-device pairing is available only while searching")
+)
 
 type Controller struct {
 	handler  localapi.Handler
@@ -27,8 +30,14 @@ func (c *Controller) Perform(ctx context.Context, action ActionID, value string)
 	if c == nil || c.handler == nil || c.snapshot == nil {
 		return errors.New("desktop controller is unavailable")
 	}
-	if action == ActionConnect && connectionLimitOccupied(c.snapshot()) {
-		return ErrConnectionLimit
+	if action == ActionConnect {
+		snapshot := c.snapshot()
+		if snapshot.State != lifecycle.StateSearching {
+			return ErrPairingNotActive
+		}
+		if connectionLimitOccupied(snapshot) {
+			return ErrConnectionLimit
+		}
 	}
 	method, params, ok := c.resolve(action, value)
 	if !ok {
@@ -69,6 +78,22 @@ func (c *Controller) ForgetDevice(ctx context.Context, deviceID string, localOnl
 		return errors.New("desktop action could not be encoded")
 	}
 	_, err = c.handler.Handle(ctx, localapi.MethodForgetDevice, raw)
+	return err
+}
+
+func (c *Controller) ReplaceDevice(ctx context.Context, oldDeviceID, newDevice string, localOnly bool) error {
+	if c == nil || c.handler == nil {
+		return errors.New("desktop controller is unavailable")
+	}
+	raw, err := json.Marshal(localapi.ReplaceDeviceParams{
+		OldDeviceID: strings.TrimSpace(oldDeviceID),
+		NewDevice:   strings.TrimSpace(newDevice),
+		LocalOnly:   localOnly,
+	})
+	if err != nil {
+		return errors.New("desktop action could not be encoded")
+	}
+	_, err = c.handler.Handle(ctx, localapi.MethodReplaceDevice, raw)
 	return err
 }
 

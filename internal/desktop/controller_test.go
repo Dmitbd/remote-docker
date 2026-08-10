@@ -80,6 +80,25 @@ func TestControllerForgetsSelectedDeviceWithExplicitScope(t *testing.T) {
 	}
 }
 
+func TestControllerReplacesExactDeviceWithOneAtomicMethod(t *testing.T) {
+	handler := &recordingHandler{}
+	controller := NewController(handler, func() lifecycle.Snapshot {
+		return lifecycle.Snapshot{State: lifecycle.StateSearching, TrustedPeers: 1, ConnectionLimit: 1}
+	})
+
+	if err := controller.ReplaceDevice(context.Background(), "saved-windows", "new-windows", true); err != nil {
+		t.Fatalf("ReplaceDevice() error = %v", err)
+	}
+	var params localapi.ReplaceDeviceParams
+	if err := json.Unmarshal(handler.params, &params); err != nil {
+		t.Fatalf("ReplaceDevice params error = %v", err)
+	}
+	if handler.method != localapi.MethodReplaceDevice || params.OldDeviceID != "saved-windows" ||
+		params.NewDevice != "new-windows" || !params.LocalOnly {
+		t.Fatalf("ReplaceDevice method=%s params=%#v", handler.method, params)
+	}
+}
+
 func TestControllerAddsOnlySelectedWorkspacePath(t *testing.T) {
 	handler := &recordingHandler{}
 	controller := NewController(handler, func() lifecycle.Snapshot { return lifecycle.Snapshot{} })

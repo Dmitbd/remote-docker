@@ -114,6 +114,7 @@ type Machine struct {
 	forgetting          bool
 	connectionStarting  bool
 	connectionStartFrom State
+	problemFrom         State
 	subscribers         map[uint64]chan Snapshot
 	nextID              uint64
 }
@@ -248,6 +249,7 @@ func (m *Machine) applyLocked(event Event) error {
 		snapshot.State = m.idleState()
 		snapshot.Terminal = false
 		snapshot.Problem = nil
+		m.problemFrom = ""
 	case EventSearchStarted:
 		if snapshot.Role != RoleMacClient || snapshot.State != StateClientReady {
 			return m.transitionError(event, "only an enabled Mac client can search")
@@ -266,7 +268,10 @@ func (m *Machine) applyLocked(event Event) error {
 			return m.transitionError(event, "one trusted device is already present")
 		}
 		validStart := snapshot.Role == RoleMacClient && snapshot.State == StateSearching ||
-			snapshot.Role == RoleWindowsHost && snapshot.State == StateHostWaiting
+			snapshot.Role == RoleWindowsHost && snapshot.State == StateHostWaiting ||
+			snapshot.State == StateNeedsAction && snapshot.Problem != nil &&
+				(snapshot.Role == RoleMacClient && m.problemFrom == StateSearching ||
+					snapshot.Role == RoleWindowsHost && m.problemFrom == StateHostWaiting)
 		if !validStart {
 			return m.transitionError(event, "device is not accepting a pairing request")
 		}
@@ -286,7 +291,12 @@ func (m *Machine) applyLocked(event Event) error {
 			return m.transitionError(event, "no pairing request exists")
 		}
 		snapshot.Pairing = nil
-		snapshot.State = m.idleState()
+		if snapshot.Problem != nil {
+			snapshot.State = StateNeedsAction
+		} else {
+			snapshot.State = m.idleState()
+			m.problemFrom = ""
+		}
 	case EventPairingCompleted:
 		if snapshot.State != StatePairing || snapshot.Pairing == nil || snapshot.Pairing.Status != PairingApproved || event.Peer == nil || event.Peer.ID == "" {
 			return m.transitionError(event, "approved pairing metadata is unavailable")
@@ -295,6 +305,8 @@ func (m *Machine) applyLocked(event Event) error {
 		snapshot.Peer = &peer
 		snapshot.TrustedPeers = 1
 		snapshot.Pairing = nil
+		snapshot.Problem = nil
+		m.problemFrom = ""
 		snapshot.State = StateConnecting
 		snapshot.Docker.State = ServiceStarting
 		snapshot.Sync.State = ServiceStarting
@@ -432,13 +444,21 @@ func (m *Machine) applyLocked(event Event) error {
 		}
 		problem := *event.Problem
 		snapshot.Problem = &problem
-		snapshot.State = StateNeedsAction
+		if snapshot.State != StatePairing {
+			if snapshot.State != StateNeedsAction {
+				m.problemFrom = snapshot.State
+			}
+			snapshot.State = StateNeedsAction
+		}
 	case EventProblemCleared:
-		if snapshot.State != StateNeedsAction {
+		if snapshot.Problem == nil || snapshot.State != StateNeedsAction && snapshot.State != StatePairing {
 			return m.transitionError(event, "no problem is active")
 		}
 		snapshot.Problem = nil
-		snapshot.State = StatePaused
+		m.problemFrom = ""
+		if snapshot.State == StateNeedsAction {
+			snapshot.State = StatePaused
+		}
 	default:
 		return m.transitionError(event, "event is unknown")
 	}

@@ -1062,7 +1062,7 @@ func TestMacPairingCoordinatorCancelsWithoutManualCodeAndClearsPendingSecret(t *
 	}
 }
 
-func TestMacPairingCoordinatorClearsLocalPendingWhenRemoteCancelFails(t *testing.T) {
+func TestMacPairingCoordinatorPreservesPendingForCancelRetryAfterRemoteFailure(t *testing.T) {
 	root := t.TempDir()
 	transport := &runtimePairingTransport{
 		hostKey: testAuthorizedKey(t), status: pairing.SessionPending, cancelErr: errors.New("remote unavailable"),
@@ -1083,8 +1083,18 @@ func TestMacPairingCoordinatorClearsLocalPendingWhenRemoteCancelFails(t *testing
 	pending := coordinator.pending
 	starting := coordinator.starting
 	coordinator.mu.Unlock()
-	if pending != nil || starting {
-		t.Fatalf("local pairing reservation survived failed remote cancel: pending=%#v starting=%t", pending, starting)
+	if pending == nil || pending.descriptor.ID != started.SessionID || starting {
+		t.Fatalf("retryable pairing handle after failed cancel: pending=%#v starting=%t", pending, starting)
+	}
+	transport.cancelErr = nil
+	if _, err := coordinator.Cancel(context.Background(), started.SessionID); err != nil {
+		t.Fatalf("Cancel() retry error = %v", err)
+	}
+	coordinator.mu.Lock()
+	pending = coordinator.pending
+	coordinator.mu.Unlock()
+	if pending != nil || transport.cancelCalls != 2 {
+		t.Fatalf("cancel retry cleanup pending=%#v calls=%d, want nil/two", pending, transport.cancelCalls)
 	}
 }
 
@@ -1263,6 +1273,7 @@ type runtimePairingTransport struct {
 	status       pairing.SessionState
 	cancelled    string
 	cancelErr    error
+	cancelCalls  int
 	targets      []pairingTarget
 }
 
@@ -1364,6 +1375,7 @@ func (t *runtimePairingTransport) Status(_ context.Context, _ pairingTarget, des
 }
 
 func (t *runtimePairingTransport) Cancel(_ context.Context, _ pairingTarget, descriptor pairing.SessionDescriptor) error {
+	t.cancelCalls++
 	t.cancelled = descriptor.ID
 	return t.cancelErr
 }

@@ -141,6 +141,9 @@ func BuildViewModel(snapshot lifecycle.Snapshot, selected Section, now time.Time
 			model.PairCode = displayPairCode(snapshot.Pairing.Code)
 		}
 		model.Detail = "Код вводить не нужно. Он должен совпадать на Mac и Windows."
+		if snapshot.Problem != nil {
+			model.Notice = snapshot.Problem.Message
+		}
 		if snapshot.Role == lifecycle.RoleWindowsHost {
 			model.Actions = append(model.Actions,
 				enabledAction(ActionApprovePair, "Код совпадает — разрешить"),
@@ -269,7 +272,7 @@ func buildDeviceRow(snapshot lifecycle.Snapshot, candidate localapi.PairingCandi
 	if !candidate.Trusted {
 		row.Status = "Новое устройство"
 		row.Kind = "new"
-		row.Actions = []Action{enabledAction(ActionConnect, "Подключиться")}
+		row.Actions = []Action{{ID: ActionConnect, Label: "Подключиться", Enabled: snapshot.State == lifecycle.StateSearching}}
 		return row
 	}
 	row.Kind = "saved"

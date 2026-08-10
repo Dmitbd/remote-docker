@@ -99,7 +99,7 @@ func TestUnavailableRemoteOffersExplicitLocalForget(t *testing.T) {
 	}
 }
 
-func TestReplaceWaitsForTrustRemovalBeforeStartingPair(t *testing.T) {
+func TestReplaceUsesOneAtomicControllerOperation(t *testing.T) {
 	var snapshot lifecycle.Snapshot
 	snapshot = lifecycle.Snapshot{
 		State: lifecycle.StateSearching, TrustedPeers: 1, ConnectionLimit: 1,
@@ -114,12 +114,10 @@ func TestReplaceWaitsForTrustRemovalBeforeStartingPair(t *testing.T) {
 
 	application.showReplaceConfirmation(DeviceRow{ID: "new-windows", Name: "New Windows"})
 	(<-confirm)(true)
-	calls := handler.WaitForCalls(t, 2)
-	if got := []localapi.Method{calls[0].Method, calls[1].Method}; got[0] != localapi.MethodForgetDevice || got[1] != localapi.MethodPairStart {
-		t.Fatalf("mutation order = %#v, want ForgetDevice then PairStart", got)
-	}
-	if calls[0].Forget.LocalOnly || calls[1].Pair.Device != "new-windows" {
-		t.Fatalf("replacement mutations = %#v", calls)
+	calls := handler.WaitForCalls(t, 1)
+	if got := calls[0]; got.Method != localapi.MethodReplaceDevice || got.Replace.OldDeviceID != "saved-windows" ||
+		got.Replace.NewDevice != "new-windows" || got.Replace.LocalOnly {
+		t.Fatalf("atomic replacement mutation = %#v", got)
 	}
 }
 
@@ -143,15 +141,41 @@ func TestReplaceIsOneSerializedOperationDespiteOverlappingAction(t *testing.T) {
 	(<-confirm)(true)
 	waitForTestSignal(t, handler.forgetStarted, "replacement forget")
 	application.perform(ActionStopSearch, "")
-	if calls := handler.Calls(); len(calls) != 1 || calls[0].Method != localapi.MethodForgetDevice {
+	if calls := handler.Calls(); len(calls) != 1 || calls[0].Method != localapi.MethodReplaceDevice {
 		t.Fatalf("overlap reached controller during replacement: %#v", calls)
 	}
 	close(handler.forgetRelease)
-	calls := handler.WaitForCalls(t, 2)
-	if got := []localapi.Method{calls[0].Method, calls[1].Method}; !reflect.DeepEqual(got, []localapi.Method{
-		localapi.MethodForgetDevice, localapi.MethodPairStart,
-	}) {
+	calls := handler.WaitForCalls(t, 1)
+	if got := []localapi.Method{calls[0].Method}; !reflect.DeepEqual(got, []localapi.Method{localapi.MethodReplaceDevice}) {
 		t.Fatalf("serialized replacement calls = %#v", got)
+	}
+}
+
+func TestReplaceLocalOnlyFallbackRequiresSecondConfirmation(t *testing.T) {
+	snapshot := lifecycle.Snapshot{
+		State: lifecycle.StateSearching, TrustedPeers: 1, ConnectionLimit: 1,
+		Peer: &lifecycle.Peer{ID: "saved-windows", Name: "Saved Windows"},
+	}
+	handler := &confirmationRecordingHandler{replaceError: &localapi.RemoteError{Code: localapi.ErrorUnavailable}}
+	application, confirm := newConfirmationApplication(handler, snapshotProvider(&snapshot))
+
+	application.showReplaceConfirmation(DeviceRow{ID: "new-windows", Name: "New Windows"})
+	(<-confirm)(true)
+	first := handler.WaitForCalls(t, 1)
+	if first[0].Method != localapi.MethodReplaceDevice || first[0].Replace.LocalOnly {
+		t.Fatalf("first replacement = %#v, want remote-first", first[0])
+	}
+	localConfirm := <-confirm
+	if calls := handler.Calls(); len(calls) != 1 {
+		t.Fatalf("local replacement started before second confirmation: %#v", calls)
+	}
+	handler.mu.Lock()
+	handler.replaceError = nil
+	handler.mu.Unlock()
+	localConfirm(true)
+	calls := handler.WaitForCalls(t, 2)
+	if !calls[1].Replace.LocalOnly || calls[1].Replace.OldDeviceID != "saved-windows" || calls[1].Replace.NewDevice != "new-windows" {
+		t.Fatalf("local-only replacement = %#v", calls[1])
 	}
 }
 
@@ -171,9 +195,10 @@ func TestReplaceConfirmationExplainsKeyRemovalAutomaticPairingAndCode(t *testing
 }
 
 type confirmationCall struct {
-	Method localapi.Method
-	Forget localapi.ForgetDeviceParams
-	Pair   localapi.PairStartParams
+	Method  localapi.Method
+	Forget  localapi.ForgetDeviceParams
+	Pair    localapi.PairStartParams
+	Replace localapi.ReplaceDeviceParams
 }
 
 type confirmationRecordingHandler struct {
@@ -181,6 +206,7 @@ type confirmationRecordingHandler struct {
 	calls         []confirmationCall
 	updates       chan struct{}
 	forgetError   error
+	replaceError  error
 	afterForget   func()
 	forgetStarted chan struct{}
 	forgetRelease chan struct{}
@@ -194,10 +220,13 @@ func (h *confirmationRecordingHandler) Handle(_ context.Context, method localapi
 		_ = json.Unmarshal(raw, &call.Forget)
 	case localapi.MethodPairStart:
 		_ = json.Unmarshal(raw, &call.Pair)
+	case localapi.MethodReplaceDevice:
+		_ = json.Unmarshal(raw, &call.Replace)
 	}
 	h.mu.Lock()
 	h.calls = append(h.calls, call)
 	forgetError := h.forgetError
+	replaceError := h.replaceError
 	afterForget := h.afterForget
 	updates := h.updates
 	h.mu.Unlock()
@@ -207,11 +236,14 @@ func (h *confirmationRecordingHandler) Handle(_ context.Context, method localapi
 	if method == localapi.MethodForgetDevice && forgetError != nil {
 		return nil, forgetError
 	}
-	if method == localapi.MethodForgetDevice && h.forgetStarted != nil {
+	if method == localapi.MethodReplaceDevice && replaceError != nil {
+		return nil, replaceError
+	}
+	if (method == localapi.MethodForgetDevice || method == localapi.MethodReplaceDevice) && h.forgetStarted != nil {
 		h.forgetOnce.Do(func() { close(h.forgetStarted) })
 		<-h.forgetRelease
 	}
-	if method == localapi.MethodForgetDevice && afterForget != nil {
+	if (method == localapi.MethodForgetDevice || method == localapi.MethodReplaceDevice) && afterForget != nil {
 		afterForget()
 	}
 	return nil, nil

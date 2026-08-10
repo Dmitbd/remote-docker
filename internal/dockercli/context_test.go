@@ -22,7 +22,7 @@ func TestEnsureContextCreatesMissingManagedContext(t *testing.T) {
 		executor,
 		"docker-real",
 		"remote-docker",
-		"ssh://remote-docker@remote-host",
+		"ssh://remote-docker-device-peer",
 	)
 	if err != nil {
 		t.Fatalf("EnsureContext() error = %v", err)
@@ -36,7 +36,7 @@ func TestEnsureContextCreatesMissingManagedContext(t *testing.T) {
 		{
 			"context", "create",
 			"--description", managedContextDescription,
-			"--docker", "host=ssh://remote-docker@remote-host",
+			"--docker", "host=ssh://remote-docker-device-peer",
 			"remote-docker",
 		},
 	}
@@ -72,7 +72,7 @@ func TestEnsureContextKeepsMatchingManagedContext(t *testing.T) {
   {
     "Name": "remote-docker",
     "Metadata": {"Description": "Managed by Remote Docker"},
-    "Endpoints": {"docker": {"Host": "ssh://remote-docker@remote-host"}}
+    "Endpoints": {"docker": {"Host": "ssh://remote-docker-device-peer"}}
   }
 ]`}},
 	}
@@ -82,7 +82,7 @@ func TestEnsureContextKeepsMatchingManagedContext(t *testing.T) {
 		executor,
 		"docker-real",
 		"remote-docker",
-		"ssh://remote-docker@remote-host",
+		"ssh://remote-docker-device-peer",
 	)
 	if err != nil {
 		t.Fatalf("EnsureContext() error = %v", err)
@@ -133,12 +133,20 @@ func TestEnsureContextRejectsContextCollision(t *testing.T) {
 			stdout: `[{
   "Name": "remote-docker",
   "Metadata": {"Description": "Created by user"},
-  "Endpoints": {"docker": {"Host": "ssh://remote-docker@remote-host"}}
+  "Endpoints": {"docker": {"Host": "ssh://remote-docker-device-peer"}}
 }]`,
 		},
 		{
 			name:   "different exact name",
-			stdout: `[{"Name":"remote-docker-other","Metadata":{"Description":"Managed by Remote Docker"},"Endpoints":{"docker":{"Host":"ssh://remote-docker@remote-host"}}}]`,
+			stdout: `[{"Name":"remote-docker-other","Metadata":{"Description":"Managed by Remote Docker"},"Endpoints":{"docker":{"Host":"ssh://remote-docker-device-peer"}}}]`,
+		},
+		{
+			name:   "same description foreign endpoint",
+			stdout: `[{"Name":"remote-docker","Metadata":{"Description":"Managed by Remote Docker"},"Endpoints":{"docker":{"Host":"ssh://user@foreign-host"}}}]`,
+		},
+		{
+			name:   "same description empty endpoint",
+			stdout: `[{"Name":"remote-docker","Metadata":{"Description":"Managed by Remote Docker"},"Endpoints":{"docker":{"Host":""}}}]`,
 		},
 	}
 
@@ -153,7 +161,7 @@ func TestEnsureContextRejectsContextCollision(t *testing.T) {
 				executor,
 				"docker-real",
 				"remote-docker",
-				"ssh://remote-docker@remote-host",
+				"ssh://remote-docker-device-peer",
 			)
 
 			if !errors.Is(err, ErrContextCollision) {
@@ -167,6 +175,21 @@ func TestEnsureContextRejectsContextCollision(t *testing.T) {
 	}
 }
 
+func TestEnsureContextRejectsUnexpectedPreviousManagedEndpoint(t *testing.T) {
+	executor := &recordingExecutor{results: []executorResult{{stdout: `[{"Name":"remote-docker","Metadata":{"Description":"Managed by Remote Docker"},"Endpoints":{"docker":{"Host":"ssh://remote-docker-device-other"}}}]`}}}
+
+	_, err := EnsureContext(
+		context.Background(), executor, "docker-real", "remote-docker",
+		"ssh://remote-docker-device-new", "ssh://remote-docker-device-expected",
+	)
+	if !errors.Is(err, ErrContextCollision) {
+		t.Fatalf("EnsureContext() error = %v, want ErrContextCollision", err)
+	}
+	if got := executor.args(); !reflect.DeepEqual(got, [][]string{{"context", "inspect", "remote-docker"}}) {
+		t.Fatalf("unexpected previous endpoint was mutated: %#v", got)
+	}
+}
+
 func TestEnsureContextDoesNotCreateAfterUnexpectedInspectFailure(t *testing.T) {
 	executor := &recordingExecutor{
 		results: []executorResult{{err: codedError{code: 2}}},
@@ -177,7 +200,7 @@ func TestEnsureContextDoesNotCreateAfterUnexpectedInspectFailure(t *testing.T) {
 		executor,
 		"docker-real",
 		"remote-docker",
-		"ssh://remote-docker@remote-host",
+		"ssh://remote-docker-device-peer",
 	)
 
 	if err == nil {

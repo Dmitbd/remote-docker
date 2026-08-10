@@ -498,9 +498,44 @@ func (a *Application) replaceDevice(oldRow, newRow DeviceRow) {
 		return
 	}
 	a.refreshCurrent()
-	a.continueForget(sequence, oldRow, false, func() error {
-		return a.controller.Perform(context.Background(), ActionConnect, newRow.ID)
-	})
+	a.continueReplace(sequence, oldRow, newRow, false)
+}
+
+func (a *Application) continueReplace(sequence uint64, oldRow, newRow DeviceRow, localOnly bool) {
+	go func() {
+		err := a.controller.ReplaceDevice(context.Background(), oldRow.ID, newRow.ID, localOnly)
+		if err != nil && !localOnly && remoteUnavailable(err) {
+			a.offerLocalReplaceConfirmation(oldRow, newRow, sequence, err)
+			return
+		}
+		if !a.completeAction(sequence, err) {
+			return
+		}
+		a.refreshCurrent()
+	}()
+}
+
+func (a *Application) offerLocalReplaceConfirmation(oldRow, newRow DeviceRow, sequence uint64, previousErr error) {
+	show := func() {
+		a.showConfirmation(
+			"Забыть старую связь только на этом Mac?",
+			"Удалённый отзыв сейчас недоступен. Закрытый ключ старой связи будет удалён только с этого Mac, затем автоматически начнётся новое сопряжение с проверкой шестизначного кода. На старом Windows-компьютере доверие может потребовать отдельного удаления.",
+			"Забыть только здесь и подключиться",
+			func(confirmed bool) {
+				if confirmed {
+					a.continueReplace(sequence, oldRow, newRow, true)
+					return
+				}
+				a.completeAction(sequence, previousErr)
+				a.refreshCurrent()
+			},
+		)
+	}
+	if a.confirm != nil {
+		show()
+		return
+	}
+	fyne.Do(show)
 }
 
 func (a *Application) continueForget(sequence uint64, row DeviceRow, localOnly bool, after func() error) {

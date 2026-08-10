@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 )
 
 const managedContextDescription = "Managed by Remote Docker"
@@ -52,7 +53,11 @@ func EnsureContext(
 	cli string,
 	name string,
 	host string,
+	expectedPreviousHost ...string,
 ) (ContextChange, error) {
+	if !managedEndpoint(host) {
+		return ContextChange{}, fmt.Errorf("%w: requested endpoint is not managed by Remote Docker", ErrContextCollision)
+	}
 	change := ContextChange{Name: name, CurrentHost: host}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -68,6 +73,9 @@ func EnsureContext(
 			return ContextChange{}, err
 		}
 		change.PreviousHost = previousHost
+		if len(expectedPreviousHost) > 0 && expectedPreviousHost[0] != "" && previousHost != expectedPreviousHost[0] {
+			return ContextChange{}, fmt.Errorf("%w: %q does not point to the expected managed endpoint", ErrContextCollision, name)
+		}
 		if previousHost == host {
 			return change, nil
 		}
@@ -149,7 +157,29 @@ func managedContextHost(data []byte, name string) (string, error) {
 		context.Metadata.Description != managedContextDescription {
 		return "", fmt.Errorf("%w: %q is not owned by Remote Docker", ErrContextCollision, name)
 	}
-	return context.Endpoints.Docker.Host, nil
+	host := context.Endpoints.Docker.Host
+	if !managedEndpoint(host) {
+		return "", fmt.Errorf("%w: %q does not use a valid Remote Docker endpoint", ErrContextCollision, name)
+	}
+	return host, nil
+}
+
+func managedEndpoint(host string) bool {
+	const prefix = "ssh://remote-docker-device-"
+	deviceID, ok := strings.CutPrefix(host, prefix)
+	if !ok || deviceID == "" || len(deviceID) > 64 {
+		return false
+	}
+	for _, character := range deviceID {
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			character == '-' || character == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func updateContext(ctx context.Context, executor Executor, cli, name, host string) error {

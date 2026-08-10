@@ -22,6 +22,7 @@ const (
 	MethodListDevices     Method = "ListDevices"
 	MethodPairCandidates  Method = "PairCandidates"
 	MethodPairStart       Method = "PairStart"
+	MethodReplaceDevice   Method = "ReplaceDevice"
 	MethodConnect         Method = "Connect"
 	MethodPairStatus      Method = "PairStatus"
 	MethodPairApprove     Method = "PairApprove"
@@ -44,7 +45,7 @@ const (
 func (m Method) valid() bool {
 	switch m {
 	case MethodStatus, MethodShowWindow, MethodEnable, MethodPause, MethodSearchStart, MethodSearchStop,
-		MethodListDevices, MethodPairCandidates, MethodPairStart, MethodConnect, MethodPairStatus,
+		MethodListDevices, MethodPairCandidates, MethodPairStart, MethodReplaceDevice, MethodConnect, MethodPairStatus,
 		MethodPairApprove, MethodPairReject, MethodPairCancel,
 		MethodDisconnect, MethodForgetDevice,
 		MethodWorkspaceAdd, MethodWorkspaceList,
@@ -201,6 +202,12 @@ type PairCandidatesResult struct {
 
 type PairStartParams struct {
 	Device string `json:"device,omitempty"`
+}
+
+type ReplaceDeviceParams struct {
+	OldDeviceID string `json:"old_device_id"`
+	NewDevice   string `json:"new_device"`
+	LocalOnly   bool   `json:"local_only,omitempty"`
 }
 
 type PairStartResult struct {

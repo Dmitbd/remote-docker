@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -218,6 +219,45 @@ func TestDesktopControllerCancelsCreatedRemotePairWhenLifecycleCommitFails(t *te
 	}
 }
 
+func TestDesktopControllerPairStartRollbackUsesDetachedContext(t *testing.T) {
+	machine := newLifecycleMachine(t, lifecycle.RoleMacClient)
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := newBlockingPairStartHandler()
+	fallback.release = closedSignal()
+	fallback.expiresAt = "invalid-expiry"
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	fallback.afterStart = cancelRequest
+	controller, _ := NewDesktopController(supervisor, fallback)
+	_, _ = controller.Handle(context.Background(), localapi.MethodEnable, nil)
+	_, _ = controller.Handle(context.Background(), localapi.MethodSearchStart, nil)
+
+	if _, err := controller.Handle(requestCtx, localapi.MethodPairStart, json.RawMessage(`{"device":"windows"}`)); err == nil {
+		t.Fatal("PairStart lifecycle commit error = nil")
+	}
+	if fallback.CancelContextError() != nil {
+		t.Fatalf("PairCancel inherited cancelled request context: %v", fallback.CancelContextError())
+	}
+}
+
+func TestDesktopControllerKeepsUnconfirmedRollbackVisible(t *testing.T) {
+	machine := newLifecycleMachine(t, lifecycle.RoleMacClient)
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := newBlockingPairStartHandler()
+	fallback.release = closedSignal()
+	fallback.expiresAt = "invalid-expiry"
+	fallback.cancelErr = errors.New("remote cancel unavailable")
+	controller, _ := NewDesktopController(supervisor, fallback)
+	_, _ = controller.Handle(context.Background(), localapi.MethodEnable, nil)
+	_, _ = controller.Handle(context.Background(), localapi.MethodSearchStart, nil)
+
+	if _, err := controller.Handle(context.Background(), localapi.MethodPairStart, json.RawMessage(`{"device":"windows"}`)); err == nil {
+		t.Fatal("PairStart rollback error = nil")
+	}
+	if got := supervisor.Snapshot(); got.State != lifecycle.StatePairing || got.Pairing == nil || got.Pairing.SessionID != "session-1" {
+		t.Fatalf("unconfirmed rollback pairing is hidden = %#v", got)
+	}
+}
+
 func TestDesktopControllerRejectsNewPairBeforeDelegatingWhenLimitIsFull(t *testing.T) {
 	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "saved", Name: "Saved Windows"}))
 	if err != nil {
@@ -236,6 +276,104 @@ func TestDesktopControllerRejectsNewPairBeforeDelegatingWhenLimitIsFull(t *testi
 	}
 	if len(fallback.methods) != 0 {
 		t.Fatalf("PairStart delegated methods = %v, want none", fallback.methods)
+	}
+}
+
+func TestDesktopControllerReplacePreflightPreservesTrustOutsideSearching(t *testing.T) {
+	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "saved", Name: "Saved Windows"}))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled})
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := &recordingLocalHandler{}
+	controller, _ := NewDesktopController(supervisor, fallback)
+
+	_, err = controller.Handle(context.Background(), localapi.MethodReplaceDevice, json.RawMessage(
+		`{"old_device_id":"saved","new_device":"new-windows"}`,
+	))
+	if err == nil {
+		t.Fatal("ReplaceDevice outside search error = nil")
+	}
+	if len(fallback.methods) != 0 {
+		t.Fatalf("replacement preflight delegated destructive methods: %v", fallback.methods)
+	}
+	if got := supervisor.Snapshot(); got.State != lifecycle.StateClientReady || got.TrustedPeers != 1 || got.Peer == nil || got.Peer.ID != "saved" {
+		t.Fatalf("trust changed by replacement preflight = %#v", got)
+	}
+}
+
+func TestDesktopControllerReplaceRunsExactForgetThenPairStart(t *testing.T) {
+	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "saved", Name: "Saved Windows"}))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled})
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventSearchStarted})
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := &recordingLocalHandler{results: map[localapi.Method]any{
+		localapi.MethodPairStart: localapi.PairStartResult{
+			SessionID: "replacement-session", Code: "123456",
+			ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano),
+			Peer:      localapi.LifecyclePeer{ID: "new-windows", Name: "New Windows", OS: "windows"},
+		},
+	}}
+	controller, _ := NewDesktopController(supervisor, fallback)
+
+	if _, err := controller.Handle(context.Background(), localapi.MethodReplaceDevice, json.RawMessage(
+		`{"old_device_id":"saved","new_device":"new-windows","local_only":true}`,
+	)); err != nil {
+		t.Fatalf("ReplaceDevice error = %v", err)
+	}
+	if !reflect.DeepEqual(fallback.methods, []localapi.Method{localapi.MethodUnpair, localapi.MethodPairStart}) {
+		t.Fatalf("replacement delegate order = %v", fallback.methods)
+	}
+	var unpair localapi.UnpairParams
+	var start localapi.PairStartParams
+	_ = json.Unmarshal(fallback.raws[0], &unpair)
+	_ = json.Unmarshal(fallback.raws[1], &start)
+	if unpair.DeviceID != "saved" || !unpair.LocalOnly || start.Device != "new-windows" {
+		t.Fatalf("replacement params unpair=%#v start=%#v", unpair, start)
+	}
+	if got := supervisor.Snapshot(); got.State != lifecycle.StatePairing || got.TrustedPeers != 0 || got.Peer != nil ||
+		got.Pairing == nil || got.Pairing.SessionID != "replacement-session" {
+		t.Fatalf("replacement snapshot = %#v", got)
+	}
+}
+
+func TestDesktopControllerReplaceBlocksConcurrentLifecycleMutation(t *testing.T) {
+	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "saved", Name: "Saved Windows"}))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled})
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventSearchStarted})
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := newBlockingReplaceHandler()
+	controller, _ := NewDesktopController(supervisor, fallback)
+
+	replaceDone := make(chan error, 1)
+	go func() {
+		_, err := controller.Handle(context.Background(), localapi.MethodReplaceDevice, json.RawMessage(
+			`{"old_device_id":"saved","new_device":"new-windows","local_only":true}`,
+		))
+		replaceDone <- err
+	}()
+	waitForTestSignal(t, fallback.started, "replacement cleanup")
+	for _, method := range []localapi.Method{localapi.MethodSearchStop, localapi.MethodPause} {
+		if _, err := controller.Handle(context.Background(), method, nil); err == nil {
+			t.Fatalf("concurrent %s error = nil", method)
+		}
+	}
+	if got := supervisor.Snapshot(); got.State != lifecycle.StateSearching || !got.ActionInProgress || got.TrustedPeers != 1 {
+		t.Fatalf("reserved replacement snapshot = %#v", got)
+	}
+	close(fallback.release)
+	if err := waitForTestError(t, replaceDone, "replacement completion"); err != nil {
+		t.Fatalf("ReplaceDevice error = %v", err)
+	}
+	if got := fallback.Methods(); !reflect.DeepEqual(got, []localapi.Method{localapi.MethodUnpair, localapi.MethodPairStart}) {
+		t.Fatalf("replacement methods = %v", got)
 	}
 }
 
@@ -290,6 +428,36 @@ func TestDesktopControllerRequiresWindowsApprovalBeforeCompletingPairing(t *test
 	}
 	if got := supervisor.Snapshot(); got.Pairing == nil || got.Pairing.Status != lifecycle.PairingApproved {
 		t.Fatalf("approved snapshot = %#v", got)
+	}
+}
+
+func TestDesktopControllerKeepsProblemPairingPollableAndCancelable(t *testing.T) {
+	machine := newLifecycleMachine(t, lifecycle.RoleMacClient)
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	expires := time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano)
+	fallback := &recordingLocalHandler{results: map[localapi.Method]any{
+		localapi.MethodPairStart: localapi.PairStartResult{
+			SessionID: "session-1", Code: "123456", ExpiresAt: expires,
+			Peer: localapi.LifecyclePeer{ID: "windows", Name: "Windows", OS: "windows"},
+		},
+		localapi.MethodPairCancel: localapi.PairingStatusResult{
+			SessionID: "session-1", Code: "123456", Status: string(pairing.SessionCancelled), ExpiresAt: expires,
+			Peer: localapi.LifecyclePeer{ID: "windows", Name: "Windows", OS: "windows"},
+		},
+	}}
+	controller, _ := NewDesktopController(supervisor, fallback)
+	_, _ = controller.Handle(context.Background(), localapi.MethodEnable, nil)
+	_, _ = controller.Handle(context.Background(), localapi.MethodSearchStart, nil)
+	_, _ = controller.Handle(context.Background(), localapi.MethodPairStart, json.RawMessage(`{"device":"windows"}`))
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventProblemDetected, Problem: &lifecycle.Problem{
+		Code: "runtime_stopped", Message: "Runtime stopped", Action: "Retry",
+	}})
+
+	if _, err := controller.Handle(context.Background(), localapi.MethodPairCancel, json.RawMessage(`{"session_id":"session-1"}`)); err != nil {
+		t.Fatalf("PairCancel after problem error = %v", err)
+	}
+	if got := supervisor.Snapshot(); got.State != lifecycle.StateNeedsAction || got.Pairing != nil || got.Problem == nil {
+		t.Fatalf("snapshot after problem pairing cancel = %#v", got)
 	}
 }
 
@@ -580,13 +748,53 @@ type blockingLocalHandler struct {
 }
 
 type blockingPairStartHandler struct {
-	mu        sync.Mutex
-	started   chan struct{}
-	release   chan struct{}
-	startOnce sync.Once
-	starts    int
-	cancelled string
-	expiresAt string
+	mu           sync.Mutex
+	started      chan struct{}
+	release      chan struct{}
+	startOnce    sync.Once
+	starts       int
+	cancelled    string
+	expiresAt    string
+	afterStart   func()
+	cancelCtxErr error
+	cancelErr    error
+}
+
+type blockingReplaceHandler struct {
+	mu      sync.Mutex
+	started chan struct{}
+	release chan struct{}
+	methods []localapi.Method
+}
+
+func newBlockingReplaceHandler() *blockingReplaceHandler {
+	return &blockingReplaceHandler{started: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (h *blockingReplaceHandler) Handle(_ context.Context, method localapi.Method, _ json.RawMessage) (any, error) {
+	h.mu.Lock()
+	h.methods = append(h.methods, method)
+	h.mu.Unlock()
+	switch method {
+	case localapi.MethodUnpair:
+		close(h.started)
+		<-h.release
+		return map[string]bool{"unpaired": true}, nil
+	case localapi.MethodPairStart:
+		return localapi.PairStartResult{
+			SessionID: "replacement-session", Code: "123456",
+			ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano),
+			Peer:      localapi.LifecyclePeer{ID: "new-windows", Name: "New Windows", OS: "windows"},
+		}, nil
+	default:
+		return nil, nil
+	}
+}
+
+func (h *blockingReplaceHandler) Methods() []localapi.Method {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]localapi.Method(nil), h.methods...)
 }
 
 func newBlockingPairStartHandler() *blockingPairStartHandler {
@@ -597,7 +805,7 @@ func newBlockingPairStartHandler() *blockingPairStartHandler {
 	}
 }
 
-func (h *blockingPairStartHandler) Handle(_ context.Context, method localapi.Method, raw json.RawMessage) (any, error) {
+func (h *blockingPairStartHandler) Handle(ctx context.Context, method localapi.Method, raw json.RawMessage) (any, error) {
 	switch method {
 	case localapi.MethodPairStart:
 		h.mu.Lock()
@@ -605,6 +813,9 @@ func (h *blockingPairStartHandler) Handle(_ context.Context, method localapi.Met
 		h.mu.Unlock()
 		h.startOnce.Do(func() { close(h.started) })
 		<-h.release
+		if h.afterStart != nil {
+			h.afterStart()
+		}
 		return localapi.PairStartResult{
 			SessionID: "session-1", Code: "123456", ExpiresAt: h.expiresAt,
 			Peer: localapi.LifecyclePeer{ID: "windows", Name: "Windows PC", OS: "windows"},
@@ -614,8 +825,9 @@ func (h *blockingPairStartHandler) Handle(_ context.Context, method localapi.Met
 		_ = json.Unmarshal(raw, &params)
 		h.mu.Lock()
 		h.cancelled = params.SessionID
+		h.cancelCtxErr = ctx.Err()
 		h.mu.Unlock()
-		return localapi.PairingStatusResult{SessionID: params.SessionID, Status: string(pairing.SessionCancelled)}, nil
+		return localapi.PairingStatusResult{SessionID: params.SessionID, Status: string(pairing.SessionCancelled)}, h.cancelErr
 	default:
 		return nil, nil
 	}
@@ -631,6 +843,12 @@ func (h *blockingPairStartHandler) CancelledSession() string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.cancelled
+}
+
+func (h *blockingPairStartHandler) CancelContextError() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.cancelCtxErr
 }
 
 func closedSignal() chan struct{} {
