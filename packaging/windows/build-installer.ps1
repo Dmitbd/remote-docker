@@ -20,7 +20,8 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $installerSource = Join-Path $PSScriptRoot 'installer\RemoteDocker.nsi'
 $resolvedOutput = [System.IO.Path]::GetFullPath($OutputDirectory)
 $workRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("remote-docker-windows-setup-{0}" -f [guid]::NewGuid().ToString('N'))
-$resourceObject = Join-Path $repoRoot 'cmd\remote-docker-desktop\remote-docker_windows_amd64.syso'
+$desktopResourceObject = Join-Path $repoRoot 'cmd\remote-docker-desktop\remote-docker_windows_amd64.syso'
+$uiResourceObject = Join-Path $repoRoot 'cmd\remote-docker-ui\remote-docker_windows_amd64.syso'
 
 function Invoke-Checked {
     param(
@@ -124,8 +125,9 @@ try {
         $resourceScript = Join-Path $workRoot 'remote-docker.rc'
         [System.IO.File]::WriteAllText($resourceScript, "1 ICON `"$iconSource`"`r`n", [System.Text.Encoding]::ASCII)
         Invoke-Checked -FilePath $resourceCompiler -ArgumentList @(
-            '--input-format=rc', '--output-format=coff', '--input', $resourceScript, '--output', $resourceObject
+            '--input-format=rc', '--output-format=coff', '--input', $resourceScript, '--output', $desktopResourceObject
         ) -Description 'Windows icon resource build'
+        Copy-Item -LiteralPath $desktopResourceObject -Destination $uiResourceObject -Force
 
         $previousGoos = $env:GOOS
         $previousGoarch = $env:GOARCH
@@ -141,6 +143,12 @@ try {
                 '-o', (Join-Path $binaryOutput 'RemoteDocker.exe'),
                 './cmd/remote-docker-desktop'
             ) -Description 'Remote Docker desktop build'
+            Invoke-Checked -FilePath 'go' -ArgumentList @(
+                '-C', $repoRoot, 'build', '-trimpath', '-buildvcs=false', '-tags=wv2runtime.error',
+                '-ldflags=-H=windowsgui -s -w -buildid=',
+                '-o', (Join-Path $binaryOutput 'remote-docker-ui.exe'),
+                './cmd/remote-docker-ui'
+            ) -Description 'Remote Docker Wails UI build'
 
             $env:GOOS = 'linux'
             $env:GOARCH = 'amd64'
@@ -172,6 +180,7 @@ try {
     }
 
     $desktopSource = Resolve-RequiredFile (Join-Path $resolvedBinaryInput 'RemoteDocker.exe')
+    $uiSource = Resolve-RequiredFile (Join-Path $resolvedBinaryInput 'remote-docker-ui.exe')
     $runtimeSource = Resolve-RequiredFile (Join-Path $resolvedBinaryInput 'remote-docker-remote-linux-amd64')
     $runtimeChecksumSource = Resolve-RequiredFile (Join-Path $resolvedBinaryInput 'remote-docker-remote-linux-amd64.sha256')
     Assert-ManifestHash -FilePath $runtimeSource -ManifestPath $runtimeChecksumSource -Description 'Managed WSL runtime'
@@ -217,6 +226,7 @@ try {
         "/DPRODUCT_VERSION=$Version",
         "/DOUTPUT_FILE=$setupPath",
         "/DAPP_SOURCE=$desktopSource",
+        "/DUI_SOURCE=$uiSource",
         "/DICON_SOURCE=$(Resolve-RequiredFile (Join-Path $repoRoot 'assets\icon\app\remote-docker.ico'))",
         "/DROOTFS_SOURCE=$resolvedRootfs",
         "/DROOTFS_CHECKSUM_SOURCE=$rootfsChecksum",
@@ -241,8 +251,10 @@ try {
     Write-Output "Created unsigned Windows Setup EXE '$setupPath'."
 }
 finally {
-    if (Test-Path -LiteralPath $resourceObject -PathType Leaf) {
-        Remove-Item -LiteralPath $resourceObject -Force
+    foreach ($resourceObject in @($desktopResourceObject, $uiResourceObject)) {
+        if (Test-Path -LiteralPath $resourceObject -PathType Leaf) {
+            Remove-Item -LiteralPath $resourceObject -Force
+        }
     }
     if (Test-Path -LiteralPath $workRoot) {
         Remove-Item -LiteralPath $workRoot -Recurse -Force

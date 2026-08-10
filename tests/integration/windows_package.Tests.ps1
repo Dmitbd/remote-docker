@@ -106,7 +106,7 @@ Describe 'Windows Setup EXE contract' {
         $combined | Should -Not -Match 'автозапуск|при входе в Windows'
     }
 
-    It 'pins and verifies NSIS and the Fyne compiler toolchain' {
+    It 'pins and verifies NSIS and builds the stable Wails child' {
         $script = Read-RepositoryFile $buildScript
 
         $script | Should -Match '\$GoVersion\s*=\s*''1\.26\.5'''
@@ -124,12 +124,38 @@ Describe 'Windows Setup EXE contract' {
         $script | Should -Match 'x86_64-w64-mingw32-gcc\.exe'
         $script | Should -Match '-H=windowsgui'
         $script | Should -Match 'cmd/remote-docker-desktop'
+        $script | Should -Match 'cmd/remote-docker-ui'
+        $script | Should -Match 'remote-docker-ui\.exe'
+        $script | Should -Match 'wv2runtime\.error'
+        $script | Should -Match 'Copy-Item -LiteralPath \$desktopResourceObject -Destination \$uiResourceObject -Force'
         $script | Should -Match 'cmd/remote-docker-remote'
         $script | Should -Match 'Remote-Docker-\$Version-x64-Setup\.exe'
         $script | Should -Match "'/INPUTCHARSET'"
         $script | Should -Match "'UTF8'"
         $script | Should -Match "'/WX'"
         $script | Should -Not -Match 'cmd/remote-docker-agent|cmd/remote-docker-tray|\.msi'
+    }
+
+    It 'requires WebView2 explicitly without a silent application-start download' {
+        $installer = Read-RepositoryFile $installerSource
+
+        $installer | Should -Match 'EdgeUpdate\\Clients\\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5\}'
+        $installer | Should -Match 'Microsoft Edge WebView2 Runtime'
+        $installer | Should -Match 'SetRegView 32'
+        $installer | Should -Match 'https://go\.microsoft\.com/fwlink/p/\?LinkId=2124703'
+        $installer | Should -Match 'MessageBox MB_YESNO'
+        $installer | Should -Not -Match 'Invoke-WebRequest|URLDownloadToFile|nsExec::ExecToStack[^\n]*WebView2'
+    }
+
+    It 'installs and removes the host and UI child together' {
+        $installer = Read-RepositoryFile $installerSource
+        $build = Read-RepositoryFile $buildScript
+
+        $build | Should -Match '/DUI_SOURCE=\$uiSource'
+        $installer | Should -Match 'File /oname=RemoteDocker\.exe "\$\{APP_SOURCE\}"'
+        $installer | Should -Match 'File /oname=remote-docker-ui\.exe "\$\{UI_SOURCE\}"'
+        $installer | Should -Match 'Delete "\$INSTDIR\\RemoteDocker\.exe"'
+        $installer | Should -Match 'Delete "\$INSTDIR\\remote-docker-ui\.exe"'
     }
 
     It 'provisions validated application and data roots without starting the app' {
