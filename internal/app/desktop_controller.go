@@ -36,6 +36,13 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 	}
 	switch method {
 	case localapi.MethodStatus:
+		if c.fallback == nil || !c.operations.TryLock() {
+			return statusFromLifecycle(c.supervisor.Snapshot()), nil
+		}
+		defer c.operations.Unlock()
+		if err := c.refreshPairingLocked(ctx); err != nil {
+			return nil, err
+		}
 		return statusFromLifecycle(c.supervisor.Snapshot()), nil
 	case localapi.MethodEnable:
 		if !c.operations.TryLock() {
@@ -217,6 +224,35 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 	default:
 		return c.delegate(ctx, method, raw)
 	}
+}
+
+func (c *DesktopController) refreshPairingLocked(ctx context.Context) error {
+	snapshot := c.supervisor.Snapshot()
+	shouldRefresh := snapshot.Pairing != nil ||
+		snapshot.Role == lifecycle.RoleWindowsHost && snapshot.State == lifecycle.StateHostWaiting && snapshot.TrustedPeers == 0
+	if !shouldRefresh {
+		return nil
+	}
+	params := localapi.PairSessionParams{ObserveOnly: snapshot.State == lifecycle.StatePairingCancellationPending}
+	if snapshot.Pairing != nil {
+		params.SessionID = snapshot.Pairing.SessionID
+	}
+	raw, _ := json.Marshal(params)
+	result, err := c.delegate(ctx, localapi.MethodPairStatus, raw)
+	if err != nil {
+		return err
+	}
+	status, ok := result.(localapi.PairingStatusResult)
+	if !ok {
+		return unavailable("pairing returned an invalid response")
+	}
+	if strings.TrimSpace(status.SessionID) == "" {
+		if snapshot.Pairing == nil {
+			return nil
+		}
+		return unavailable("pairing session status is unavailable")
+	}
+	return c.reconcilePairing(status)
 }
 
 func connectionLimitOccupied(snapshot lifecycle.Snapshot) bool {

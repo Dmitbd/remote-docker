@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1842,6 +1843,22 @@ func TestWindowsPairingHostRetriesAndPublishesOnFirewallApprovedLANPort(t *testi
 	}
 	if want := []string{"version=1", "instance=" + host.server.InstanceID(), "pairing=1"}; !reflect.DeepEqual(advertisement.TXT, want) {
 		t.Fatalf("advertisement TXT = %#v, want opaque TLS-bound data %#v", advertisement.TXT, want)
+	}
+}
+
+func TestWindowsPairingStatusTreatsNoActiveSessionAsIdle(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	server, err := pairing.NewServer(pairing.ServerIdentity{PrivateKey: privateKey})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+
+	status, err := (windowsPairingCoordinator{server: server}).Status(context.Background(), "")
+	if err != nil || status.SessionID != "" || status.Status != "" {
+		t.Fatalf("idle pairing status = %#v error=%v", status, err)
 	}
 }
 

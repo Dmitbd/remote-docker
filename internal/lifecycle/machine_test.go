@@ -117,6 +117,67 @@ func TestPairingAndConnectionEnforceOneTrustedPeer(t *testing.T) {
 	}
 }
 
+func TestPairingApprovalPublishesConnectingUntilTrustIsCommitted(t *testing.T) {
+	for _, role := range []Role{RoleMacClient, RoleWindowsHost} {
+		t.Run(string(role), func(t *testing.T) {
+			machine := mustMachine(t, role)
+			mustApply(t, machine, Event{Type: EventEnabled})
+			if role == RoleMacClient {
+				mustApply(t, machine, Event{Type: EventSearchStarted})
+			}
+			pairing := Pairing{
+				SessionID: "session", Peer: Peer{ID: "peer", Name: "Peer"},
+				Code: "123456", ExpiresAt: time.Now().Add(time.Minute),
+			}
+			mustApply(t, machine, Event{Type: EventPairingStarted, Pairing: &pairing})
+
+			approved := mustApply(t, machine, Event{Type: EventPairingApproved})
+			if approved.State != StateConnecting || approved.Pairing == nil || approved.Pairing.Status != PairingApproved || approved.TrustedPeers != 0 {
+				t.Fatalf("approved pairing snapshot = %#v", approved)
+			}
+
+			completed := mustApply(t, machine, Event{Type: EventPairingCompleted, Peer: &pairing.Peer})
+			if completed.State != StateConnecting || completed.Pairing != nil || completed.TrustedPeers != 1 || completed.Peer == nil {
+				t.Fatalf("completed pairing snapshot = %#v", completed)
+			}
+		})
+	}
+}
+
+func TestApprovedPairingTerminalDecisionReturnsToRoleIdleState(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		role  Role
+		event EventType
+		want  State
+	}{
+		{name: "Mac rejected", role: RoleMacClient, event: EventPairingRejected, want: StateClientReady},
+		{name: "Mac expired", role: RoleMacClient, event: EventPairingExpired, want: StateClientReady},
+		{name: "Windows cancelled", role: RoleWindowsHost, event: EventPairingCancelled, want: StateHostWaiting},
+		{name: "Windows expired", role: RoleWindowsHost, event: EventPairingExpired, want: StateHostWaiting},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			machine := mustMachine(t, test.role)
+			mustApply(t, machine, Event{Type: EventEnabled})
+			if test.role == RoleMacClient {
+				mustApply(t, machine, Event{Type: EventSearchStarted})
+			}
+			pairing := Pairing{
+				SessionID: "session", Peer: Peer{ID: "peer", Name: "Peer"},
+				Code: "123456", ExpiresAt: time.Now().Add(time.Minute),
+			}
+			mustApply(t, machine, Event{Type: EventPairingStarted, Pairing: &pairing})
+			mustApply(t, machine, Event{Type: EventPairingApproved})
+
+			terminal := mustApply(t, machine, Event{Type: test.event})
+			if terminal.State != test.want || terminal.Pairing != nil || terminal.TrustedPeers != 0 ||
+				terminal.Docker.State != ServiceStopped || terminal.Sync.State != ServiceStopped {
+				t.Fatalf("terminal approved pairing snapshot = %#v", terminal)
+			}
+		})
+	}
+}
+
 func TestPairingProblemNeverHidesPendingSession(t *testing.T) {
 	pairing := Pairing{
 		SessionID: "session-1", Peer: Peer{ID: "windows", Name: "Windows"},

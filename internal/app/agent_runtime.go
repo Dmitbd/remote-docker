@@ -1733,6 +1733,9 @@ func (c windowsPairingCoordinator) Status(_ context.Context, sessionID string) (
 	if sessionID == "" && active {
 		sessionID = descriptor.ID
 	}
+	if sessionID == "" {
+		return localapi.PairingStatusResult{}, nil
+	}
 	status, ok := c.server.SessionStatus(sessionID)
 	if !ok {
 		return localapi.PairingStatusResult{}, needsAction("pairing session is not active")
