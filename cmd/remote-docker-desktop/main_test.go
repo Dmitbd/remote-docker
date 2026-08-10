@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -51,5 +52,37 @@ func TestUIExecutableLivesBesideDesktopHost(t *testing.T) {
 	got := uiExecutablePath(desktopPath)
 	if filepath.Dir(got) != filepath.Dir(desktopPath) || filepath.Base(got) == filepath.Base(desktopPath) {
 		t.Fatalf("uiExecutablePath() = %q", got)
+	}
+}
+
+func TestCompleteDesktopShutdownPreservesOwnedCleanupOrder(t *testing.T) {
+	events := []string{}
+	err := completeDesktopShutdown(
+		func(context.Context) error {
+			events = append(events,
+				"notify-peer", "stop-internal-streams", "stop-sync", "stop-tunnel",
+				"stop-managed-wsl", "stop-owned-children", "stop-watchdog",
+			)
+			return nil
+		},
+		func() error {
+			events = append(events, "close-local-api")
+			return nil
+		},
+		func(context.Context) error {
+			events = append(events, "stop-ui-and-tray")
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("completeDesktopShutdown() error = %v", err)
+	}
+	want := []string{
+		"notify-peer", "stop-internal-streams", "stop-sync", "stop-tunnel",
+		"stop-managed-wsl", "stop-owned-children", "stop-watchdog",
+		"close-local-api", "stop-ui-and-tray",
+	}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("shutdown order = %v, want %v", events, want)
 	}
 }

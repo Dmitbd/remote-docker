@@ -30,13 +30,18 @@ func (c *Controller) Perform(ctx context.Context, action ActionID, value string)
 	if c == nil || c.handler == nil || c.snapshot == nil {
 		return errors.New("desktop controller is unavailable")
 	}
-	if action == ActionConnect {
+	if action == ActionConnect || action == ActionConnectTrusted {
 		snapshot := c.snapshot()
-		if snapshot.State != lifecycle.StateSearching {
-			return ErrPairingNotActive
-		}
-		if connectionLimitOccupied(snapshot) {
+		if connectionAttemptOccupied(snapshot.State) {
 			return ErrConnectionLimit
+		}
+		if action == ActionConnect {
+			if snapshot.State != lifecycle.StateSearching {
+				return ErrPairingNotActive
+			}
+			if connectionLimitOccupied(snapshot) {
+				return ErrConnectionLimit
+			}
 		}
 	}
 	method, params, ok := c.resolve(action, value)
@@ -49,6 +54,16 @@ func (c *Controller) Perform(ctx context.Context, action ActionID, value string)
 	}
 	_, err = c.handler.Handle(ctx, method, raw)
 	return err
+}
+
+func connectionAttemptOccupied(state lifecycle.State) bool {
+	switch state {
+	case lifecycle.StatePairing, lifecycle.StatePairingCancellationPending,
+		lifecycle.StateConnecting, lifecycle.StateConnected, lifecycle.StateReconnecting:
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *Controller) Candidates(ctx context.Context) ([]localapi.PairingCandidate, error) {

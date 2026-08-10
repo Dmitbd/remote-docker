@@ -48,6 +48,12 @@ func TestTrayApplicationLaunchesWindowAndUsesOneCompleteShutdownPath(t *testing.
 	waitAtomic(t, &pauses, 1, "tray pause")
 	tray.click("Завершить работу")
 	waitAtomic(t, &quits, 1, "tray quit")
+	quitCtx, quitCancel := context.WithTimeout(context.Background(), time.Second)
+	if err := application.Quit(quitCtx); err != nil {
+		t.Fatalf("Quit() error = %v", err)
+	}
+	quitCancel()
+	cancel()
 	select {
 	case err := <-done:
 		if err != nil {
@@ -79,6 +85,11 @@ func TestTrayApplicationReflectsLifecycleIconUpdates(t *testing.T) {
 	tray.waitReady(t)
 	updates <- lifecycle.Snapshot{State: lifecycle.StateConnected}
 	tray.waitIcons(t, 2)
+	quitCtx, quitCancel := context.WithTimeout(context.Background(), time.Second)
+	if err := application.Quit(quitCtx); err != nil {
+		t.Fatalf("Quit() error = %v", err)
+	}
+	quitCancel()
 	cancel()
 	select {
 	case <-done:

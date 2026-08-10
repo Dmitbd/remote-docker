@@ -74,12 +74,6 @@ func (a *Application) Run(ctx context.Context) error {
 		return err
 	}
 	go a.observe(ctx)
-	go func() {
-		<-ctx.Done()
-		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = a.Quit(stopCtx)
-	}()
 	a.tray.Run(func() { a.ready(ctx) }, func() {})
 	return a.quitErr
 }

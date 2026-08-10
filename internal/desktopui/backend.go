@@ -128,7 +128,9 @@ func (b *Backend) Perform(ctx context.Context, id, value string) (State, error) 
 			release()
 		}
 	}()
-	method, params, err := b.resolve(ctx, id, value)
+	operationCtx, cancel := context.WithTimeout(normalizeContext(ctx), operationTimeout(id))
+	defer cancel()
+	method, params, err := b.resolve(operationCtx, id, value)
 	if err != nil {
 		return State{}, err
 	}
@@ -136,11 +138,11 @@ func (b *Backend) Perform(ctx context.Context, id, value string) (State, error) 
 	if method == localapi.MethodDoctor {
 		var diagnostics localapi.DoctorResult
 		result = &diagnostics
-		if err := b.Client.Call(ctx, method, params, result); err != nil {
+		if err := b.Client.Call(operationCtx, method, params, result); err != nil {
 			return State{}, publicBackendError("обновить диагностику", err)
 		}
 		b.storeDiagnostics(diagnostics.Checks)
-	} else if err := b.Client.Call(ctx, method, params, nil); err != nil {
+	} else if err := b.Client.Call(operationCtx, method, params, nil); err != nil {
 		return State{}, publicBackendError(operationFailureLabel(id), err)
 	}
 	release()
@@ -151,7 +153,7 @@ func (b *Backend) Perform(ctx context.Context, id, value string) (State, error) 
 			Detail: "Окно закроется после завершения очистки.",
 		}}, nil
 	}
-	return b.Snapshot(ctx)
+	return b.Snapshot(operationCtx)
 }
 
 func (b *Backend) Quit(ctx context.Context) error {
@@ -163,10 +165,36 @@ func (b *Backend) Quit(ctx context.Context) error {
 		return err
 	}
 	defer release()
-	if err := b.Client.Call(ctx, localapi.MethodShutdown, nil, nil); err != nil {
+	quitCtx, cancel := context.WithTimeout(normalizeContext(ctx), operationTimeout(OperationQuit))
+	defer cancel()
+	if err := b.Client.Call(quitCtx, localapi.MethodShutdown, nil, nil); err != nil {
 		return publicBackendError("завершить работу", err)
 	}
 	return nil
+}
+
+func normalizeContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
+func operationTimeout(id string) time.Duration {
+	switch id {
+	case OperationConnect, OperationConnectTrusted, OperationManualAddress:
+		return 90 * time.Second
+	case OperationApprovePair, OperationRejectPair, OperationCancelPair:
+		return 90 * time.Second
+	case OperationAddProject:
+		return 2 * time.Minute
+	case OperationDisconnect, OperationForgetDevice, OperationPause:
+		return 45 * time.Second
+	case OperationQuit:
+		return 30 * time.Second
+	default:
+		return 20 * time.Second
+	}
 }
 
 func (b *Backend) resolve(ctx context.Context, id, value string) (localapi.Method, any, error) {

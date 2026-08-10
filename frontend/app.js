@@ -43,7 +43,8 @@
     const devices = state.devices || [];
     let body = heading('connection-title', state.role || 'Remote Docker', connection.headline || 'Remote Docker', connection.detail || 'Состояние загружается.');
     if (connection.notice) {
-      body += `<div class="notice ${connection.tone === 'red' ? 'error-notice' : ''}">⚠ ${escapeHTML(connection.notice)}</div>`;
+      const disconnected = connection.disconnectedBy ? `Отключение: ${connection.disconnectedBy}. ` : '';
+      body += `<div class="notice ${connection.tone === 'red' ? 'error-notice' : ''}">⚠ ${escapeHTML(disconnected + connection.notice)}</div>`;
     }
     if (connection.pairCode) {
       body += `<div class="code-panel"><div class="device-copy"><strong>${escapeHTML(connection.peerName || 'Устройство')}</strong><span>${escapeHTML(state.role)}</span></div><div class="pair-code">${escapeHTML(connection.pairCode)}</div><div class="pair-note">Код должен полностью совпадать на Mac и Windows.</div></div>`;
@@ -55,7 +56,8 @@
     } else if (state.lifecycle === 'searching') {
       body += '<div class="searching"><i class="spinner" aria-hidden="true"></i>Поиск продолжается</div>';
     } else if (state.lifecycle === 'reconnecting') {
-      body += `<div class="notice error-notice">Повторное подключение выполняется автоматически${connection.countdown ? ` · ${escapeHTML(connection.countdown)}` : ''}.</div>`;
+      const side = connection.disconnectedBy ? ` Причина обнаружена на стороне: ${escapeHTML(connection.disconnectedBy)}.` : '';
+      body += `<div class="notice error-notice">Повторное подключение выполняется автоматически${connection.countdown ? ` · ${escapeHTML(connection.countdown)}` : ''}.${side}</div>`;
     }
     if (devices.length) {
       body += `<div class="device-list">${devices.map(renderDevice).join('')}</div>`;
@@ -229,6 +231,30 @@
     if (path) await perform('add-project', path, document.getElementById('pick-workspace'));
   }
 
+  async function quitApplication() {
+    if (localBusy) return;
+    localBusy = true;
+    quitButton.classList.add('loading');
+    quitButton.disabled = true;
+    quitButton.innerHTML = '<i class="button-spinner" aria-hidden="true"></i><span>Завершаем…</span>';
+    updateGlobalBusy();
+    announce('Безопасно завершаем Remote Docker');
+    try {
+      const api = bridge();
+      if (!api?.Quit) throw new Error('Завершение работы недоступно.');
+      await api.Quit();
+      stopped = true;
+      stopPolling();
+    } catch (error) {
+      localBusy = false;
+      quitButton.classList.remove('loading');
+      quitButton.disabled = false;
+      quitButton.innerHTML = '<svg class="nav-icon" aria-hidden="true"><use href="assets/icons.svg#quit"></use></svg><span>Завершить работу</span>';
+      announce(errorMessage(error));
+      updateGlobalBusy();
+    }
+  }
+
   async function snapshot() {
     if (stopped || document.visibilityState !== 'visible' || localBusy) return;
     try {
@@ -279,7 +305,7 @@
     document.getElementById(`${selectedSection}-section`)?.querySelector('h1')?.focus?.({preventScroll: true});
   }));
 
-  quitButton.addEventListener('click', () => perform('quit', '', quitButton));
+  quitButton.addEventListener('click', quitApplication);
   document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' ? startPolling() : stopPolling());
   window.addEventListener('beforeunload', () => { stopped = true; stopPolling(); });
   startPolling();

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestAgentLocalAPIUsesPerUserLocalTransport(t *testing.T) {
@@ -279,6 +280,36 @@ func TestAgentLocalAPIExposesOnlyTypedSafeErrors(t *testing.T) {
 	if err := <-serveDone; err != nil {
 		t.Fatalf("ServeConn() error = %v", err)
 	}
+}
+
+func TestClientCancellationClosesAStalledLocalRequest(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := Server{
+		Handler: HandlerFunc(func(context.Context, Method, json.RawMessage) (any, error) {
+			close(started)
+			<-release
+			return map[string]bool{"ready": true}, nil
+		}),
+		AuthorizePeer: func(net.Conn) error { return nil },
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- server.ServeConn(context.Background(), serverConn) }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := (Client{Dial: pipeDialer(clientConn)}).Call(ctx, MethodStatus, nil, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Call() error = %v, want deadline exceeded", err)
+	}
+	select {
+	case <-started:
+	default:
+		t.Fatal("request did not reach the local server")
+	}
+	close(release)
+	<-serveDone
 }
 
 func pipeDialer(conn net.Conn) DialFunc {

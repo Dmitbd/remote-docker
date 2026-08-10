@@ -24,6 +24,9 @@ func (c Client) Call(ctx context.Context, method Method, params any, result any)
 	if !method.valid() {
 		return errors.New("invalid local control method")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	dial := c.Dial
 	if dial == nil {
 		dial = func(ctx context.Context) (net.Conn, error) {
@@ -35,6 +38,8 @@ func (c Client) Call(ctx context.Context, method Method, params any, result any)
 		return fmt.Errorf("connect to background agent: %w", err)
 	}
 	defer connection.Close()
+	stopClose := context.AfterFunc(ctx, func() { _ = connection.Close() })
+	defer stopClose()
 	if !isLocalNetwork(connection.RemoteAddr().Network()) {
 		return ErrInsecureTransport
 	}
@@ -57,6 +62,9 @@ func (c Client) Call(ctx context.Context, method Method, params any, result any)
 		Method:        method,
 		Params:        rawParams,
 	}); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fmt.Errorf("write local control request: %w", err)
 	}
 
@@ -64,6 +72,9 @@ func (c Client) Call(ctx context.Context, method Method, params any, result any)
 	decoder.DisallowUnknownFields()
 	var response wireResponse
 	if err := decoder.Decode(&response); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fmt.Errorf("read local control response: %w", err)
 	}
 	if response.SchemaVersion != CurrentSchemaVersion || response.ID != id && response.ID != 0 {

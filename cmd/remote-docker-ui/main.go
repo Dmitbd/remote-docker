@@ -156,10 +156,14 @@ func (b *UIBridge) show() {
 
 func operationTimeout(id string) time.Duration {
 	switch id {
+	case desktopui.OperationConnect, desktopui.OperationConnectTrusted, desktopui.OperationManualAddress:
+		return 90 * time.Second
 	case desktopui.OperationApprovePair, desktopui.OperationRejectPair, desktopui.OperationCancelPair:
 		return 90 * time.Second
 	case desktopui.OperationAddProject:
 		return 2 * time.Minute
+	case desktopui.OperationDisconnect, desktopui.OperationForgetDevice, desktopui.OperationPause:
+		return 45 * time.Second
 	case desktopui.OperationQuit:
 		return quitTimeout
 	default:

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -139,16 +140,18 @@ func run() error {
 	handler.setShow(application.Show)
 	handler.setShutdown(func() {
 		cancel()
-		_ = listener.Close()
 	})
 	shutdownDone := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		_, shutdownErr := controller.Handle(shutdownCtx, localapi.MethodShutdown, nil)
-		shutdownCancel()
-		_ = application.Quit(shutdownCtx)
-		shutdownDone <- shutdownErr
+		shutdownDone <- completeDesktopShutdown(
+			func(shutdownCtx context.Context) error {
+				_, shutdownErr := controller.Handle(shutdownCtx, localapi.MethodShutdown, nil)
+				return shutdownErr
+			},
+			listener.Close,
+			application.Quit,
+		)
 	}()
 	if err := application.Run(ctx); err != nil {
 		cancel()
@@ -165,6 +168,24 @@ func run() error {
 		return fmt.Errorf("stop desktop runtime: %w", err)
 	}
 	return nil
+}
+
+func completeDesktopShutdown(
+	stopRuntime func(context.Context) error,
+	closeLocalAPI func() error,
+	stopShell func(context.Context) error,
+) error {
+	runtimeCtx, cancelRuntime := context.WithTimeout(context.Background(), 30*time.Second)
+	runtimeErr := stopRuntime(runtimeCtx)
+	cancelRuntime()
+	localAPIErr := closeLocalAPI()
+	if errors.Is(localAPIErr, net.ErrClosed) {
+		localAPIErr = nil
+	}
+	shellCtx, cancelShell := context.WithTimeout(context.Background(), 5*time.Second)
+	shellErr := stopShell(shellCtx)
+	cancelShell()
+	return errors.Join(runtimeErr, localAPIErr, shellErr)
 }
 
 func uiExecutablePath(desktopExecutable string) string {

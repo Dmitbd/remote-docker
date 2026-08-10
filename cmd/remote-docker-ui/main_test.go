@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/Dmitbd/remote-docker/internal/desktopui"
@@ -47,6 +48,22 @@ func TestEmbeddedFrontendContainsProductionAssets(t *testing.T) {
 		if err != nil || info.IsDir() || info.Size() == 0 {
 			t.Fatalf("embedded asset %q info=%#v error=%v", path, info, err)
 		}
+	}
+}
+
+func TestFrontendKeepsDestructiveCancellationLocalAndUsesCompleteQuit(t *testing.T) {
+	contents, err := fs.ReadFile(frontendAssets(), "app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(contents)
+	for _, required := range []string{"window.confirm", "forget-device", "api.Quit", "localBusy"} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("frontend app is missing %q", required)
+		}
+	}
+	if strings.Contains(source, "api.Perform('quit'") || strings.Contains(source, `perform('quit'`) {
+		t.Fatal("complete quit was routed through the generic operation bridge")
 	}
 }
 

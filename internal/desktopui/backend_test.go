@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Dmitbd/remote-docker/internal/localapi"
 )
@@ -77,6 +78,19 @@ func TestBackendRejectsWorkspaceSelectionOutsideMacAndManualPublicAddress(t *tes
 	backend.Platform = "darwin"
 	if _, _, err := backend.resolve(context.Background(), OperationManualAddress, "203.0.113.8"); err == nil {
 		t.Fatal("manual pairing accepted a public address")
+	}
+}
+
+func TestEveryMutatingDesktopOperationHasAnExplicitTimeout(t *testing.T) {
+	for _, id := range []string{
+		OperationConnect, OperationConnectTrusted, OperationManualAddress,
+		OperationDisconnect, OperationForgetDevice,
+		OperationApprovePair, OperationRejectPair, OperationCancelPair,
+		OperationPause, OperationAddProject, OperationQuit,
+	} {
+		if timeout := operationTimeout(id); timeout <= 0 || timeout > 2*time.Minute {
+			t.Fatalf("operationTimeout(%q) = %s, want bounded timeout", id, timeout)
+		}
 	}
 }
 
