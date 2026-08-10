@@ -306,8 +306,8 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 		agent: agent, store: store, sshConfigPath: sshConfigPath,
 		restorer: restorer, pairHost: pairHost, ssh: sshRuntime, localSync: localSync,
 		windowsBridge: windowsBridge,
-		tunnelClient: tunnelClient,
-		tunnelReady: tunnelReady,
+		tunnelClient:  tunnelClient,
+		tunnelReady:   tunnelReady,
 		windowsStopper: func() managedWindowsRuntimeStopper {
 			if runtime.GOOS == "windows" {
 				return windowsbridge.ManagedWSLOperations{}
@@ -1474,7 +1474,7 @@ func newWindowsPairingHostWithRegistryAndIdentity(installer pairing.Installer, r
 		server: server, publisher: discovery.ZeroconfPublisher{}, listen: net.Listen,
 		minRetryBackoff: pairingHostMinRetryBackoff, maxRetryBackoff: pairingHostMaxRetryBackoff,
 		republishInterval: pairingHostRepublishInterval,
-		identity: identity, displayName: strings.TrimSpace(deviceName),
+		identity:          identity, displayName: strings.TrimSpace(deviceName),
 	}, nil
 }
 

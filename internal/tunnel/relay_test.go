@@ -82,16 +82,25 @@ func (s *recordingOpenSession) OpenStream(_ context.Context, kind StreamKind) (n
 	_ = second.Close()
 	return first, nil
 }
-func (s *recordingOpenSession) AcceptStream(context.Context) (StreamKind, net.Conn, error) { return 0, nil, errors.New("unsupported") }
+func (s *recordingOpenSession) AcceptStream(context.Context) (StreamKind, net.Conn, error) {
+	return 0, nil, errors.New("unsupported")
+}
 func (s *recordingOpenSession) Done() <-chan struct{} { return s.done }
 func (s *recordingOpenSession) Close() error {
-	select { case <-s.done: default: close(s.done) }
+	select {
+	case <-s.done:
+	default:
+		close(s.done)
+	}
 	return nil
 }
 func (s *recordingOpenSession) waitKind(t *testing.T) StreamKind {
 	t.Helper()
 	select {
-	case kind := <-s.kinds: return kind
-	case <-time.After(time.Second): t.Fatal("relay did not open stream"); return 0
+	case kind := <-s.kinds:
+		return kind
+	case <-time.After(time.Second):
+		t.Fatal("relay did not open stream")
+		return 0
 	}
 }

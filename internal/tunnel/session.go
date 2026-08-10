@@ -59,7 +59,13 @@ func (s *yamuxSession) OpenStream(ctx context.Context, kind StreamKind) (net.Con
 	if !validStreamKind(kind) {
 		return nil, fmt.Errorf("unsupported tunnel stream kind %d", kind)
 	}
-	stream, err := waitStream(ctx, s.session.OpenStream)
+	stream, err := waitStream(ctx, func() (net.Conn, error) {
+		stream, err := s.session.OpenStream()
+		if err != nil {
+			return nil, err
+		}
+		return stream, nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("open %s tunnel stream: %w", kind, err)
 	}
@@ -71,7 +77,13 @@ func (s *yamuxSession) OpenStream(ctx context.Context, kind StreamKind) (net.Con
 }
 
 func (s *yamuxSession) AcceptStream(ctx context.Context) (StreamKind, net.Conn, error) {
-	stream, err := waitStream(ctx, s.session.AcceptStream)
+	stream, err := waitStream(ctx, func() (net.Conn, error) {
+		stream, err := s.session.AcceptStream()
+		if err != nil {
+			return nil, err
+		}
+		return stream, nil
+	})
 	if err != nil {
 		return 0, nil, fmt.Errorf("accept tunnel stream: %w", err)
 	}
@@ -108,4 +120,4 @@ func waitStream(ctx context.Context, operation func() (net.Conn, error)) (net.Co
 }
 
 func (s *yamuxSession) Done() <-chan struct{} { return s.session.CloseChan() }
-func (s *yamuxSession) Close() error            { return s.session.Close() }
+func (s *yamuxSession) Close() error          { return s.session.Close() }

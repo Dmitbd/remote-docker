@@ -76,8 +76,14 @@ func TestSecureTransportLabPairingStreamsReconnectLimitAndCleanup(t *testing.T) 
 	_ = reconnected.Close()
 
 	wrongIdentity := deterministicIdentity(3)
-	if _, err := lab.tryDial(wrongIdentity, windowsIdentity.PublicKey); err == nil {
-		t.Fatal("unpaired client identity completed mutual TLS")
+	wrongSession, err := lab.tryDial(wrongIdentity, windowsIdentity.PublicKey)
+	if err == nil {
+		defer wrongSession.Close()
+		select {
+		case <-wrongSession.Done():
+		case <-time.After(2 * time.Second):
+			t.Fatal("unpaired client identity remained accepted by the server")
+		}
 	}
 	lab.close(t)
 	if active := lab.active.Load(); active != 0 {
@@ -227,9 +233,9 @@ func (c *accountedConn) Close() error {
 }
 
 type echoServiceDialer struct {
-	mu       sync.Mutex
-	routed   []tunnel.StreamKind
-	wait     sync.WaitGroup
+	mu     sync.Mutex
+	routed []tunnel.StreamKind
+	wait   sync.WaitGroup
 }
 
 func (d *echoServiceDialer) DialService(ctx context.Context, kind tunnel.StreamKind) (net.Conn, error) {

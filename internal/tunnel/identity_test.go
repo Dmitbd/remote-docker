@@ -3,7 +3,8 @@ package tunnel
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"testing"
 
 	"github.com/Dmitbd/remote-docker/internal/credentials"
@@ -41,11 +42,17 @@ func TestIdentityRejectsCorruptLengthAndMismatchedPublicKey(t *testing.T) {
 	if _, err := EncodeIdentity(Identity{PrivateKey: privateKey, PublicKey: otherPublic}); err == nil {
 		t.Fatal("EncodeIdentity accepted mismatched public key")
 	}
-	encoded, err := x509.MarshalPKCS8PrivateKey(privateKey[:ed25519.SeedSize])
-	if err == nil {
-		if _, parseErr := IdentityFromPKCS8(encoded); parseErr == nil {
-			t.Fatal("IdentityFromPKCS8 accepted invalid private-key length")
-		}
+	seed, _ := asn1.Marshal(make([]byte, ed25519.SeedSize-1))
+	encoded, err := asn1.Marshal(struct {
+		Version    int
+		Algorithm  pkix.AlgorithmIdentifier
+		PrivateKey []byte
+	}{Algorithm: pkix.AlgorithmIdentifier{Algorithm: asn1.ObjectIdentifier{1, 3, 101, 112}}, PrivateKey: seed})
+	if err != nil {
+		t.Fatalf("marshal malformed PKCS#8: %v", err)
+	}
+	if _, parseErr := IdentityFromPKCS8(encoded); parseErr == nil {
+		t.Fatal("IdentityFromPKCS8 accepted invalid private-key length")
 	}
 	if decoded, err := ParsePublicKey(EncodePublicKey(publicKey)); err != nil || string(decoded) != string(publicKey) {
 		t.Fatalf("public-key round trip = %x error=%v", decoded, err)

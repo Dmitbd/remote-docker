@@ -82,7 +82,7 @@ func RenderConfig(config Config) (string, error) {
 	lines := make([]string, 0, 3*(len(common)+3))
 	for _, endpoint := range []struct {
 		alias string
-		port int
+		port  int
 	}{
 		{alias, 49222},
 		{alias + "-control", 49223},

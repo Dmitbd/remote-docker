@@ -174,8 +174,8 @@ func (d productionDiagnostics) observeHealth(ctx context.Context) (localapi.Doct
 		LANReachability: choose(d.options.LANReachability, lanReachabilityCheck),
 		TunnelIdentity:  choose(d.options.TunnelIdentity, tunnelIdentityCheck),
 		TunnelSession:   choose(d.options.TunnelSession, tunnelSessionCheck),
-		DockerChannel: choose(d.options.DockerChannel, dockerChannelCheck),
-		SyncChannel:   choose(d.options.SyncChannel, syncChannelCheck),
+		DockerChannel:   choose(d.options.DockerChannel, dockerChannelCheck),
+		SyncChannel:     choose(d.options.SyncChannel, syncChannelCheck),
 		ManagedWSL: choose(d.options.ManagedWSL,
 			checkRemote(func(value remoteDiagnosticStatus) bool { return value.WSLRunning }, diagnostics.ReasonWSLUnavailable)),
 	}}).Check(ctx)

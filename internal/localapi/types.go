@@ -203,9 +203,9 @@ type PairCandidatesResult struct {
 }
 
 type PairStartParams struct {
-	Device string `json:"device,omitempty"`
+	Device  string `json:"device,omitempty"`
 	Address string `json:"address,omitempty"`
-	Port int `json:"port,omitempty"`
+	Port    int    `json:"port,omitempty"`
 }
 
 func (p PairStartParams) Target() (string, error) {

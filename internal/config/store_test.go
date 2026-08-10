@@ -20,15 +20,15 @@ func TestStoreRoundTrip(t *testing.T) {
 		LocalSyncthingIdentity: []byte("encrypted-identity"),
 		Devices: map[string]Device{
 			"pc-1": {
-				Name:              "Dev PC",
-				Address:           "192.168.1.20",
-				SSHPort:           2222,
-				SyncPort:          22000,
-				SSHHostPublicKey:  "ssh-ed25519 AAAAhost",
-				SyncthingDeviceID: "SYNC-DEVICE",
-				TunnelPort: 49221,
+				Name:                "Dev PC",
+				Address:             "192.168.1.20",
+				SSHPort:             2222,
+				SyncPort:            22000,
+				SSHHostPublicKey:    "ssh-ed25519 AAAAhost",
+				SyncthingDeviceID:   "SYNC-DEVICE",
+				TunnelPort:          49221,
 				TunnelPeerPublicKey: "WINDOWS-TUNNEL-KEY",
-				TransportVersion: 1,
+				TransportVersion:    1,
 			},
 		},
 		Workspaces: map[string]Workspace{

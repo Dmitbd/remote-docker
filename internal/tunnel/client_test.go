@@ -32,8 +32,8 @@ func TestClientReconnectsAndStopsRetriesImmediately(t *testing.T) {
 			return sessions[dials-1], nil
 		},
 		OpenRelays: func(Session) ([]io.Closer, error) { return []io.Closer{nopCloser{}}, nil },
-		OnState: func(state ClientState, _ error) { states <- state },
-		Wait: func(ctx context.Context, _ time.Duration) bool { return ctx.Err() == nil },
+		OnState:    func(state ClientState, _ error) { states <- state },
+		Wait:       func(ctx context.Context, _ time.Duration) bool { return ctx.Err() == nil },
 	}
 	done := make(chan error, 1)
 	go func() { done <- client.Run(ctx) }()
@@ -88,4 +88,5 @@ func waitClientState(t *testing.T, states <-chan ClientState, want ClientState) 
 }
 
 type nopCloser struct{}
+
 func (nopCloser) Close() error { return nil }

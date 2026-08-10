@@ -15,9 +15,9 @@ type ServiceDialer interface {
 type ServerState string
 
 const (
-	ServerWaiting ServerState = "waiting"
+	ServerWaiting   ServerState = "waiting"
 	ServerConnected ServerState = "connected"
-	ServerBusy ServerState = "busy"
+	ServerBusy      ServerState = "busy"
 )
 
 type Server struct {

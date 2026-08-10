@@ -444,7 +444,7 @@ func (c *macPairingCoordinator) complete(ctx context.Context, sessionID string, 
 		SSHPort: record.SSHPort, SyncPort: record.SyncthingPort,
 		SSHHostPublicKey: record.SSHHostPublicKey, SyncthingDeviceID: record.SyncthingDeviceID,
 		ClientDeviceID: pending.clientDeviceID,
-		TunnelPort: record.TunnelPort, TunnelPeerPublicKey: tunnel.EncodePublicKey(record.TunnelPublicKey),
+		TunnelPort:     record.TunnelPort, TunnelPeerPublicKey: tunnel.EncodePublicKey(record.TunnelPublicKey),
 		TransportVersion: record.TransportVersion,
 	}
 	err = c.options.ConfigTransactions.Run(func() error {

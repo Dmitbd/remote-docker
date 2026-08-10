@@ -1598,7 +1598,7 @@ func (t *runtimePairingTransport) Confirm(_ context.Context, _ pairingTarget, de
 		SSHHostPublicKey: t.hostKey, SyncthingDeviceID: "WINDOWS-SYNC",
 		SSHPort: 49222, SyncthingPort: 49220,
 		TunnelPublicKey: append(ed25519.PublicKey(nil), descriptor.ServerPublicKey...),
-		TunnelPort: tunnel.TunnelPort, TransportVersion: tunnel.CurrentTransportVersion,
+		TunnelPort:      tunnel.TunnelPort, TransportVersion: tunnel.CurrentTransportVersion,
 	}, nil
 }
 

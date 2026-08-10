@@ -27,7 +27,7 @@ func TestTunnelServerRejectsSecondSessionAndNeverDialsUnknownKind(t *testing.T) 
 				return nil, ctx.Err()
 			}
 		},
-		Dialer: dialer,
+		Dialer:  dialer,
 		OnState: func(state ServerState) { statesMu.Lock(); states = append(states, state); statesMu.Unlock() },
 	}
 	ctx, cancel := context.WithCancel(context.Background())
