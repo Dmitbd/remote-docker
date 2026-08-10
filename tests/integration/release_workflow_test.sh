@@ -54,13 +54,17 @@ for required in \
   'runs-on: macos-14' \
   'bash tests/integration/macos_package_test.sh' \
   'packaging/macos/build-pkg.sh' \
-  'packaging/macos/inspect-pkg.sh' \
+  'packaging/macos/inspect-pkg.sh "${packages[0]}" "${REMOTE_DOCKER_VERSION}" "${GITHUB_RUN_NUMBER}"' \
   "REMOTE_DOCKER_VERSION: '0.2.7'" \
   'REMOTE_DOCKER_BUILD_VERSION="${GITHUB_RUN_NUMBER}"' \
   'package_name="$(basename "${packages[0]}")"' \
   'remote-docker-macos-unsigned'; do
   grep -F "${required}" "${ci_workflow}" >/dev/null || fail "missing macOS CI evidence: ${required}"
 done
+
+if grep -E '(^|[[:space:]])REMOTE_DOCKER_VERSION[^A-Z_][^[:cntrl:]]*(GITHUB_RUN_NUMBER|github\.run_number)' "${ci_workflow}" >/dev/null; then
+  fail "development package product version depends on the CI run number"
+fi
 
 for required_path in \
   "      - 'cmd/remote-docker-remote/**'" \

@@ -168,7 +168,7 @@ jobs:
           set -euo pipefail
           packages=(dist/macos/*.pkg)
           [[ ${#packages[@]} -eq 1 && -f "${packages[0]}" ]]
-          packaging/macos/inspect-pkg.sh "${packages[0]}"
+          packaging/macos/inspect-pkg.sh "${packages[0]}" "${REMOTE_DOCKER_VERSION}" "${GITHUB_RUN_NUMBER}"
           if pkgutil --check-signature "${packages[0]}" >dist/macos/signature-status.txt 2>&1; then
             echo 'Development package must remain unsigned.' >&2
             exit 1

@@ -1,11 +1,13 @@
 #!/bin/bash
 set -euo pipefail
+export COPYFILE_DISABLE=1
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 build_script="${repo_root}/packaging/macos/build-pkg.sh"
 archive_validator="${repo_root}/packaging/macos/validate-archive.sh"
 checksum_verifier="${repo_root}/packaging/macos/verify-checksum.sh"
 package_inspector="${repo_root}/packaging/macos/inspect-pkg.sh"
+package_version_verifier="${repo_root}/packaging/macos/verify-package-version.sh"
 ci_workflow="${repo_root}/.github/workflows/ci.yml"
 test_root="$(mktemp -d "${TMPDIR:-/private/tmp}/remote-docker-package-test.XXXXXX")"
 trap 'rm -rf "${test_root}"' EXIT
@@ -35,15 +37,21 @@ assert_plist_value() {
 [[ -x "${archive_validator}" ]] || fail "missing executable archive validator"
 [[ -x "${checksum_verifier}" ]] || fail "missing executable checksum verifier"
 [[ -x "${package_inspector}" ]] || fail "missing executable package metadata inspector"
+[[ -x "${package_version_verifier}" ]] || fail "missing executable package version verifier"
 assert_file "${ci_workflow}"
 
 grep -F "REMOTE_DOCKER_VERSION: '0.2.7'" "${ci_workflow}" >/dev/null || fail "development packages do not share the product version"
 grep -F -- '-Version $env:REMOTE_DOCKER_VERSION' "${ci_workflow}" >/dev/null || fail "Windows development package ignores the shared product version"
 grep -F 'REMOTE_DOCKER_BUILD_VERSION="${GITHUB_RUN_NUMBER}"' "${ci_workflow}" >/dev/null || fail "macOS development package does not use a monotonic build version"
-if grep -F 'REMOTE_DOCKER_VERSION="0.1.${GITHUB_RUN_NUMBER}"' "${ci_workflow}" >/dev/null; then
-  fail "macOS development package incorrectly uses the CI run as its product version"
+if grep -E '(^|[[:space:]])REMOTE_DOCKER_VERSION[^A-Z_][^[:cntrl:]]*(GITHUB_RUN_NUMBER|github\.run_number)' "${ci_workflow}" >/dev/null; then
+  fail "development package product version depends on the CI run number"
 fi
+grep -F 'packaging/macos/inspect-pkg.sh "${packages[0]}" "${REMOTE_DOCKER_VERSION}" "${GITHUB_RUN_NUMBER}"' "${ci_workflow}" >/dev/null || fail "macOS CI does not verify generated package versions"
 
+sentinel_product_version="9.8.7"
+sentinel_build_version="654321"
+export REMOTE_DOCKER_VERSION="${sentinel_product_version}"
+export REMOTE_DOCKER_BUILD_VERSION="${sentinel_build_version}"
 export REMOTE_DOCKER_APP_SIGN_IDENTITY="PACKAGE_TEST_SECRET_APP_IDENTITY"
 export REMOTE_DOCKER_INSTALLER_SIGN_IDENTITY="PACKAGE_TEST_SECRET_INSTALLER_IDENTITY"
 export REMOTE_DOCKER_NOTARY_KEYCHAIN_PROFILE="PACKAGE_TEST_SECRET_NOTARY_PROFILE"
@@ -75,6 +83,8 @@ assert_file "${payload}/etc/paths.d/remote-docker"
 assert_plist_value "${app}/Contents/Info.plist" CFBundleIdentifier io.github.dmitbd.remote-docker
 assert_plist_value "${app}/Contents/Info.plist" CFBundleExecutable remote-docker-desktop
 assert_plist_value "${app}/Contents/Info.plist" CFBundleIconFile remote-docker.icns
+assert_plist_value "${app}/Contents/Info.plist" CFBundleShortVersionString "${sentinel_product_version}"
+assert_plist_value "${app}/Contents/Info.plist" CFBundleVersion "${sentinel_build_version}"
 assert_plist_value "${app}/Contents/Info.plist" NSPrincipalClass NSApplication
 if /usr/bin/plutil -extract LSUIElement raw -o - "${app}/Contents/Info.plist" >/dev/null 2>&1; then
   fail "manual application must open a normal window instead of acting as a UIElement-only helper"
@@ -163,6 +173,24 @@ pkgbuild --root "${test_root}/dirty-package-root" \
 if "${package_inspector}" "${test_root}/dirty.pkg" >/dev/null 2>&1; then
   fail "package metadata inspector accepted an AppleDouble BOM entry"
 fi
+
+versioned_root="${test_root}/versioned-package-root"
+versioned_app="${versioned_root}/Applications/Remote Docker.app/Contents"
+mkdir -p "${versioned_app}/MacOS" "${versioned_app}/Resources"
+cp /usr/bin/true "${versioned_app}/MacOS/remote-docker-desktop"
+cp "${app}/Contents/Info.plist" "${versioned_app}/Info.plist"
+cp "${app}/Contents/Resources/remote-docker.icns" "${versioned_app}/Resources/remote-docker.icns"
+xattr -crs "${versioned_root}"
+pkgbuild --root "${versioned_root}" \
+  --filter '(^|/)\._' \
+  --filter '(^|/)\.DS_Store$' \
+  --identifier io.github.dmitbd.remote-docker.version-test --version "${sentinel_product_version}" --install-location / \
+  "${test_root}/versioned.pkg" >/dev/null
+"${package_version_verifier}" "${test_root}/versioned.pkg" "${sentinel_product_version}" "${sentinel_build_version}"
+if "${package_version_verifier}" "${test_root}/versioned.pkg" "${sentinel_product_version}" 999999 >/dev/null 2>&1; then
+  fail "package version verifier accepted an unexpected application build version"
+fi
+grep -F 'verify-package-version.sh" "${package_path}" "${expected_product_version}" "${expected_build_version}"' "${package_inspector}" >/dev/null || fail "package inspector does not enforce expected versions"
 grep -F 'refusing signed or notarized package with metadata contamination' "${build_script}" >/dev/null || fail "release build does not fail closed on metadata contamination"
 
 if grep -R -F 'PACKAGE_TEST_SECRET_' "${test_root}/layout" >/dev/null; then
