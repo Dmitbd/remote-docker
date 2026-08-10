@@ -12,24 +12,20 @@ type CheckName string
 
 const (
 	CheckLANReachability CheckName = "lan_reachability"
-	CheckSSHIdentity     CheckName = "ssh_identity"
-	CheckWSLRunning      CheckName = "wsl_running"
-	CheckSystemdTarget   CheckName = "systemd_target"
-	CheckDockerSocket    CheckName = "docker_socket"
-	CheckDisk            CheckName = "disk"
-	CheckSyncthing       CheckName = "syncthing"
-	CheckPortRelays      CheckName = "port_relays"
+	CheckTunnelIdentity  CheckName = "tunnel_identity"
+	CheckTunnelSession   CheckName = "tunnel_session"
+	CheckDockerChannel   CheckName = "docker_channel"
+	CheckSyncChannel     CheckName = "sync_channel"
+	CheckManagedWSL      CheckName = "managed_wsl"
 )
 
 var orderedCheckNames = []CheckName{
 	CheckLANReachability,
-	CheckSSHIdentity,
-	CheckWSLRunning,
-	CheckSystemdTarget,
-	CheckDockerSocket,
-	CheckDisk,
-	CheckSyncthing,
-	CheckPortRelays,
+	CheckTunnelIdentity,
+	CheckTunnelSession,
+	CheckDockerChannel,
+	CheckSyncChannel,
+	CheckManagedWSL,
 }
 
 // ErrCheckUnavailable is the public result for an operation not supplied by a
@@ -55,33 +51,27 @@ func (f CheckFunc) Check(ctx context.Context) error {
 // single purpose and accepts no command strings or user-controlled arguments.
 type Operations struct {
 	LANReachability Check
-	SSHIdentity     Check
-	WSLRunning      Check
-	SystemdTarget   Check
-	DockerSocket    Check
-	Disk            Check
-	Syncthing       Check
-	PortRelays      Check
+	TunnelIdentity  Check
+	TunnelSession   Check
+	DockerChannel   Check
+	SyncChannel     Check
+	ManagedWSL      Check
 }
 
 func (o Operations) get(name CheckName) Check {
 	switch name {
 	case CheckLANReachability:
 		return o.LANReachability
-	case CheckSSHIdentity:
-		return o.SSHIdentity
-	case CheckWSLRunning:
-		return o.WSLRunning
-	case CheckSystemdTarget:
-		return o.SystemdTarget
-	case CheckDockerSocket:
-		return o.DockerSocket
-	case CheckDisk:
-		return o.Disk
-	case CheckSyncthing:
-		return o.Syncthing
-	case CheckPortRelays:
-		return o.PortRelays
+	case CheckTunnelIdentity:
+		return o.TunnelIdentity
+	case CheckTunnelSession:
+		return o.TunnelSession
+	case CheckDockerChannel:
+		return o.DockerChannel
+	case CheckSyncChannel:
+		return o.SyncChannel
+	case CheckManagedWSL:
+		return o.ManagedWSL
 	default:
 		return nil
 	}
@@ -91,20 +81,16 @@ func (o *Operations) set(name CheckName, check Check) {
 	switch name {
 	case CheckLANReachability:
 		o.LANReachability = check
-	case CheckSSHIdentity:
-		o.SSHIdentity = check
-	case CheckWSLRunning:
-		o.WSLRunning = check
-	case CheckSystemdTarget:
-		o.SystemdTarget = check
-	case CheckDockerSocket:
-		o.DockerSocket = check
-	case CheckDisk:
-		o.Disk = check
-	case CheckSyncthing:
-		o.Syncthing = check
-	case CheckPortRelays:
-		o.PortRelays = check
+	case CheckTunnelIdentity:
+		o.TunnelIdentity = check
+	case CheckTunnelSession:
+		o.TunnelSession = check
+	case CheckDockerChannel:
+		o.DockerChannel = check
+	case CheckSyncChannel:
+		o.SyncChannel = check
+	case CheckManagedWSL:
+		o.ManagedWSL = check
 	}
 }
 

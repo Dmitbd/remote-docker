@@ -14,11 +14,11 @@ func TestRunnerChecksEveryDependencyInStableOrder(t *testing.T) {
 		name := name
 		operations.set(name, CheckFunc(func(context.Context) error {
 			called = append(called, name)
-			if name == CheckDockerSocket {
+			if name == CheckDockerChannel {
 				return errors.New("dockerd replied Authorization: Bearer never-show-this-token")
 			}
-			if name == CheckDisk {
-				return NewPublicError(ReasonDiskUnavailable)
+			if name == CheckSyncChannel {
+				return NewPublicError(ReasonLANBlocked)
 			}
 			return nil
 		}))
@@ -36,11 +36,25 @@ func TestRunnerChecksEveryDependencyInStableOrder(t *testing.T) {
 			t.Fatalf("result[%d].Name = %q, want %q", index, result.Name, orderedCheckNames[index])
 		}
 	}
-	if results[4].OK || results[4].Reason != string(ReasonCheckFailed) {
-		t.Fatalf("Docker result = %#v, want a stable generic failure", results[4])
+	if results[3].OK || results[3].Reason != string(ReasonCheckFailed) {
+		t.Fatalf("Docker result = %#v, want a stable generic failure", results[3])
 	}
-	if results[5].OK || results[5].Reason != string(ReasonDiskUnavailable) {
-		t.Fatalf("disk result = %#v, want explicitly safe reason", results[5])
+	if results[4].OK || results[4].Reason != string(ReasonLANBlocked) {
+		t.Fatalf("sync result = %#v, want explicitly safe reason", results[4])
+	}
+}
+
+func TestRunnerPublishesOnlyAllowlistedTunnelFailureClasses(t *testing.T) {
+	reasons := []Reason{ReasonHostUnreachable, ReasonLANBlocked, ReasonTunnelIdentityMismatch, ReasonPeerBusy, ReasonWSLUnavailable, ReasonLocalPortOccupied}
+	for _, reason := range reasons {
+		got := ReasonForError(NewPublicError(reason), ReasonCheckFailed)
+		if got != string(reason) {
+			t.Fatalf("ReasonForError(%q) = %q", reason, got)
+		}
+	}
+	secret := "private-key signed-nonce ORDINARY_SETTING=value docker --host secret"
+	if got := ReasonForError(errors.New(secret), ReasonCheckFailed); got != string(ReasonCheckFailed) {
+		t.Fatalf("untrusted diagnostic error leaked as %q", got)
 	}
 }
 

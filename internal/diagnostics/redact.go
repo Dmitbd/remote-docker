@@ -21,6 +21,12 @@ const (
 	ReasonDiskUnavailable          Reason = "managed environment disk is not ready"
 	ReasonSyncthingNotReady        Reason = "Syncthing connection is not ready"
 	ReasonPortRelaysNotReady       Reason = "port relays are not ready"
+	ReasonHostUnreachable         Reason = "paired host is unreachable"
+	ReasonLANBlocked              Reason = "private LAN access is blocked"
+	ReasonTunnelIdentityMismatch  Reason = "tunnel identity does not match paired trust"
+	ReasonPeerBusy                Reason = "paired host already has an active client"
+	ReasonWSLUnavailable          Reason = "managed WSL service is unavailable"
+	ReasonLocalPortOccupied       Reason = "required local tunnel port is occupied"
 )
 
 var allowedReasons = map[Reason]struct{}{
@@ -37,6 +43,12 @@ var allowedReasons = map[Reason]struct{}{
 	ReasonDiskUnavailable:          {},
 	ReasonSyncthingNotReady:        {},
 	ReasonPortRelaysNotReady:       {},
+	ReasonHostUnreachable:          {},
+	ReasonLANBlocked:               {},
+	ReasonTunnelIdentityMismatch:   {},
+	ReasonPeerBusy:                 {},
+	ReasonWSLUnavailable:           {},
+	ReasonLocalPortOccupied:        {},
 }
 
 type publicReasonError struct {

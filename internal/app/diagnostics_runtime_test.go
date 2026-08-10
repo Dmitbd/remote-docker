@@ -184,14 +184,14 @@ func TestWindowsRecoveryRequiresFreshDockerAndSyncthingHealth(t *testing.T) {
 			status: windowsbridge.ManagedWSLStatus{
 				Running: true, SystemdTarget: true, DiskAvailable: true, SyncthingService: true,
 			},
-			failedCheck: "docker_socket",
+			failedCheck: "docker_channel",
 		},
 		{
 			name: "Syncthing unhealthy",
 			status: windowsbridge.ManagedWSLStatus{
 				Running: true, SystemdTarget: true, DockerSocket: true, DiskAvailable: true,
 			},
-			failedCheck: "syncthing",
+			failedCheck: "sync_channel",
 		},
 		{
 			name: "all managed host checks healthy",
@@ -312,6 +312,45 @@ func TestSSHRemoteDiagnosticsDoesNotPublishRemoteErrorOrOutput(t *testing.T) {
 	for _, secret := range []string{"remote-secret", "quoted secret with spaces"} {
 		if strings.Contains(err.Error(), secret) {
 			t.Fatalf("Observe() error retained secret %q: %v", secret, err)
+		}
+	}
+}
+
+func TestTunnelDiagnosticsMapOnlyStableFailureClassesAndRedactInternals(t *testing.T) {
+	unsafe := func(reason diagnostics.Reason, detail string) diagnostics.Check {
+		return diagnostics.CheckFunc(func(context.Context) error {
+			if reason == "" {
+				return errors.New(detail)
+			}
+			return diagnostics.NewPublicError(reason)
+		})
+	}
+	doctor := newProductionDiagnosticsWithOptions(productionDiagnosticsOptions{
+		LANReachability: unsafe(diagnostics.ReasonHostUnreachable, ""),
+		TunnelIdentity:  unsafe(diagnostics.ReasonTunnelIdentityMismatch, ""),
+		TunnelSession:   unsafe(diagnostics.ReasonPeerBusy, ""),
+		DockerChannel:   unsafe(diagnostics.ReasonLocalPortOccupied, ""),
+		SyncChannel:     unsafe(diagnostics.ReasonLANBlocked, ""),
+		ManagedWSL:      unsafe("", "private-key signed-nonce ORDINARY_SETTING=value docker --host secret"),
+		Platform:        "darwin",
+	}).Doctor(context.Background())
+	want := []string{
+		string(diagnostics.ReasonHostUnreachable), string(diagnostics.ReasonTunnelIdentityMismatch),
+		string(diagnostics.ReasonPeerBusy), string(diagnostics.ReasonLocalPortOccupied),
+		string(diagnostics.ReasonLANBlocked), string(diagnostics.ReasonCheckFailed),
+	}
+	if len(doctor.Checks) != len(want) {
+		t.Fatalf("Doctor checks = %#v", doctor.Checks)
+	}
+	for index := range want {
+		if doctor.Checks[index].OK || doctor.Checks[index].Message != want[index] {
+			t.Fatalf("check[%d] = %#v, want reason %q", index, doctor.Checks[index], want[index])
+		}
+	}
+	encoded, _ := json.Marshal(doctor)
+	for _, secret := range []string{"private-key", "signed-nonce", "ORDINARY_SETTING", "--host"} {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("diagnostics report leaked %q: %s", secret, encoded)
 		}
 	}
 }

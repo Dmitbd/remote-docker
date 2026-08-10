@@ -476,8 +476,8 @@ func TestProductionDiagnosticsReturnsOrderedSafeChecks(t *testing.T) {
 		Platform:   "darwin",
 	}).Doctor(context.Background()).Checks
 	wantNames := []string{
-		"lan_reachability", "ssh_identity", "wsl_running", "systemd_target",
-		"docker_socket", "disk", "syncthing", "port_relays",
+		"lan_reachability", "tunnel_identity", "tunnel_session",
+		"docker_channel", "sync_channel", "managed_wsl",
 	}
 	if len(checks) != len(wantNames) {
 		t.Fatalf("check count = %d, want %d", len(checks), len(wantNames))
