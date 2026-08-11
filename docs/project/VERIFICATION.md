@@ -2,7 +2,7 @@
 
 **Статус документа:** Текущее
 
-**Проверено относительно:** `main` @ `cfc06ec`
+**Проверено относительно:** package source `main` @ `09ba7ca`
 **Дата содержательной проверки:** 2026-08-11
 
 ## Правила доказательств
@@ -25,7 +25,7 @@
 | Workspace policy/sync control | `internal/workspace`, `internal/syncer`, `internal/app` tests | Реализовано в CI, не две физические файловые системы |
 | Port relay ownership | `internal/portrelay`, `internal/sshtransport` tests | Реализовано в CI, не реальный published port |
 | Desktop UI model/operations | `internal/desktopui`, `cmd/remote-docker-ui` tests | Реализовано в CI; process race см. RD-B008 |
-| WSL/package contracts | integration scripts и Pester | Частично platform-specific |
+| WSL/package contracts | integration scripts и Pester | Windows и macOS package CI пройден для `09ba7ca`; установка требует устройства |
 
 Конкретный PR запускает только относящиеся к изменению packages и contracts согласно `AGENTS.md`.
 
@@ -35,14 +35,18 @@
 - Новый `process-wait` и `single-instance` путь пройден отдельно с race detector; известный общий `ProcessLauncher` race остаётся в RD-B008.
 - Windows cross-compilation пройдена для `internal/app`, `internal/desktop` и desktop command.
 - `internal/provision` contracts проверяют shutdown exit code, ожидание процесса и сохранение rollback binary.
-- Физический запуск Windows и реальная NSIS-сборка этим результатом не подтверждены.
+- GitHub Actions run `31497596190` успешно собрал development candidate `0.2.8`: WSL rootfs, unsigned NSIS EXE и unsigned macOS PKG.
+- Windows CI прошёл provisioning contract, PowerShell 5.1 compatibility, Pester package contract, NSIS build и checksum verification.
+- macOS CI прошёл package contract, сборку PKG, проверку версии `0.2.8 (72)` и checksum verification.
+- Скачанные EXE и PKG локально повторно сверены с опубликованными SHA-256 manifests.
+- Физический запуск Windows/macOS и сценарий Mac↔Windows этим результатом не подтверждены.
 
 ## Packaging checks
 
 | Проверка | macOS | Windows |
 |---|---|---|
-| Artifact layout и bundled versions | Автоматический contract существует | Pester/installer contracts существуют |
-| Checksum, manifest, source commit | Workflow contracts существуют | Workflow contracts существуют |
+| Artifact layout и bundled versions | CI `31497596190`: пройдено | CI `31497596190`: пройдено |
+| Checksum, manifest, source commit | CI + локальная повторная сверка: пройдено | CI + локальная повторная сверка: пройдено |
 | Fresh install UI | Требует устройства | Требует устройства |
 | Update с работающего предыдущего релиза | Требует устройства | Требует устройства |
 | Uninstall без удаления Docker data | Требует устройства | Требует устройства |
@@ -51,7 +55,7 @@
 
 ## Физическая Mac↔Windows матрица
 
-Начальный статус всех строк — **Не проверено** для release artifact, созданного после `main` @ `cfc06ec`.
+Начальный статус всех строк — **Не проверено** для development artifact `0.2.8`, созданного из `main` @ `09ba7ca`.
 
 | Сценарий | Ожидаемый результат | Статус |
 |---|---|---|
@@ -169,4 +173,4 @@ Evidence summary:
 Открытые backlog IDs:
 ```
 
-На 2026-08-11 физического прогона release candidate после `main` @ `cfc06ec` нет.
+На 2026-08-11 физического прогона development candidate `0.2.8` из `main` @ `09ba7ca` нет.
