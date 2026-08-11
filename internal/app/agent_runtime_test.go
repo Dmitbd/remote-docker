@@ -906,7 +906,7 @@ func TestMacPairingCoordinatorPersistsPinnedDeviceAndRevokesBeforeLocalRemoval(t
 	if !strings.Contains(string(knownHosts), transport.hostKey) {
 		t.Fatalf("known_hosts = %q", knownHosts)
 	}
-	if len(docker.calls) != 3 {
+	if len(docker.calls) != 4 {
 		t.Fatalf("Docker context calls = %#v", docker.calls)
 	}
 
@@ -1126,6 +1126,7 @@ func TestPendingRevocationFailureDoesNotBlockOtherCleanupTasks(t *testing.T) {
 
 func TestLocalOnlyRemovalIsDurableInTheSlotReleaseTransaction(t *testing.T) {
 	store := config.Store{Path: filepath.Join(t.TempDir(), "config.json")}
+	locker := &trackingDockerContextLocker{}
 	device := config.Device{
 		Name: "Windows", ClientDeviceID: "LOCAL-SYNC", PairingGeneration: "pairing-generation",
 	}
@@ -1136,8 +1137,8 @@ func TestLocalOnlyRemovalIsDurableInTheSlotReleaseTransaction(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed active device: %v", err)
 	}
-	coordinator := newMacPairingCoordinator(macPairingOptions{Store: store})
-	generation, err := coordinator.moveActiveToPending("windows-peer", device, true)
+	coordinator := newMacPairingCoordinator(macPairingOptions{Store: store, DockerContextLocker: locker})
+	generation, err := coordinator.moveActiveToPending(context.Background(), "windows-peer", device, true)
 	if err != nil {
 		t.Fatalf("moveActiveToPending() error = %v", err)
 	}
@@ -1145,6 +1146,9 @@ func TestLocalOnlyRemovalIsDurableInTheSlotReleaseTransaction(t *testing.T) {
 	pending := cfg.PendingRevocations[generation]
 	if err != nil || cfg.ActiveDevice != "" || !pending.RemoteRevoked {
 		t.Fatalf("atomic local-only journal = %#v config=%#v error=%v", pending, cfg, err)
+	}
+	if locker.entries != 1 || locker.held {
+		t.Fatalf("Docker context journal lock entries=%d held=%t", locker.entries, locker.held)
 	}
 }
 
@@ -2162,28 +2166,14 @@ func TestMacPairingCoordinatorReservesStartBeforeRemoteBootstrap(t *testing.T) {
 	}
 }
 
-func TestMacPairingReplacementUpdatesExistingManagedDockerContext(t *testing.T) {
+func TestMacPairingRefusesLegacyManagedDockerContext(t *testing.T) {
 	root := t.TempDir()
 	store := config.Store{Path: filepath.Join(root, "config.json")}
-	oldID := "old-device"
-	if err := store.Save(config.Config{
-		SchemaVersion: config.CurrentSchemaVersion, ActiveDevice: oldID,
-		Devices: map[string]config.Device{oldID: {
-			Name: "Old Windows", ClientDeviceID: "LOCAL-SYNC", SSHHostPublicKey: testAuthorizedKey(t),
-		}},
-	}); err != nil {
-		t.Fatalf("seed config: %v", err)
-	}
 	secrets := credentials.NewMemoryStore()
-	if err := secrets.Put(oldID, sshtransport.SSHPrivateKeyCredential, []byte("old-private-key")); err != nil {
-		t.Fatalf("seed old private key: %v", err)
-	}
 	transport := &runtimePairingTransport{hostKey: testAuthorizedKey(t)}
-	newID, err := pairedRemoteDeviceID(transport.hostKey)
-	if err != nil {
-		t.Fatalf("new paired device ID: %v", err)
+	docker := &managedContextExecutor{
+		host: "ssh://remote-docker-device-old-device", description: "Managed by Remote Docker",
 	}
-	docker := &managedContextExecutor{host: "ssh://remote-docker-device-" + oldID}
 	coordinator := newMacPairingCoordinator(macPairingOptions{
 		Store: store, Secrets: secrets, Transport: transport, Docker: docker,
 		DockerCLI: "docker-real", DockerContext: "remote-docker",
@@ -2195,31 +2185,15 @@ func TestMacPairingReplacementUpdatesExistingManagedDockerContext(t *testing.T) 
 		ControlDir:      filepath.Join(root, "control"),
 	})
 
-	if err := coordinator.Unpair(context.Background(), oldID, true); err != nil {
-		t.Fatalf("forget old device: %v", err)
-	}
 	started, err := coordinator.Start(context.Background(), "windows-peer")
 	if err != nil {
-		t.Fatalf("start replacement: %v", err)
+		t.Fatalf("start pairing: %v", err)
 	}
-	status, err := coordinator.Status(context.Background(), started.SessionID)
-	if err != nil {
-		t.Fatalf("complete replacement: %v", err)
+	if _, err := coordinator.Status(context.Background(), started.SessionID); err == nil {
+		t.Fatal("Status() error = nil, want legacy Docker context conflict")
 	}
-	if status.Device == nil || status.Device.ID != newID {
-		t.Fatalf("replacement device = %#v, want %q", status.Device, newID)
-	}
-	if got := docker.Commands(); !reflect.DeepEqual(got, [][]string{
-		{"context", "inspect", "remote-docker"},
-		{"context", "rm", "--force", "remote-docker"},
-		{"context", "inspect", "remote-docker"},
-		{"context", "inspect", "remote-docker"},
-		{"context", "create", "--description", "Managed by Remote Docker", "--docker", "host=ssh://remote-docker-device-" + newID, "remote-docker"},
-	}) {
-		t.Fatalf("Docker context commands = %#v", got)
-	}
-	if _, err := secrets.Get(oldID, sshtransport.SSHPrivateKeyCredential); !errors.Is(err, credentials.ErrNotFound) {
-		t.Fatalf("old private key survived replacement: %v", err)
+	if got := docker.Commands(); !reflect.DeepEqual(got, [][]string{{"context", "inspect", "remote-docker"}}) {
+		t.Fatalf("legacy Docker context was mutated: %#v", got)
 	}
 }
 
@@ -2285,11 +2259,10 @@ func TestMacPairingDoesNotDeleteContextCreatedAfterDockerPlan(t *testing.T) {
 	}
 }
 
-func TestMacPairingReplacementRestoresManagedContextWhenLocalCommitFails(t *testing.T) {
+func TestMacPairingRemovesExactCreatedContextWhenLocalCommitFails(t *testing.T) {
 	root := t.TempDir()
-	oldHost := "ssh://remote-docker-device-old"
 	transport := &runtimePairingTransport{hostKey: testAuthorizedKey(t)}
-	docker := &managedContextExecutor{host: oldHost}
+	docker := &managedContextExecutor{}
 	secrets := credentials.NewMemoryStore()
 	saves := 0
 	coordinator := newMacPairingCoordinator(macPairingOptions{
@@ -2309,8 +2282,6 @@ func TestMacPairingReplacementRestoresManagedContextWhenLocalCommitFails(t *test
 			return (config.Store{Path: filepath.Join(root, "config.json")}).Save(cfg)
 		},
 	})
-	coordinator.previousDockerHost = oldHost
-
 	started, err := coordinator.Start(context.Background(), "windows-peer")
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
@@ -2319,12 +2290,14 @@ func TestMacPairingReplacementRestoresManagedContextWhenLocalCommitFails(t *test
 		t.Fatal("Status() error = nil, want local commit failure")
 	}
 	commands := docker.Commands()
-	if len(commands) != 5 ||
+	if len(commands) != 7 ||
 		!reflect.DeepEqual(commands[0], []string{"context", "inspect", "remote-docker"}) ||
 		!reflect.DeepEqual(commands[1], []string{"context", "inspect", "remote-docker"}) ||
-		commands[2][1] != "update" ||
+		commands[2][1] != "create" ||
 		!reflect.DeepEqual(commands[3], []string{"context", "inspect", "remote-docker"}) ||
-		!reflect.DeepEqual(commands[4], []string{"context", "update", "--docker", "host=" + oldHost, "remote-docker"}) {
+		!reflect.DeepEqual(commands[4], []string{"context", "inspect", "remote-docker"}) ||
+		!reflect.DeepEqual(commands[5], []string{"context", "rm", "--force", "remote-docker"}) ||
+		!reflect.DeepEqual(commands[6], []string{"context", "inspect", "remote-docker"}) {
 		t.Fatalf("Docker context rollback commands = %#v", commands)
 	}
 }
@@ -2332,7 +2305,11 @@ func TestMacPairingReplacementRestoresManagedContextWhenLocalCommitFails(t *test
 func TestMacPairingPersistsDockerRollbackIntentBeforeContextMutation(t *testing.T) {
 	root := t.TempDir()
 	store := config.Store{Path: filepath.Join(root, "config.json")}
+	locker := &trackingDockerContextLocker{}
 	docker := &dockerIntentCheckingExecutor{beforeMutation: func() error {
+		if !locker.held {
+			return errors.New("Docker context process lock is not held")
+		}
 		cfg, err := store.Load()
 		if err != nil {
 			return err
@@ -2348,7 +2325,8 @@ func TestMacPairingPersistsDockerRollbackIntentBeforeContextMutation(t *testing.
 	coordinator := newMacPairingCoordinator(macPairingOptions{
 		Store: store, Secrets: credentials.NewMemoryStore(),
 		Transport: &runtimePairingTransport{hostKey: testAuthorizedKey(t)}, Docker: docker,
-		DockerCLI: "docker-real", DockerContext: "remote-docker",
+		DockerContextLocker: locker,
+		DockerCLI:           "docker-real", DockerContext: "remote-docker",
 		ClientDeviceID: func(context.Context) (string, error) { return "LOCAL-SYNC", nil },
 		SSHConfigPath:  filepath.Join(root, "ssh_config"), ManagedSSHRoot: testManagedSSHRoot(t, root),
 		KnownHostsPath: filepath.Join(root, "known_hosts"), AgentSocketPath: filepath.Join(root, "ssh-agent.sock"),
@@ -2365,6 +2343,147 @@ func TestMacPairingPersistsDockerRollbackIntentBeforeContextMutation(t *testing.
 	if !docker.mutated {
 		t.Fatal("Docker context was not mutated")
 	}
+	if locker.entries == 0 || locker.held {
+		t.Fatalf("Docker context lock entries=%d held=%t", locker.entries, locker.held)
+	}
+}
+
+func TestDockerContextChangeConfigRoundTripPreservesOwnership(t *testing.T) {
+	want := dockercli.ContextChange{
+		Name: "remote-docker", PreviousHost: "ssh://remote-docker-device-old",
+		PreviousDescription: "Managed by Remote Docker; owner=owner-old",
+		CurrentHost:         "ssh://remote-docker-device-new", OwnerToken: "owner-new",
+	}
+	if got := contextChangeFromConfig(contextChangeToConfig(want)); !reflect.DeepEqual(got, want) {
+		t.Fatalf("context ownership round trip = %#v, want %#v", got, want)
+	}
+}
+
+func TestRestartedCleanupTreatsDockerOwnershipLossAsTerminal(t *testing.T) {
+	root := t.TempDir()
+	store := config.Store{Path: filepath.Join(root, "config.json")}
+	host := "ssh://remote-docker-device-peer"
+	if err := store.Save(config.Config{
+		SchemaVersion: config.CurrentSchemaVersion,
+		PendingRevocations: map[string]config.PendingRevocation{"cleanup-a": {
+			Generation: "cleanup-a", CleanupRequested: true, RemoteRevoked: true, LocalCleaned: true,
+			DockerContext: config.DockerContextChange{
+				Name: "remote-docker", CurrentHost: host, OwnerToken: "cleanup-a", Created: true,
+			},
+		}},
+	}); err != nil {
+		t.Fatalf("seed pending cleanup: %v", err)
+	}
+	locker := &trackingDockerContextLocker{}
+	docker := &managedContextExecutor{host: host, description: "Managed by Remote Docker; owner=cleanup-b"}
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Store: store, Secrets: credentials.NewMemoryStore(), Docker: docker, DockerCLI: "docker-real", DockerContextLocker: locker,
+	})
+
+	if err := coordinator.ReconcilePendingRevocations(context.Background()); err != nil {
+		t.Fatalf("ReconcilePendingRevocations() error = %v", err)
+	}
+	cfg, err := store.Load()
+	if err != nil || len(cfg.PendingRevocations) != 0 {
+		t.Fatalf("terminal ownership-loss cleanup = %#v error=%v", cfg.PendingRevocations, err)
+	}
+	for _, command := range docker.Commands() {
+		if len(command) >= 2 && (command[1] == "rm" || command[1] == "update") {
+			t.Fatalf("foreign Docker context was mutated: %#v", docker.Commands())
+		}
+	}
+	if locker.entries == 0 || locker.held {
+		t.Fatalf("recovery lock entries=%d held=%t", locker.entries, locker.held)
+	}
+}
+
+func TestRestartAfterDockerPreconditionFailureDoesNotDeleteForeignContext(t *testing.T) {
+	root := t.TempDir()
+	store := config.Store{Path: filepath.Join(root, "config.json")}
+	cleanupID := "cleanup-a"
+	host := "ssh://remote-docker-device-peer"
+	firstDocker := &contextCreatedBeforeApplyExecutor{host: host, description: "Managed by Remote Docker; owner=cleanup-b"}
+	first := newMacPairingCoordinator(macPairingOptions{
+		Store: store, Secrets: credentials.NewMemoryStore(), Docker: firstDocker, DockerCLI: "docker-real", DockerContext: "remote-docker",
+		KnownHostsPath: filepath.Join(root, "known_hosts"), SSHConfigPath: filepath.Join(root, "ssh_config"),
+		ManagedSSHRoot: testManagedSSHRoot(t, root), AgentSocketPath: filepath.Join(root, "agent.sock"), ControlDir: filepath.Join(root, "control"),
+	})
+	if err := first.persistPendingRevocation(context.Background(), cleanupID, config.PendingRevocation{
+		Generation: cleanupID, RemoteRevoked: true, LocalCleaned: true,
+	}); err != nil {
+		t.Fatalf("persist initial cleanup journal: %v", err)
+	}
+	pending := pendingPairing{cleanupID: cleanupID}
+	_, change, err := first.commitPairingArtifacts(context.Background(), pending, "peer", pairing.DeviceRecord{
+		SSHHostPublicKey: testAuthorizedKey(t),
+	}, config.Device{})
+	if err == nil || !change.Created || change.OwnerToken != cleanupID {
+		t.Fatalf("commitPairingArtifacts() change=%#v error=%v, want durable failed create plan", change, err)
+	}
+	cfg, loadErr := store.Load()
+	if loadErr != nil || cfg.PendingRevocations[cleanupID].DockerContext.OwnerToken != cleanupID {
+		t.Fatalf("rollback journal after precondition failure = %#v error=%v", cfg.PendingRevocations[cleanupID], loadErr)
+	}
+
+	restartedDocker := &managedContextExecutor{host: host, description: "Managed by Remote Docker; owner=cleanup-b"}
+	restarted := newMacPairingCoordinator(macPairingOptions{
+		Store: store, Secrets: credentials.NewMemoryStore(), Docker: restartedDocker, DockerCLI: "docker-real",
+	})
+	if err := restarted.ReconcilePendingRevocations(context.Background()); err != nil {
+		t.Fatalf("restarted ReconcilePendingRevocations() error = %v", err)
+	}
+	for _, command := range restartedDocker.Commands() {
+		if len(command) >= 2 && (command[1] == "rm" || command[1] == "update") {
+			t.Fatalf("foreign context was mutated after restart: %#v", restartedDocker.Commands())
+		}
+	}
+}
+
+func TestRestartedCleanupKeepsJournalWhenDockerInspectIsAmbiguous(t *testing.T) {
+	root := t.TempDir()
+	store := config.Store{Path: filepath.Join(root, "config.json")}
+	host := "ssh://remote-docker-device-peer"
+	if err := store.Save(config.Config{
+		SchemaVersion: config.CurrentSchemaVersion,
+		PendingRevocations: map[string]config.PendingRevocation{"cleanup-a": {
+			Generation: "cleanup-a", CleanupRequested: true, RemoteRevoked: true, LocalCleaned: true,
+			DockerContext: config.DockerContextChange{
+				Name: "remote-docker", CurrentHost: host, OwnerToken: "cleanup-a", Created: true,
+			},
+		}},
+	}); err != nil {
+		t.Fatalf("seed pending cleanup: %v", err)
+	}
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Store: store, Secrets: credentials.NewMemoryStore(), Docker: inspectFailureDockerExecutor{}, DockerCLI: "docker-real",
+	})
+
+	if err := coordinator.ReconcilePendingRevocations(context.Background()); err == nil {
+		t.Fatal("ReconcilePendingRevocations() error = nil, want ambiguous inspect failure")
+	}
+	cfg, err := store.Load()
+	pending, exists := cfg.PendingRevocations["cleanup-a"]
+	if err != nil || !exists || pending.DockerRestored || pending.DockerContext.OwnerToken != "cleanup-a" {
+		t.Fatalf("ambiguous inspect discarded rollback journal: pending=%#v exists=%t error=%v", pending, exists, err)
+	}
+}
+
+type trackingDockerContextLocker struct {
+	held    bool
+	entries int
+}
+
+type inspectFailureDockerExecutor struct{}
+
+func (inspectFailureDockerExecutor) Run(context.Context, dockercli.Invocation) error {
+	return runtimeExitError{code: 2}
+}
+
+func (l *trackingDockerContextLocker) WithLock(_ context.Context, operation func() error) error {
+	l.held = true
+	l.entries++
+	defer func() { l.held = false }()
+	return operation()
 }
 
 type runtimePairingTransport struct {
@@ -2443,6 +2562,24 @@ type contextAppearsAfterPlanExecutor struct {
 	commands          [][]string
 }
 
+type contextCreatedBeforeApplyExecutor struct {
+	host        string
+	description string
+	inspect     int
+}
+
+func (e *contextCreatedBeforeApplyExecutor) Run(_ context.Context, invocation dockercli.Invocation) error {
+	if len(invocation.Args) < 2 || invocation.Args[0] != "context" || invocation.Args[1] != "inspect" {
+		return nil
+	}
+	e.inspect++
+	if e.inspect == 1 {
+		return runtimeExitError{code: 1}
+	}
+	_, _ = fmt.Fprintf(invocation.Stdout, `[{"Name":"remote-docker","Metadata":{"Description":%q},"Endpoints":{"docker":{"Host":%q}}}]`, e.description, e.host)
+	return nil
+}
+
 func (e *contextAppearsAfterPlanExecutor) Run(_ context.Context, invocation dockercli.Invocation) error {
 	e.commands = append(e.commands, append([]string(nil), invocation.Args...))
 	if len(invocation.Args) < 2 || invocation.Args[0] != "context" {
@@ -2480,13 +2617,24 @@ func (e *managedContextExecutor) Run(_ context.Context, invocation dockercli.Inv
 		_, _ = fmt.Fprintf(invocation.Stdout, `[{"Name":"remote-docker","Metadata":{"Description":%q},"Endpoints":{"docker":{"Host":%q}}}]`, description, e.host)
 	}
 	if len(invocation.Args) >= 5 && invocation.Args[0] == "context" && invocation.Args[1] == "update" {
-		e.host = strings.TrimPrefix(invocation.Args[3], "host=")
+		for index, argument := range invocation.Args {
+			if argument == "--description" && index+1 < len(invocation.Args) {
+				e.description = invocation.Args[index+1]
+			}
+			if strings.HasPrefix(argument, "host=") {
+				e.host = strings.TrimPrefix(argument, "host=")
+			}
+		}
 	}
 	if len(invocation.Args) >= 2 && invocation.Args[0] == "context" && invocation.Args[1] == "rm" {
 		e.host = ""
+		e.description = ""
 	}
 	if len(invocation.Args) >= 2 && invocation.Args[0] == "context" && invocation.Args[1] == "create" {
-		for _, argument := range invocation.Args {
+		for index, argument := range invocation.Args {
+			if argument == "--description" && index+1 < len(invocation.Args) {
+				e.description = invocation.Args[index+1]
+			}
 			if strings.HasPrefix(argument, "host=") {
 				e.host = strings.TrimPrefix(argument, "host=")
 			}
@@ -2582,12 +2730,35 @@ func (t *runtimePairingTransport) Revoke(_ context.Context, _ config.Device, cli
 	return t.revokeErr
 }
 
-type runtimeDockerExecutor struct{ calls [][]string }
+type runtimeDockerExecutor struct {
+	calls       [][]string
+	host        string
+	description string
+}
 
 func (e *runtimeDockerExecutor) Run(_ context.Context, invocation dockercli.Invocation) error {
 	e.calls = append(e.calls, append([]string(nil), invocation.Args...))
-	if len(invocation.Args) >= 2 && invocation.Args[0] == "context" && invocation.Args[1] == "inspect" {
-		return runtimeExitError{code: 1}
+	if len(invocation.Args) < 2 || invocation.Args[0] != "context" {
+		return nil
+	}
+	switch invocation.Args[1] {
+	case "inspect":
+		if e.host == "" {
+			return runtimeExitError{code: 1}
+		}
+		_, _ = fmt.Fprintf(invocation.Stdout, `[{"Name":"remote-docker","Metadata":{"Description":%q},"Endpoints":{"docker":{"Host":%q}}}]`, e.description, e.host)
+	case "create", "update":
+		for index, argument := range invocation.Args {
+			if argument == "--description" && index+1 < len(invocation.Args) {
+				e.description = invocation.Args[index+1]
+			}
+			if strings.HasPrefix(argument, "host=") {
+				e.host = strings.TrimPrefix(argument, "host=")
+			}
+		}
+	case "rm":
+		e.host = ""
+		e.description = ""
 	}
 	return nil
 }
@@ -2595,15 +2766,29 @@ func (e *runtimeDockerExecutor) Run(_ context.Context, invocation dockercli.Invo
 type dockerIntentCheckingExecutor struct {
 	beforeMutation func() error
 	mutated        bool
+	host           string
+	description    string
 }
 
 func (e *dockerIntentCheckingExecutor) Run(_ context.Context, invocation dockercli.Invocation) error {
 	if len(invocation.Args) >= 2 && invocation.Args[0] == "context" && invocation.Args[1] == "inspect" {
+		if e.mutated {
+			_, _ = fmt.Fprintf(invocation.Stdout, `[{"Name":"remote-docker","Metadata":{"Description":%q},"Endpoints":{"docker":{"Host":%q}}}]`, e.description, e.host)
+			return nil
+		}
 		return runtimeExitError{code: 1}
 	}
 	if len(invocation.Args) >= 2 && invocation.Args[0] == "context" && invocation.Args[1] == "create" {
 		if err := e.beforeMutation(); err != nil {
 			return err
+		}
+		for index, argument := range invocation.Args {
+			if argument == "--description" && index+1 < len(invocation.Args) {
+				e.description = invocation.Args[index+1]
+			}
+			if strings.HasPrefix(argument, "host=") {
+				e.host = strings.TrimPrefix(argument, "host=")
+			}
 		}
 		e.mutated = true
 	}

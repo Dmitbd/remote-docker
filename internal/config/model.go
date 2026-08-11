@@ -34,11 +34,13 @@ type Device struct {
 // DockerContextChange is the durable ownership record for the managed Docker
 // context mutation made while pairing a device.
 type DockerContextChange struct {
-	Name           string `json:"name,omitempty"`
-	PreviousHost   string `json:"previousHost,omitempty"`
-	CurrentHost    string `json:"currentHost,omitempty"`
-	Created        bool   `json:"created,omitempty"`
-	RemoveOnUnpair bool   `json:"removeOnUnpair,omitempty"`
+	Name                string `json:"name,omitempty"`
+	PreviousHost        string `json:"previousHost,omitempty"`
+	PreviousDescription string `json:"previousDescription,omitempty"`
+	CurrentHost         string `json:"currentHost,omitempty"`
+	OwnerToken          string `json:"ownerToken,omitempty"`
+	Created             bool   `json:"created,omitempty"`
+	RemoveOnUnpair      bool   `json:"removeOnUnpair,omitempty"`
 }
 
 // PendingRevocation keeps only the public cleanup metadata for a device that

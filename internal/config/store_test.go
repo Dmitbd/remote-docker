@@ -68,6 +68,7 @@ func TestStoreRoundTripsPendingRevocationWithoutMakingItTrusted(t *testing.T) {
 				Device: Device{Name: "Old PC", Address: "192.168.1.20", TunnelPeerPublicKey: "PINNED"},
 				DockerContext: DockerContextChange{
 					Name: "remote-docker", CurrentHost: "ssh://remote-docker-device-old-pc", Created: true,
+					OwnerToken: "generation-old", PreviousDescription: "Managed by Remote Docker; owner=generation-previous",
 				},
 			},
 		},
