@@ -33,7 +33,8 @@ func (r windowsPairingRegistry) Allow(context.Context) error {
 
 func (r windowsPairingRegistry) Commit(_ context.Context, peer pairing.TrustedPeer) error {
 	deviceID := strings.TrimSpace(peer.DeviceID)
-	if deviceID == "" {
+	generation := strings.TrimSpace(peer.Generation)
+	if deviceID == "" || generation == "" {
 		return errors.New("trusted device ID is required")
 	}
 	encodedPeer := tunnel.EncodePublicKey(peer.PublicKey)
@@ -55,13 +56,14 @@ func (r windowsPairingRegistry) Commit(_ context.Context, peer pairing.TrustedPe
 				Name: "Mac", ClientDeviceID: deviceID, TunnelPort: tunnel.TunnelPort,
 				TunnelPeerPublicKey: encodedPeer, TransportVersion: tunnel.CurrentTransportVersion,
 				RevocationProofHash: encodeRevocationProofHash(peer.RevocationProofHash),
+				PairingGeneration:   generation,
 			},
 		}
 		return r.store.Save(cfg)
 	})
 }
 
-func (r windowsPairingRegistry) RevokeWithProof(ctx context.Context, installer pairing.Installer, deviceID string, proof []byte) error {
+func (r windowsPairingRegistry) RevokeWithProof(ctx context.Context, installer pairing.Installer, deviceID, generation string, proof []byte) error {
 	if installer == nil || len(proof) != pairing.RevocationProofSize {
 		return errors.New("pairing revocation proof is invalid")
 	}
@@ -75,6 +77,9 @@ func (r windowsPairingRegistry) RevokeWithProof(ctx context.Context, installer p
 		}
 		device, ok := cfg.Devices[deviceID]
 		if !ok {
+			return nil
+		}
+		if device.PairingGeneration != "" && generation != "" && device.PairingGeneration != generation {
 			return nil
 		}
 		want, err := hex.DecodeString(device.RevocationProofHash)

@@ -60,7 +60,7 @@ type Server struct {
 	installer    Installer
 	sessionGuard func(context.Context) error
 	afterInstall func(context.Context, TrustedPeer) error
-	revoke       func(context.Context, string, []byte) error
+	revoke       func(context.Context, string, string, []byte) error
 	now          func() time.Time
 	random       io.Reader
 	active       *sessionState
@@ -111,7 +111,7 @@ func WithAfterInstall(afterInstall func(context.Context, TrustedPeer) error) Ser
 
 // WithRevocation configures proof-authenticated cleanup independently from an
 // operational SSH tunnel.
-func WithRevocation(revoke func(context.Context, string, []byte) error) ServerOption {
+func WithRevocation(revoke func(context.Context, string, string, []byte) error) ServerOption {
 	return func(server *Server) { server.revoke = revoke }
 }
 
@@ -306,11 +306,11 @@ func (s *Server) serveRevocation(response http.ResponseWriter, request *http.Req
 	var input revocationRequest
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&input); err != nil || !validDeviceID(input.DeviceID) || len(input.Proof) != RevocationProofSize {
+	if err := decoder.Decode(&input); err != nil || !validDeviceID(input.DeviceID) || !validDeviceID(input.Generation) || len(input.Proof) != RevocationProofSize {
 		writeError(response, http.StatusBadRequest, "invalid pairing revocation request")
 		return
 	}
-	if err := s.revoke(request.Context(), input.DeviceID, append([]byte(nil), input.Proof...)); err != nil {
+	if err := s.revoke(request.Context(), input.DeviceID, input.Generation, append([]byte(nil), input.Proof...)); err != nil {
 		writeError(response, http.StatusForbidden, "pairing revocation was not accepted")
 		return
 	}
@@ -449,6 +449,7 @@ func (s *Server) confirm(ctx context.Context, request confirmRequest) (DeviceRec
 		subtle.ConstantTimeCompare([]byte(request.Code), []byte(wantCode)) == 1 &&
 		bytes.Equal(request.ClientPublicKey, session.descriptor.ClientPublicKey) &&
 		validDeviceID(request.DeviceID) &&
+		validDeviceID(request.Generation) &&
 		validAuthorizedKey(request.AuthorizedKey)
 	if !valid {
 		session.attempts++
@@ -468,7 +469,7 @@ func (s *Server) confirm(ctx context.Context, request confirmRequest) (DeviceRec
 		}
 	}
 	if s.afterInstall != nil {
-		peer := TrustedPeer{DeviceID: request.DeviceID, PublicKey: append(ed25519.PublicKey(nil), session.descriptor.ClientPublicKey...)}
+		peer := TrustedPeer{DeviceID: request.DeviceID, Generation: request.Generation, PublicKey: append(ed25519.PublicKey(nil), session.descriptor.ClientPublicKey...)}
 		if len(request.RevocationProof) == RevocationProofSize {
 			peer.RevocationProofHash = sha256.Sum256(request.RevocationProof)
 		}

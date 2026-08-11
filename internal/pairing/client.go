@@ -24,13 +24,15 @@ type confirmRequest struct {
 	Code            string `json:"code"`
 	ClientPublicKey []byte `json:"client_public_key"`
 	DeviceID        string `json:"device_id"`
+	Generation      string `json:"generation"`
 	AuthorizedKey   string `json:"authorized_key"`
 	RevocationProof []byte `json:"revocation_proof,omitempty"`
 }
 
 type revocationRequest struct {
-	DeviceID string `json:"device_id"`
-	Proof    []byte `json:"proof"`
+	DeviceID   string `json:"device_id"`
+	Generation string `json:"generation"`
+	Proof      []byte `json:"proof"`
 }
 
 type sessionControlRequest struct {
@@ -44,6 +46,7 @@ type Client struct {
 	BaseURL         string
 	Session         SessionDescriptor
 	DeviceID        string
+	Generation      string
 	AuthorizedKey   string
 	RevocationProof []byte
 }
@@ -272,6 +275,7 @@ func (c *Client) Confirm(ctx context.Context, code string) (DeviceRecord, []byte
 		Code:            code,
 		ClientPublicKey: append([]byte(nil), c.Session.ClientPublicKey...),
 		DeviceID:        c.DeviceID,
+		Generation:      c.Generation,
 		AuthorizedKey:   c.AuthorizedKey,
 		RevocationProof: append([]byte(nil), c.RevocationProof...),
 	})
@@ -319,12 +323,12 @@ func (c *Client) Confirm(ctx context.Context, code string) (DeviceRecord, []byte
 
 // Revoke removes one trust relationship through the pinned pairing service.
 // The high-entropy proof is separate from the operational tunnel identity.
-func (c *Client) Revoke(ctx context.Context, deviceID string, proof []byte) error {
+func (c *Client) Revoke(ctx context.Context, deviceID, generation string, proof []byte) error {
 	baseURL, err := url.Parse(c.BaseURL)
-	if err != nil || baseURL.Scheme != "https" || baseURL.Host == "" || !validDeviceID(deviceID) || len(proof) != RevocationProofSize {
+	if err != nil || baseURL.Scheme != "https" || baseURL.Host == "" || !validDeviceID(deviceID) || !validDeviceID(generation) || len(proof) != RevocationProofSize {
 		return ErrInvalidSession
 	}
-	payload, err := json.Marshal(revocationRequest{DeviceID: deviceID, Proof: append([]byte(nil), proof...)})
+	payload, err := json.Marshal(revocationRequest{DeviceID: deviceID, Generation: generation, Proof: append([]byte(nil), proof...)})
 	if err != nil {
 		return fmt.Errorf("encode pairing revocation: %w", err)
 	}

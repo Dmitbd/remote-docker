@@ -22,17 +22,19 @@ import (
 func TestPairingRevokesTrustWithPinnedCleanupProof(t *testing.T) {
 	var installed TrustedPeer
 	var revokedDevice string
+	var revokedGeneration string
 	server, err := NewServer(
 		newServerIdentity(t),
 		WithAfterInstall(func(_ context.Context, peer TrustedPeer) error {
 			installed = peer
 			return nil
 		}),
-		WithRevocation(func(_ context.Context, deviceID string, proof []byte) error {
-			if deviceID != installed.DeviceID || sha256.Sum256(proof) != installed.RevocationProofHash {
+		WithRevocation(func(_ context.Context, deviceID, generation string, proof []byte) error {
+			if deviceID != installed.DeviceID || generation != installed.Generation || sha256.Sum256(proof) != installed.RevocationProofHash {
 				return errors.New("invalid revocation proof")
 			}
 			revokedDevice = deviceID
+			revokedGeneration = generation
 			return nil
 		}),
 	)
@@ -55,7 +57,7 @@ func TestPairingRevokesTrustWithPinnedCleanupProof(t *testing.T) {
 	}
 	client := Client{
 		BaseURL: httpServer.URL, Session: descriptor, DeviceID: "mac-studio",
-		AuthorizedKey: "ssh-ed25519 MANAGED-MAC-KEY", RevocationProof: proof,
+		Generation: "generation-one", AuthorizedKey: "ssh-ed25519 MANAGED-MAC-KEY", RevocationProof: proof,
 	}
 	code, _ := client.Code()
 	if _, _, err := client.Confirm(context.Background(), code); err != nil {
@@ -64,11 +66,11 @@ func TestPairingRevokesTrustWithPinnedCleanupProof(t *testing.T) {
 	if installed.RevocationProofHash != sha256.Sum256(proof) {
 		t.Fatalf("installed revocation hash = %x", installed.RevocationProofHash)
 	}
-	if err := client.Revoke(context.Background(), "mac-studio", proof); err != nil {
+	if err := client.Revoke(context.Background(), "mac-studio", "generation-one", proof); err != nil {
 		t.Fatalf("Revoke() error = %v", err)
 	}
-	if revokedDevice != "mac-studio" {
-		t.Fatalf("revoked device = %q", revokedDevice)
+	if revokedDevice != "mac-studio" || revokedGeneration != "generation-one" {
+		t.Fatalf("revoked device = %q generation=%q", revokedDevice, revokedGeneration)
 	}
 }
 
@@ -275,7 +277,7 @@ func TestPairingConfirmInstallsOnlyManagedClientKeyAndReturnsInstallerMetadata(t
 
 	client := Client{
 		BaseURL: httpServer.URL, Session: descriptor,
-		DeviceID: "mac-device", AuthorizedKey: "ssh-ed25519 MANAGED-MAC-KEY",
+		DeviceID: "mac-device", Generation: "generation-one", AuthorizedKey: "ssh-ed25519 MANAGED-MAC-KEY",
 	}
 	code, _ := client.Code()
 	if err := server.Approve(descriptor.ID); err != nil {
@@ -322,7 +324,7 @@ func TestPairingRollsBackManagedKeyWhenPublicTrustMetadataCannotBeSaved(t *testi
 	}
 	httpServer := newPairingTLSTestServer(t, server)
 	defer httpServer.Close()
-	client := Client{BaseURL: httpServer.URL, Session: descriptor, DeviceID: "mac", AuthorizedKey: "ssh-ed25519 KEY"}
+	client := Client{BaseURL: httpServer.URL, Session: descriptor, DeviceID: "mac", Generation: "generation-one", AuthorizedKey: "ssh-ed25519 KEY"}
 	code, _ := client.Code()
 	_, _, err = client.Confirm(context.Background(), code)
 	assertHTTPStatus(t, err, http.StatusServiceUnavailable)
@@ -583,6 +585,7 @@ func newPairingFixture(t *testing.T) pairingFixture {
 		BaseURL:       httpServer.URL,
 		Session:       descriptor,
 		DeviceID:      "mac-studio",
+		Generation:    "generation-one",
 		AuthorizedKey: authorizedKey,
 	}
 

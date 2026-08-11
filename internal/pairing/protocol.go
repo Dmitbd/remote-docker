@@ -111,6 +111,7 @@ type DeviceInfo struct {
 
 type TrustedPeer struct {
 	DeviceID            string
+	Generation          string
 	PublicKey           ed25519.PublicKey
 	RevocationProofHash [32]byte
 }

@@ -15,6 +15,11 @@ const managedContextDescription = "Managed by Remote Docker"
 // ErrContextCollision means the managed context name belongs to another endpoint.
 var ErrContextCollision = errors.New("docker context name collision")
 
+// ErrContextPrecondition means Docker context state changed after PlanContext
+// or a failed create left ownership ambiguous. Callers must not roll back the
+// saved plan when this error is returned.
+var ErrContextPrecondition = errors.New("docker context changed after plan")
+
 // Executor runs a child-process invocation.
 type Executor interface {
 	Run(context.Context, Invocation) error
@@ -118,6 +123,9 @@ func ApplyContext(ctx context.Context, executor Executor, cli string, change Con
 	if !change.Changed() {
 		return nil
 	}
+	if err := verifyContextPrecondition(ctx, executor, cli, change); err != nil {
+		return err
+	}
 	if !change.Created {
 		return updateContext(ctx, executor, cli, change.Name, change.CurrentHost)
 	}
@@ -134,7 +142,44 @@ func ApplyContext(ctx context.Context, executor Executor, cli string, change Con
 		Stderr: &stderr,
 	})
 	if createErr != nil {
+		var stdout bytes.Buffer
+		inspectErr := executor.Run(ctx, Invocation{
+			Binary: cli,
+			Args:   []string{"context", "inspect", change.Name},
+			Stdout: &stdout,
+			Stderr: io.Discard,
+		})
+		if inspectErr == nil {
+			return fmt.Errorf("%w: %w: %q appeared while it was being created", ErrContextPrecondition, ErrContextCollision, change.Name)
+		}
 		return fmt.Errorf("create docker context %q: %w", change.Name, createErr)
+	}
+	return nil
+}
+
+func verifyContextPrecondition(ctx context.Context, executor Executor, cli string, change ContextChange) error {
+	var stdout bytes.Buffer
+	inspectErr := executor.Run(ctx, Invocation{
+		Binary: cli,
+		Args:   []string{"context", "inspect", change.Name},
+		Stdout: &stdout,
+		Stderr: io.Discard,
+	})
+	if change.Created {
+		if ExitCode(inspectErr) == 1 {
+			return nil
+		}
+		if inspectErr != nil {
+			return fmt.Errorf("verify docker context %q before create: %w", change.Name, inspectErr)
+		}
+		return fmt.Errorf("%w: %w: %q was created after planning", ErrContextPrecondition, ErrContextCollision, change.Name)
+	}
+	if inspectErr != nil {
+		return fmt.Errorf("%w: %w: inspect %q before update: %v", ErrContextPrecondition, ErrContextCollision, change.Name, inspectErr)
+	}
+	currentHost, err := managedContextHost(stdout.Bytes(), change.Name)
+	if err != nil || currentHost != change.PreviousHost {
+		return fmt.Errorf("%w: %w: %q changed after planning", ErrContextPrecondition, ErrContextCollision, change.Name)
 	}
 	return nil
 }

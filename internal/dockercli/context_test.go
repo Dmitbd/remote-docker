@@ -13,6 +13,7 @@ func TestEnsureContextCreatesMissingManagedContext(t *testing.T) {
 	executor := &recordingExecutor{
 		results: []executorResult{
 			{err: codedError{code: 1}},
+			{err: codedError{code: 1}},
 			{},
 		},
 	}
@@ -33,6 +34,7 @@ func TestEnsureContextCreatesMissingManagedContext(t *testing.T) {
 
 	want := [][]string{
 		{"context", "inspect", "remote-docker"},
+		{"context", "inspect", "remote-docker"},
 		{
 			"context", "create",
 			"--description", managedContextDescription,
@@ -46,7 +48,7 @@ func TestEnsureContextCreatesMissingManagedContext(t *testing.T) {
 }
 
 func TestPlanAndApplyContextSeparateObservationFromMutation(t *testing.T) {
-	executor := &recordingExecutor{results: []executorResult{{err: codedError{code: 1}}, {}}}
+	executor := &recordingExecutor{results: []executorResult{{err: codedError{code: 1}}, {err: codedError{code: 1}}, {}}}
 	change, err := PlanContext(
 		context.Background(), executor, "docker-real", "remote-docker", "ssh://remote-docker-device-peer",
 	)
@@ -61,10 +63,78 @@ func TestPlanAndApplyContextSeparateObservationFromMutation(t *testing.T) {
 	}
 	want := [][]string{
 		{"context", "inspect", "remote-docker"},
+		{"context", "inspect", "remote-docker"},
 		{"context", "create", "--description", managedContextDescription, "--docker", "host=ssh://remote-docker-device-peer", "remote-docker"},
 	}
 	if !reflect.DeepEqual(executor.args(), want) {
 		t.Fatalf("commands = %#v, want %#v", executor.args(), want)
+	}
+}
+
+func TestApplyContextRejectsContextCreatedAfterPlan(t *testing.T) {
+	executor := &recordingExecutor{results: []executorResult{
+		{err: codedError{code: 1}},
+		{stdout: `[{"Name":"remote-docker","Metadata":{"Description":"Managed by Remote Docker"},"Endpoints":{"docker":{"Host":"ssh://remote-docker-device-other"}}}]`},
+	}}
+	change, err := PlanContext(context.Background(), executor, "docker-real", "remote-docker", "ssh://remote-docker-device-peer")
+	if err != nil {
+		t.Fatalf("PlanContext() error = %v", err)
+	}
+	err = ApplyContext(context.Background(), executor, "docker-real", change)
+	if !errors.Is(err, ErrContextCollision) {
+		t.Fatalf("ApplyContext() error = %v, want collision", err)
+	}
+	want := [][]string{{"context", "inspect", "remote-docker"}, {"context", "inspect", "remote-docker"}}
+	if got := executor.args(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("commands = %#v, want no mutation after changed precondition", got)
+	}
+}
+
+func TestApplyContextDoesNotClaimRollbackOwnershipAfterFailedCreateRace(t *testing.T) {
+	executor := &recordingExecutor{results: []executorResult{
+		{err: codedError{code: 1}},
+		{err: codedError{code: 1}},
+		{err: codedError{code: 1}},
+		{stdout: `[{"Name":"remote-docker","Metadata":{"Description":"Managed by Remote Docker"},"Endpoints":{"docker":{"Host":"ssh://remote-docker-device-other"}}}]`},
+	}}
+	change, err := PlanContext(context.Background(), executor, "docker-real", "remote-docker", "ssh://remote-docker-device-peer")
+	if err != nil {
+		t.Fatalf("PlanContext() error = %v", err)
+	}
+	err = ApplyContext(context.Background(), executor, "docker-real", change)
+	if !errors.Is(err, ErrContextPrecondition) || !errors.Is(err, ErrContextCollision) {
+		t.Fatalf("ApplyContext() error = %v, want ambiguous precondition collision", err)
+	}
+	want := [][]string{
+		{"context", "inspect", "remote-docker"},
+		{"context", "inspect", "remote-docker"},
+		{"context", "create", "--description", managedContextDescription, "--docker", "host=ssh://remote-docker-device-peer", "remote-docker"},
+		{"context", "inspect", "remote-docker"},
+	}
+	if got := executor.args(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("commands = %#v, want ownership check after failed create", got)
+	}
+}
+
+func TestApplyContextRejectsManagedEndpointChangedAfterPlan(t *testing.T) {
+	executor := &recordingExecutor{results: []executorResult{
+		{stdout: `[{"Name":"remote-docker","Metadata":{"Description":"Managed by Remote Docker"},"Endpoints":{"docker":{"Host":"ssh://remote-docker-device-old"}}}]`},
+		{stdout: `[{"Name":"remote-docker","Metadata":{"Description":"Managed by Remote Docker"},"Endpoints":{"docker":{"Host":"ssh://remote-docker-device-other"}}}]`},
+	}}
+	change, err := PlanContext(
+		context.Background(), executor, "docker-real", "remote-docker", "ssh://remote-docker-device-new",
+		"ssh://remote-docker-device-old",
+	)
+	if err != nil {
+		t.Fatalf("PlanContext() error = %v", err)
+	}
+	err = ApplyContext(context.Background(), executor, "docker-real", change)
+	if !errors.Is(err, ErrContextCollision) {
+		t.Fatalf("ApplyContext() error = %v, want collision", err)
+	}
+	want := [][]string{{"context", "inspect", "remote-docker"}, {"context", "inspect", "remote-docker"}}
+	if got := executor.args(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("commands = %#v, want no mutation after changed precondition", got)
 	}
 }
 
@@ -150,6 +220,7 @@ func TestEnsureContextUpdatesExistingManagedEndpoint(t *testing.T) {
 	executor := &recordingExecutor{
 		results: []executorResult{
 			{stdout: `[{"Name":"remote-docker","Metadata":{"Description":"Managed by Remote Docker"},"Endpoints":{"docker":{"Host":"ssh://remote-docker-device-old"}}}]`},
+			{stdout: `[{"Name":"remote-docker","Metadata":{"Description":"Managed by Remote Docker"},"Endpoints":{"docker":{"Host":"ssh://remote-docker-device-old"}}}]`},
 			{},
 		},
 	}
@@ -165,6 +236,7 @@ func TestEnsureContextUpdatesExistingManagedEndpoint(t *testing.T) {
 		t.Fatalf("EnsureContext() change = %#v", change)
 	}
 	want := [][]string{
+		{"context", "inspect", "remote-docker"},
 		{"context", "inspect", "remote-docker"},
 		{"context", "update", "--docker", "host=ssh://remote-docker-device-new", "remote-docker"},
 	}

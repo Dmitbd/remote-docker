@@ -701,9 +701,7 @@ func (r *pairingLifecycleReconciler) runCleanup(ctx context.Context, interval ti
 		interval = 5 * time.Second
 	}
 	for {
-		cleanupCtx, cancel := context.WithTimeout(ctx, pairingRollbackTimeout)
-		_ = r.cleanup(cleanupCtx)
-		cancel()
+		_ = r.cleanup(ctx)
 		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
@@ -1817,8 +1815,8 @@ func newWindowsPairingHostWithRegistryAndIdentity(installer pairing.Installer, r
 		options = append(options,
 			pairing.WithSessionGuard(registry.Allow),
 			pairing.WithAfterInstall(registry.Commit),
-			pairing.WithRevocation(func(ctx context.Context, deviceID string, proof []byte) error {
-				return registry.RevokeWithProof(ctx, installer, deviceID, proof)
+			pairing.WithRevocation(func(ctx context.Context, deviceID, generation string, proof []byte) error {
+				return registry.RevokeWithProof(ctx, installer, deviceID, generation, proof)
 			}),
 		)
 	}

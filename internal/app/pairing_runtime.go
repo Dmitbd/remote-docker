@@ -51,8 +51,8 @@ type pairingTransport interface {
 	Bootstrap(context.Context, string, ed25519.PublicKey) (pairingTarget, pairing.SessionDescriptor, error)
 	Status(context.Context, pairingTarget, pairing.SessionDescriptor) (pairing.SessionStatus, error)
 	Cancel(context.Context, pairingTarget, pairing.SessionDescriptor) error
-	Confirm(context.Context, pairingTarget, pairing.SessionDescriptor, string, string, string, []byte) (pairing.DeviceRecord, error)
-	Revoke(context.Context, config.Device, string, []byte) error
+	Confirm(context.Context, pairingTarget, pairing.SessionDescriptor, string, string, string, string, []byte) (pairing.DeviceRecord, error)
+	Revoke(context.Context, config.Device, string, string, []byte) error
 }
 
 type macPairingOptions struct {
@@ -73,6 +73,7 @@ type macPairingOptions struct {
 	RemoveSSHConfig         func(sshtransport.ManagedRoot, string) error
 	SaveConfig              func(config.Config) error
 	BeforeConfigTransaction func()
+	CleanupTaskTimeout      time.Duration
 }
 
 type pendingPairing struct {
@@ -103,6 +104,7 @@ type macPairingCoordinator struct {
 	starting           bool
 	previousDockerHost string
 	completingSession  string
+	cleanupCursor      string
 }
 
 func newMacPairingCoordinator(options macPairingOptions) *macPairingCoordinator {
@@ -119,6 +121,9 @@ func newMacPairingCoordinator(options macPairingOptions) *macPairingCoordinator 
 	}
 	if options.SaveConfig == nil {
 		options.SaveConfig = options.Store.Save
+	}
+	if options.CleanupTaskTimeout <= 0 {
+		options.CleanupTaskTimeout = pairingRollbackTimeout
 	}
 	return &macPairingCoordinator{options: options}
 }
@@ -431,7 +436,7 @@ func (c *macPairingCoordinator) complete(ctx context.Context, sessionID string, 
 			return fail(unavailable("pairing session is invalid"), dockercli.ContextChange{})
 		}
 		record, err = c.options.Transport.Confirm(
-			ctx, pending.target, pending.descriptor, pending.clientDeviceID, pending.authorizedKey, wantCode, pending.revocationProof,
+			ctx, pending.target, pending.descriptor, pending.clientDeviceID, pending.cleanupID, pending.authorizedKey, wantCode, pending.revocationProof,
 		)
 		if err != nil {
 			return fail(unavailable("pairing confirmation failed"), dockercli.ContextChange{})
@@ -515,6 +520,12 @@ func (c *macPairingCoordinator) commitPairingArtifacts(
 		return device, contextChange, err
 	}
 	if err := dockercli.ApplyContext(ctx, c.options.Docker, c.options.DockerCLI, contextChange); err != nil {
+		if errors.Is(err, dockercli.ErrContextPrecondition) {
+			if discardErr := c.discardPendingContext(pending.cleanupID); discardErr != nil {
+				return device, dockercli.ContextChange{}, errors.Join(unavailable("managed Docker context changed after planning"), discardErr)
+			}
+			return device, dockercli.ContextChange{}, unavailable("managed Docker context changed after planning")
+		}
 		return device, contextChange, unavailable("cannot create managed Docker context")
 	}
 	if err := c.options.Secrets.Put(remoteDeviceID, sshtransport.SSHPrivateKeyCredential, pending.privateKeyPEM); err != nil {
@@ -639,14 +650,14 @@ func (c *macPairingCoordinator) Unpair(ctx context.Context, deviceID string, loc
 			return remoteRevokeUnavailable("remote pairing revocation is unavailable for this saved device")
 		}
 	}
-	generation, err := c.moveActiveToPending(deviceID, device)
+	generation, err := c.moveActiveToPending(deviceID, device, localOnly)
 	if err != nil {
 		return err
 	}
 	return c.cleanupPendingRevocation(ctx, generation, localOnly, dockercli.ContextChange{})
 }
 
-func (c *macPairingCoordinator) moveActiveToPending(deviceID string, device config.Device) (string, error) {
+func (c *macPairingCoordinator) moveActiveToPending(deviceID string, device config.Device, localOnly bool) (string, error) {
 	generation, err := randomDeviceID()
 	if err != nil {
 		return "", unavailable("cannot create pairing cleanup generation")
@@ -678,7 +689,7 @@ func (c *macPairingCoordinator) moveActiveToPending(deviceID string, device conf
 		}
 		cfg.PendingRevocations[generation] = config.PendingRevocation{
 			Device: device, DockerContext: device.DockerContext, Generation: generation,
-			LocalDeviceID: deviceID, CleanupRequested: true,
+			LocalDeviceID: deviceID, CleanupRequested: true, RemoteRevoked: localOnly,
 		}
 		delete(cfg.Devices, deviceID)
 		cfg.ActiveDevice = ""
@@ -713,7 +724,11 @@ func (c *macPairingCoordinator) cleanupPendingRevocation(ctx context.Context, de
 			}
 			proof, proofErr := c.options.Secrets.Get(proofOwner, revocationProofCredential)
 			if proofErr == nil {
-				revokeErr := c.options.Transport.Revoke(ctx, pending.Device, pending.Device.ClientDeviceID, proof)
+				pairingGeneration := pending.Device.PairingGeneration
+				if pairingGeneration == "" {
+					pairingGeneration = pending.Generation
+				}
+				revokeErr := c.options.Transport.Revoke(ctx, pending.Device, pending.Device.ClientDeviceID, pairingGeneration, proof)
 				clearSecret(proof)
 				if revokeErr == nil {
 					if err := c.updatePendingRevocation(deviceID, func(current *config.PendingRevocation) {
@@ -944,6 +959,14 @@ func (c *macPairingCoordinator) updatePendingContext(deviceID string, change con
 	})
 }
 
+func (c *macPairingCoordinator) discardPendingContext(deviceID string) error {
+	return c.updatePendingRevocation(deviceID, func(pending *config.PendingRevocation) {
+		pending.DockerRestored = true
+		pending.DockerContext = config.DockerContextChange{}
+		pending.Device.DockerContext = config.DockerContextChange{}
+	})
+}
+
 func (c *macPairingCoordinator) requestPendingCleanup(deviceID string) error {
 	return c.updatePendingRevocation(deviceID, func(pending *config.PendingRevocation) {
 		pending.CleanupRequested = true
@@ -974,8 +997,31 @@ func (c *macPairingCoordinator) ReconcilePendingRevocations(ctx context.Context)
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
+	c.mu.Lock()
+	cursor := c.cleanupCursor
+	c.mu.Unlock()
+	if cursor != "" && len(ids) > 1 {
+		start := sort.SearchStrings(ids, cursor)
+		if start < len(ids) && ids[start] == cursor {
+			start++
+		}
+		if start == len(ids) {
+			start = 0
+		}
+		ids = append(append([]string(nil), ids[start:]...), ids[:start]...)
+	}
 	for _, id := range ids {
-		if err := c.cleanupPendingRevocation(ctx, id, false, dockercli.ContextChange{}); err != nil {
+		if ctx.Err() != nil {
+			reconcileErrors = append(reconcileErrors, ctx.Err())
+			break
+		}
+		taskCtx, cancel := context.WithTimeout(ctx, c.options.CleanupTaskTimeout)
+		err := c.cleanupPendingRevocation(taskCtx, id, false, dockercli.ContextChange{})
+		cancel()
+		c.mu.Lock()
+		c.cleanupCursor = id
+		c.mu.Unlock()
+		if err != nil {
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("cleanup %s: %w", id, err))
 		}
 	}
@@ -1230,10 +1276,10 @@ func (t discoveryPairingTransport) verifySavedPeer(ctx context.Context, peer dis
 	return pairingTarget{}, fmt.Errorf("verify saved tunnel peer: %w", lastErr)
 }
 
-func (t discoveryPairingTransport) Confirm(ctx context.Context, target pairingTarget, descriptor pairing.SessionDescriptor, clientDeviceID, authorizedKey, code string, revocationProof []byte) (pairing.DeviceRecord, error) {
+func (t discoveryPairingTransport) Confirm(ctx context.Context, target pairingTarget, descriptor pairing.SessionDescriptor, clientDeviceID, generation, authorizedKey, code string, revocationProof []byte) (pairing.DeviceRecord, error) {
 	endpoint := "https://" + net.JoinHostPort(target.Address, fmt.Sprintf("%d", target.PairingPort))
 	client := pairing.Client{
-		BaseURL: endpoint, Session: descriptor, DeviceID: clientDeviceID, AuthorizedKey: authorizedKey,
+		BaseURL: endpoint, Session: descriptor, DeviceID: clientDeviceID, Generation: generation, AuthorizedKey: authorizedKey,
 		HTTPClient: pairing.NewPinnedHTTPClient(descriptor.ServerPublicKey, t.DialContext), RevocationProof: revocationProof,
 	}
 	record, _, err := client.Confirm(ctx, code)
@@ -1256,7 +1302,7 @@ func (t discoveryPairingTransport) Cancel(ctx context.Context, target pairingTar
 	return client.Cancel(ctx)
 }
 
-func (t discoveryPairingTransport) Revoke(ctx context.Context, device config.Device, clientDeviceID string, proof []byte) error {
+func (t discoveryPairingTransport) Revoke(ctx context.Context, device config.Device, clientDeviceID, generation string, proof []byte) error {
 	serverPublicKey, err := tunnel.ParsePublicKey(device.TunnelPeerPublicKey)
 	if err != nil {
 		return errors.New("saved pairing revocation endpoint is invalid")
@@ -1296,7 +1342,7 @@ func (t discoveryPairingTransport) Revoke(ctx context.Context, device config.Dev
 			HTTPClient: pairing.NewPinnedHTTPClient(serverPublicKey, t.DialContext),
 		}
 		client.HTTPClient.Timeout = pairingDiscoveryTimeout
-		if err := client.Revoke(ctx, clientDeviceID, proof); err == nil {
+		if err := client.Revoke(ctx, clientDeviceID, generation, proof); err == nil {
 			return nil
 		} else {
 			lastErr = err
