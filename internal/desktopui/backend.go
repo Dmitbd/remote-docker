@@ -197,7 +197,7 @@ func operationTimeout(id string) time.Duration {
 	}
 }
 
-func (b *Backend) resolve(ctx context.Context, id, value string) (localapi.Method, any, error) {
+func (b *Backend) resolve(_ context.Context, id, value string) (localapi.Method, any, error) {
 	value = strings.TrimSpace(value)
 	switch id {
 	case OperationEnableClient, OperationEnableHost:
@@ -223,11 +223,7 @@ func (b *Backend) resolve(ctx context.Context, id, value string) (localapi.Metho
 		}
 		return localapi.MethodConnect, nil, nil
 	case OperationApprovePair, OperationRejectPair, OperationCancelPair:
-		var status localapi.StatusResult
-		if err := b.Client.Call(ctx, localapi.MethodStatus, nil, &status); err != nil {
-			return "", nil, publicBackendError("прочитать pairing", err)
-		}
-		if status.Pairing == nil || status.Pairing.SessionID == "" {
+		if value == "" {
 			return "", nil, errors.New("запрос на подключение уже завершён")
 		}
 		method := localapi.MethodPairApprove
@@ -236,7 +232,7 @@ func (b *Backend) resolve(ctx context.Context, id, value string) (localapi.Metho
 		} else if id == OperationCancelPair {
 			method = localapi.MethodPairCancel
 		}
-		return method, localapi.PairSessionParams{SessionID: status.Pairing.SessionID}, nil
+		return method, localapi.PairSessionParams{SessionID: value}, nil
 	case OperationPause:
 		return localapi.MethodPause, nil, nil
 	case OperationDisconnect:

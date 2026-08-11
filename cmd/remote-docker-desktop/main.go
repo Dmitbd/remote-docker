@@ -44,6 +44,9 @@ func main() {
 }
 
 func run() error {
+	if err := configureDesktopShell(runtime.GOOS, setAccessoryActivationPolicy); err != nil {
+		return err
+	}
 	rootCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt)
 	ctx, cancel := context.WithCancel(rootCtx)
 	defer stopSignals()
@@ -54,7 +57,7 @@ func run() error {
 		return errors.New("find application data directory")
 	}
 	configPath := config.DefaultPath(runtime.GOOS, home)
-	instance, err := desktop.AcquireSingleInstance(filepath.Join(filepath.Dir(configPath), "desktop.lock"))
+	instance, err := acquireDesktopUpgradeGate(ctx, runtime.GOOS, configPath, productionDesktopUpgradeDependencies())
 	if errors.Is(err, desktop.ErrAlreadyRunning) {
 		var result map[string]any
 		focusCtx, focusCancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -168,6 +171,121 @@ func run() error {
 		return fmt.Errorf("stop desktop runtime: %w", err)
 	}
 	return nil
+}
+
+type desktopUpgradeDependencies struct {
+	acquireInstance      func(string) (desktop.InstanceLock, error)
+	stopLegacy           func(context.Context) error
+	confirmLegacyStopped func(context.Context) error
+	upgradeConfig        func(context.Context, string) error
+}
+
+func productionDesktopUpgradeDependencies() desktopUpgradeDependencies {
+	return desktopUpgradeDependencies{
+		acquireInstance: desktop.AcquireSingleInstance,
+		stopLegacy: func(ctx context.Context) error {
+			return stopLegacyWindowsDesktop(ctx, 50*time.Millisecond, func(callCtx context.Context, method localapi.Method) error {
+				var result map[string]any
+				return (localapi.Client{}).Call(callCtx, method, nil, &result)
+			})
+		},
+		confirmLegacyStopped: func(ctx context.Context) error {
+			executablePath, err := os.Executable()
+			if err != nil {
+				return errors.New("locate desktop executable for upgrade gate")
+			}
+			return desktop.WaitForNoOtherInstance(ctx, executablePath, 50*time.Millisecond)
+		},
+		upgradeConfig: app.UpgradeConfig,
+	}
+}
+
+func acquireDesktopUpgradeGate(
+	ctx context.Context,
+	platform, configPath string,
+	dependencies desktopUpgradeDependencies,
+) (desktop.InstanceLock, error) {
+	if dependencies.acquireInstance == nil || dependencies.upgradeConfig == nil {
+		return nil, errors.New("desktop upgrade gate is incomplete")
+	}
+	instance, err := dependencies.acquireInstance(filepath.Join(filepath.Dir(configPath), "desktop.lock"))
+	if err != nil {
+		return nil, err
+	}
+	if platform == "windows" {
+		if dependencies.stopLegacy == nil || dependencies.confirmLegacyStopped == nil {
+			_ = instance.Close()
+			return nil, errors.New("legacy desktop shutdown proof is unavailable")
+		}
+		if err := dependencies.stopLegacy(ctx); err != nil {
+			_ = instance.Close()
+			return nil, err
+		}
+		if err := dependencies.confirmLegacyStopped(ctx); err != nil {
+			_ = instance.Close()
+			return nil, err
+		}
+	}
+	if err := dependencies.upgradeConfig(ctx, configPath); err != nil {
+		_ = instance.Close()
+		return nil, err
+	}
+	return instance, nil
+}
+
+func stopLegacyWindowsDesktop(
+	ctx context.Context,
+	interval time.Duration,
+	call func(context.Context, localapi.Method) error,
+) error {
+	if call == nil {
+		return errors.New("legacy desktop control is unavailable")
+	}
+	if interval <= 0 {
+		interval = 50 * time.Millisecond
+	}
+	probeCtx, cancelProbe := context.WithTimeout(ctx, 500*time.Millisecond)
+	err := call(probeCtx, localapi.MethodStatus)
+	cancelProbe()
+	if err != nil {
+		if localapi.IsEndpointAbsent(err) {
+			return nil
+		}
+		return fmt.Errorf("verify legacy Remote Docker process: %w", err)
+	}
+	for {
+		shutdownCtx, cancelShutdown := context.WithTimeout(ctx, 2*time.Second)
+		_ = call(shutdownCtx, localapi.MethodShutdown)
+		cancelShutdown()
+		probeCtx, cancelProbe = context.WithTimeout(ctx, 500*time.Millisecond)
+		err = call(probeCtx, localapi.MethodStatus)
+		cancelProbe()
+		if err != nil {
+			if localapi.IsEndpointAbsent(err) {
+				return nil
+			}
+			return fmt.Errorf("wait for legacy Remote Docker process: %w", err)
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return errors.New("legacy Remote Docker process did not stop")
+		case <-timer.C:
+		}
+	}
+}
+
+func configureDesktopShell(platform string, setAccessory func() error) error {
+	if platform != "darwin" {
+		return nil
+	}
+	if setAccessory == nil {
+		return errors.New("configure macOS accessory application")
+	}
+	return setAccessory()
 }
 
 func completeDesktopShutdown(

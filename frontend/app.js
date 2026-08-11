@@ -15,6 +15,9 @@
   let localBusy = false;
   let pollTimer = 0;
   let snapshotInFlight = false;
+  let snapshotDone = Promise.resolve();
+  let nextRequestID = 0;
+  let lastAppliedRequestID = 0;
   let stopped = false;
   let manualAddressRevealed = false;
   let operationError = '';
@@ -75,7 +78,7 @@
       body += '<form class="manual-address" id="manual-address-form"><label class="sr-only" for="manual-address-input">Частный IP-адрес Windows</label><input id="manual-address-input" name="address" type="text" inputmode="decimal" autocomplete="off" placeholder="Частный IP-адрес Windows, например 192.168.1.20" required><button class="secondary" type="submit">Подключиться</button></form><p class="path">Адрес проверяется повторно приложением. Разрешены только частные адреса локальной сети.</p>';
     }
     const actions = (state.operations || []).filter((operation) => operation.id !== 'quit');
-    if (actions.length) body += `<div class="main-actions">${actions.map((operation) => operationButton(operation)).join('')}</div>`;
+    if (actions.length) body += `<div class="main-actions">${actions.map((operation) => operationButton(operation, state.pairSessionId || '')).join('')}</div>`;
     document.getElementById('connection-section').innerHTML = body;
   }
 
@@ -118,8 +121,9 @@
     document.getElementById('diagnostics-section').innerHTML = body;
   }
 
-  function render(state) {
-    if (!state || Number(state.revision ?? 0) < lastRevision) return;
+  function render(state, requestID) {
+    if (!state || requestID < lastAppliedRequestID || Number(state.revision ?? 0) < lastRevision) return;
+    lastAppliedRequestID = requestID;
     lastRevision = Number(state.revision ?? lastRevision);
     currentState = state;
     app.setAttribute('aria-busy', state.lifecycle === 'stopping' ? 'true' : 'false');
@@ -191,8 +195,10 @@
     if (localBusy || !id) return;
     if ((id === 'forget-device' || id === 'remove-project') && !window.confirm(id === 'forget-device' ? 'Забыть это устройство? Для следующего подключения потребуется безопасное сопряжение.' : 'Удалить проект из синхронизации? Исходные файлы на Mac останутся.')) return;
     setOperationError('');
-    localBusy = true;
     const original = button?.textContent?.trim() || '';
+    const requestID = ++nextRequestID;
+    lastAppliedRequestID = requestID;
+    localBusy = true;
     if (button) {
       button.classList.add('loading');
       button.disabled = true;
@@ -201,6 +207,7 @@
     }
     updateGlobalBusy();
     announce(button?.textContent?.trim() || 'Выполняется действие');
+    await snapshotDone;
     let nextState = null;
     try {
       const api = bridge();
@@ -214,7 +221,7 @@
       if (currentState) nextState = {...currentState, error: message};
     } finally {
       localBusy = false;
-      if (nextState) render(nextState);
+      if (nextState) render(nextState, requestID);
       else if (button && document.body.contains(button)) {
         button.classList.remove('loading');
         button.textContent = original;
@@ -238,6 +245,7 @@
     if (localBusy) return;
     setOperationError('');
     localBusy = true;
+    await snapshotDone;
     updateGlobalBusy();
     let path = '';
     try {
@@ -259,6 +267,7 @@
     if (localBusy) return;
     setOperationError('');
     localBusy = true;
+    await snapshotDone;
     quitButton.classList.add('loading');
     quitButton.disabled = true;
     quitButton.innerHTML = '<i class="button-spinner" aria-hidden="true"></i><span>Завершаем…</span>';
@@ -286,15 +295,19 @@
     if (stopped || document.visibilityState !== 'visible' || localBusy) return;
     if (snapshotInFlight) return;
     snapshotInFlight = true;
+    let finishSnapshot;
+    snapshotDone = new Promise((resolve) => { finishSnapshot = resolve; });
+    const requestID = ++nextRequestID;
     try {
       const api = bridge();
       if (!api?.Snapshot) throw new Error('Ожидание фонового приложения…');
-      render(await api.Snapshot());
+      render(await api.Snapshot(), requestID);
     } catch (error) {
       announce(errorMessage(error));
       if (!currentState) renderUnavailable(errorMessage(error));
     } finally {
       snapshotInFlight = false;
+      finishSnapshot();
     }
   }
 

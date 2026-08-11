@@ -20,6 +20,9 @@ SetCompressorDictSize 32
 !ifndef UI_SOURCE
   !error "UI_SOURCE is required"
 !endif
+!ifndef WAIT_DESKTOP_SOURCE
+  !error "WAIT_DESKTOP_SOURCE is required"
+!endif
 
 Name "Remote Docker"
 Caption "Установка Remote Docker"
@@ -134,12 +137,57 @@ Section "Основные файлы и Docker-среда" CoreSection
   FileClose $0
 
   DetailPrint "$(InstallingFiles)"
-  IfFileExists "$INSTDIR\RemoteDocker.exe" 0 +4
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
+  File /oname=wait-desktop-exit.ps1 "${WAIT_DESKTOP_SOURCE}"
+  IfFileExists "$INSTDIR\RemoteDocker.exe" 0 install_desktop_binary
   nsExec::ExecToStack /TIMEOUT=15000 '"$INSTDIR\RemoteDocker.exe" --shutdown'
   Pop $0
   Pop $1
+  ${If} $0 != "0"
+    Goto desktop_verify_unchanged
+  ${EndIf}
+  ClearErrors
+  Rename "$INSTDIR\RemoteDocker.exe" "$INSTDIR\RemoteDocker.exe.upgrade-old"
+  IfErrors desktop_verify_unchanged
+  nsExec::ExecToStack /TIMEOUT=35000 '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "$PLUGINSDIR\wait-desktop-exit.ps1" -TimeoutSeconds 30'
+  Pop $0
+  Pop $1
+  ${If} $0 != "0"
+    Goto desktop_restore_binary
+  ${EndIf}
+install_desktop_binary:
   SetOutPath "$INSTDIR"
+  ClearErrors
   File /oname=RemoteDocker.exe "${APP_SOURCE}"
+  IfErrors desktop_binary_failed
+  Delete "$INSTDIR\RemoteDocker.exe.upgrade-old"
+  Goto desktop_binary_ready
+desktop_binary_failed:
+  Delete "$INSTDIR\RemoteDocker.exe"
+  Goto desktop_restore_binary
+desktop_restore_binary:
+  ClearErrors
+  Rename "$INSTDIR\RemoteDocker.exe.upgrade-old" "$INSTDIR\RemoteDocker.exe"
+  IfErrors desktop_restore_failed
+  IfFileExists "$INSTDIR\RemoteDocker.exe" desktop_shutdown_failed desktop_restore_failed
+desktop_verify_unchanged:
+  IfFileExists "$INSTDIR\RemoteDocker.exe" desktop_shutdown_failed desktop_restore_failed
+desktop_shutdown_failed:
+  MessageBox MB_OK|MB_ICONSTOP "Не удалось подтвердить остановку Remote Docker. Установка прервана без замены приложения."
+  SetErrorLevel 1
+  Quit
+desktop_restore_failed:
+  IfFileExists "$INSTDIR\RemoteDocker.exe.upgrade-old" desktop_restore_backup_preserved desktop_restore_backup_missing
+desktop_restore_backup_preserved:
+  MessageBox MB_OK|MB_ICONSTOP "Не удалось восстановить Remote Docker. Активный файл отсутствует; резервная копия сохранена: $INSTDIR\RemoteDocker.exe.upgrade-old"
+  SetErrorLevel 1
+  Quit
+desktop_restore_backup_missing:
+  MessageBox MB_OK|MB_ICONSTOP "Не удалось восстановить Remote Docker, и резервная копия не найдена. Проверьте каталог установки: $INSTDIR"
+  SetErrorLevel 1
+  Quit
+desktop_binary_ready:
   File /oname=remote-docker-ui.exe "${UI_SOURCE}"
   File /oname=remote-docker.ico "${ICON_SOURCE}"
   SetOutPath "$INSTDIR\assets"

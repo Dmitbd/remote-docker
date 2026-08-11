@@ -58,6 +58,74 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 }
 
+func TestStoreRoundTripsPendingRevocationWithoutMakingItTrusted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	store := Store{Path: path}
+	want := Config{
+		SchemaVersion: CurrentSchemaVersion,
+		PendingRevocations: map[string]PendingRevocation{
+			"old-pc": {
+				Device: Device{Name: "Old PC", Address: "192.168.1.20", TunnelPeerPublicKey: "PINNED"},
+				DockerContext: DockerContextChange{
+					Name: "remote-docker", CurrentHost: "ssh://remote-docker-device-old-pc", Created: true,
+					OwnerToken: "generation-old", PreviousDescription: "Managed by Remote Docker; owner=generation-previous",
+				},
+			},
+		},
+	}
+	if err := store.Save(want); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	got, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !reflect.DeepEqual(got, want) || got.ActiveDevice != "" || len(got.Devices) != 0 {
+		t.Fatalf("Load() = %#v, want pending-only %#v", got, want)
+	}
+}
+
+func TestStoreRoundTripsCleanupGenerationAndDurableStages(t *testing.T) {
+	store := Store{Path: filepath.Join(t.TempDir(), "config.json")}
+	want := Config{
+		SchemaVersion: CurrentSchemaVersion,
+		PendingRevocations: map[string]PendingRevocation{"generation-2": {
+			Generation: "generation-2", SessionID: "session-2", CleanupRequested: true,
+			RemoteRevoked: true, CleanupLeaseToken: "lease-2", CleanupLeaseExpiresAt: "2026-08-11T12:00:00Z",
+			DockerRestored: true, LocalCleaned: true, Finished: true,
+			Device: Device{PairingGeneration: "generation-2"},
+		}},
+	}
+	if err := store.Save(want); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	got, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("round trip = %#v, want %#v", got, want)
+	}
+}
+
+func TestStoreMigratesSchemaV5BeforePersistingCleanupLeases(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	legacy := `{"schemaVersion":5,"pendingRevocations":{"generation-5":{"generation":"generation-5","cleanupRequested":true,"device":{"clientDeviceId":"LOCAL-SYNC"}}}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write schema v5 config: %v", err)
+	}
+	got, migration, err := (Store{Path: path}).LoadWithMigration()
+	if err != nil {
+		t.Fatalf("LoadWithMigration() error = %v", err)
+	}
+	pending := got.PendingRevocations["generation-5"]
+	if got.SchemaVersion != CurrentSchemaVersion || CurrentSchemaVersion != 6 ||
+		migration.FromVersion != 5 || migration.ToVersion != 6 || pending.Generation != "generation-5" ||
+		pending.CleanupLeaseToken != "" || pending.CleanupLeaseExpiresAt != "" {
+		t.Fatalf("schema-v5 cleanup migration = cfg=%#v migration=%#v", got, migration)
+	}
+}
+
 func TestStoreMigratesSchemaV2WithoutSilentlyAddingTunnelTrust(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	legacy := `{"schemaVersion":2,"activeDevice":"pc-1","devices":{"pc-1":{"name":"Dev PC","address":"192.168.1.20","sshPort":49222}}}`
@@ -72,6 +140,23 @@ func TestStoreMigratesSchemaV2WithoutSilentlyAddingTunnelTrust(t *testing.T) {
 	if got.SchemaVersion != CurrentSchemaVersion || migration.FromVersion != 2 ||
 		device.TunnelPort != 0 || device.TunnelPeerPublicKey != "" || device.TransportVersion != 0 {
 		t.Fatalf("schema-v2 migration silently created tunnel trust: cfg=%#v migration=%#v", got, migration)
+	}
+}
+
+func TestStoreMigratesSchemaV4PendingCleanupToGenerationCAS(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	legacy := `{"schemaVersion":4,"pendingRevocations":{"old-task":{"cleanupRequested":true,"device":{"clientDeviceId":"LOCAL-SYNC"}}}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write schema v4 config: %v", err)
+	}
+	got, migration, err := (Store{Path: path}).LoadWithMigration()
+	if err != nil {
+		t.Fatalf("LoadWithMigration() error = %v", err)
+	}
+	pending := got.PendingRevocations["old-task"]
+	if got.SchemaVersion != CurrentSchemaVersion || CurrentSchemaVersion <= 4 ||
+		migration.FromVersion != 4 || pending.Generation != "old-task" || !pending.CleanupRequested {
+		t.Fatalf("schema-v4 cleanup migration = cfg=%#v migration=%#v", got, migration)
 	}
 }
 

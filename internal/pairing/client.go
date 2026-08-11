@@ -24,7 +24,15 @@ type confirmRequest struct {
 	Code            string `json:"code"`
 	ClientPublicKey []byte `json:"client_public_key"`
 	DeviceID        string `json:"device_id"`
+	Generation      string `json:"generation"`
 	AuthorizedKey   string `json:"authorized_key"`
+	RevocationProof []byte `json:"revocation_proof,omitempty"`
+}
+
+type revocationRequest struct {
+	DeviceID   string `json:"device_id"`
+	Generation string `json:"generation"`
+	Proof      []byte `json:"proof"`
 }
 
 type sessionControlRequest struct {
@@ -34,11 +42,13 @@ type sessionControlRequest struct {
 
 // Client confirms a descriptor after the user compares its visual code.
 type Client struct {
-	HTTPClient    *http.Client
-	BaseURL       string
-	Session       SessionDescriptor
-	DeviceID      string
-	AuthorizedKey string
+	HTTPClient      *http.Client
+	BaseURL         string
+	Session         SessionDescriptor
+	DeviceID        string
+	Generation      string
+	AuthorizedKey   string
+	RevocationProof []byte
 }
 
 // HTTPError reports a rejected pairing request.
@@ -59,6 +69,7 @@ func Inspect(ctx context.Context, baseURL, expectedInstanceID string, httpClient
 	if err != nil {
 		return Info{}, fmt.Errorf("create pairing info request: %w", err)
 	}
+	request.Header.Set(protocolVersionHeader, CurrentProtocolVersion)
 	client := httpClient
 	if client == nil {
 		client = unverifiedTLS13Client(5 * time.Second)
@@ -74,6 +85,9 @@ func Inspect(ctx context.Context, baseURL, expectedInstanceID string, httpClient
 	}
 	if len(raw) > 4<<10 {
 		return Info{}, errors.New("pairing info response exceeds size limit")
+	}
+	if err := validateProtocolVersion(response); err != nil {
+		return Info{}, err
 	}
 	if response.StatusCode != http.StatusOK {
 		return Info{}, &HTTPError{StatusCode: response.StatusCode, Message: "pairing info unavailable"}
@@ -125,6 +139,7 @@ func Bootstrap(ctx context.Context, baseURL string, clientPublicKey ed25519.Publ
 		return SessionDescriptor{}, fmt.Errorf("create pairing session request: %w", err)
 	}
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(protocolVersionHeader, CurrentProtocolVersion)
 	client := httpClient
 	if client == nil {
 		client = unverifiedTLS13Client(15 * time.Second)
@@ -137,6 +152,9 @@ func Bootstrap(ctx context.Context, baseURL string, clientPublicKey ed25519.Publ
 	raw, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
 		return SessionDescriptor{}, fmt.Errorf("read pairing session response: %w", err)
+	}
+	if err := validateProtocolVersion(response); err != nil {
+		return SessionDescriptor{}, err
 	}
 	if response.StatusCode != http.StatusOK {
 		var body struct {
@@ -243,6 +261,7 @@ func (c *Client) Cancel(ctx context.Context) error {
 		return fmt.Errorf("create pairing cancellation request: %w", err)
 	}
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(protocolVersionHeader, CurrentProtocolVersion)
 	response, raw, err := c.doPinned(request, 16<<10)
 	if err != nil {
 		return err
@@ -265,7 +284,9 @@ func (c *Client) Confirm(ctx context.Context, code string) (DeviceRecord, []byte
 		Code:            code,
 		ClientPublicKey: append([]byte(nil), c.Session.ClientPublicKey...),
 		DeviceID:        c.DeviceID,
+		Generation:      c.Generation,
 		AuthorizedKey:   c.AuthorizedKey,
+		RevocationProof: append([]byte(nil), c.RevocationProof...),
 	})
 	if err != nil {
 		return DeviceRecord{}, nil, fmt.Errorf("encode pairing request: %w", err)
@@ -280,6 +301,7 @@ func (c *Client) Confirm(ctx context.Context, code string) (DeviceRecord, []byte
 		return DeviceRecord{}, nil, fmt.Errorf("create pairing request: %w", err)
 	}
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(protocolVersionHeader, CurrentProtocolVersion)
 
 	httpClient := c.HTTPClient
 	if httpClient == nil {
@@ -293,6 +315,9 @@ func (c *Client) Confirm(ctx context.Context, code string) (DeviceRecord, []byte
 	raw, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
 		return DeviceRecord{}, nil, fmt.Errorf("read pairing response: %w", err)
+	}
+	if err := validateProtocolVersion(response); err != nil {
+		return DeviceRecord{}, raw, err
 	}
 	if response.StatusCode != http.StatusOK {
 		var body struct {
@@ -309,7 +334,34 @@ func (c *Client) Confirm(ctx context.Context, code string) (DeviceRecord, []byte
 	return record, raw, nil
 }
 
+// Revoke removes one trust relationship through the pinned pairing service.
+// The high-entropy proof is separate from the operational tunnel identity.
+func (c *Client) Revoke(ctx context.Context, deviceID, generation string, proof []byte) error {
+	baseURL, err := url.Parse(c.BaseURL)
+	if err != nil || baseURL.Scheme != "https" || baseURL.Host == "" || !validDeviceID(deviceID) || !validDeviceID(generation) || len(proof) != RevocationProofSize {
+		return ErrInvalidSession
+	}
+	payload, err := json.Marshal(revocationRequest{DeviceID: deviceID, Generation: generation, Proof: append([]byte(nil), proof...)})
+	if err != nil {
+		return fmt.Errorf("encode pairing revocation: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.BaseURL, "/")+pairRevokePath, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("create pairing revocation request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, raw, err := c.doPinned(request, 16<<10)
+	if err != nil {
+		return err
+	}
+	if response.StatusCode != http.StatusOK {
+		return decodeHTTPError(response.StatusCode, raw)
+	}
+	return nil
+}
+
 func (c *Client) doPinned(request *http.Request, limit int64) (*http.Response, []byte, error) {
+	request.Header.Set(protocolVersionHeader, CurrentProtocolVersion)
 	httpClient := c.HTTPClient
 	if httpClient == nil {
 		httpClient = pinnedHTTPClient(c.Session.ServerPublicKey)
@@ -326,7 +378,17 @@ func (c *Client) doPinned(request *http.Request, limit int64) (*http.Response, [
 	if int64(len(raw)) > limit {
 		return nil, nil, errors.New("pairing session response exceeds size limit")
 	}
+	if err := validateProtocolVersion(response); err != nil {
+		return nil, raw, err
+	}
 	return response, raw, nil
+}
+
+func validateProtocolVersion(response *http.Response) error {
+	if response == nil || response.Header.Get(protocolVersionHeader) != CurrentProtocolVersion {
+		return ErrProtocolUpgradeRequired
+	}
+	return nil
 }
 
 func decodeHTTPError(statusCode int, raw []byte) error {

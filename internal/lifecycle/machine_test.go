@@ -117,6 +117,89 @@ func TestPairingAndConnectionEnforceOneTrustedPeer(t *testing.T) {
 	}
 }
 
+func TestPairingApprovalPublishesConnectingUntilTrustIsCommitted(t *testing.T) {
+	for _, role := range []Role{RoleMacClient, RoleWindowsHost} {
+		t.Run(string(role), func(t *testing.T) {
+			machine := mustMachine(t, role)
+			mustApply(t, machine, Event{Type: EventEnabled})
+			if role == RoleMacClient {
+				mustApply(t, machine, Event{Type: EventSearchStarted})
+			}
+			pairing := Pairing{
+				SessionID: "session", Peer: Peer{ID: "peer", Name: "Peer"},
+				Code: "123456", ExpiresAt: time.Now().Add(time.Minute),
+			}
+			mustApply(t, machine, Event{Type: EventPairingStarted, Pairing: &pairing})
+
+			approved := mustApply(t, machine, Event{Type: EventPairingApproved})
+			if approved.State != StateConnecting || approved.Pairing == nil || approved.Pairing.Status != PairingApproved || approved.TrustedPeers != 0 {
+				t.Fatalf("approved pairing snapshot = %#v", approved)
+			}
+
+			completed := mustApply(t, machine, Event{Type: EventPairingCompleted, Peer: &pairing.Peer})
+			if completed.State != StateConnecting || completed.Pairing != nil || completed.TrustedPeers != 1 || completed.Peer == nil {
+				t.Fatalf("completed pairing snapshot = %#v", completed)
+			}
+		})
+	}
+}
+
+func TestApprovedPairingTerminalDecisionReturnsToRoleIdleState(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		role  Role
+		event EventType
+		want  State
+	}{
+		{name: "Mac rejected", role: RoleMacClient, event: EventPairingRejected, want: StateClientReady},
+		{name: "Mac expired", role: RoleMacClient, event: EventPairingExpired, want: StateClientReady},
+		{name: "Windows cancelled", role: RoleWindowsHost, event: EventPairingCancelled, want: StateHostWaiting},
+		{name: "Windows expired", role: RoleWindowsHost, event: EventPairingExpired, want: StateHostWaiting},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			machine := mustMachine(t, test.role)
+			mustApply(t, machine, Event{Type: EventEnabled})
+			if test.role == RoleMacClient {
+				mustApply(t, machine, Event{Type: EventSearchStarted})
+			}
+			pairing := Pairing{
+				SessionID: "session", Peer: Peer{ID: "peer", Name: "Peer"},
+				Code: "123456", ExpiresAt: time.Now().Add(time.Minute),
+			}
+			mustApply(t, machine, Event{Type: EventPairingStarted, Pairing: &pairing})
+			mustApply(t, machine, Event{Type: EventPairingApproved})
+
+			terminal := mustApply(t, machine, Event{Type: test.event})
+			if terminal.State != test.want || terminal.Pairing != nil || terminal.TrustedPeers != 0 ||
+				terminal.Docker.State != ServiceStopped || terminal.Sync.State != ServiceStopped {
+				t.Fatalf("terminal approved pairing snapshot = %#v", terminal)
+			}
+		})
+	}
+}
+
+func TestApplyIfRevisionRejectsAStaleLifecycleLease(t *testing.T) {
+	machine := mustMachine(t, RoleMacClient)
+	initial := machine.Snapshot()
+	enabled := mustApply(t, machine, Event{Type: EventEnabled})
+
+	stale, applied, err := machine.ApplyIfRevision(initial.Revision, Event{Type: EventPauseRequested})
+	if err != nil {
+		t.Fatalf("ApplyIfRevision(stale) error = %v", err)
+	}
+	if applied || stale.Revision != enabled.Revision || stale.State != StateClientReady {
+		t.Fatalf("stale lease applied=%t snapshot=%#v", applied, stale)
+	}
+
+	paused, applied, err := machine.ApplyIfRevision(enabled.Revision, Event{Type: EventPauseRequested})
+	if err != nil {
+		t.Fatalf("ApplyIfRevision(current) error = %v", err)
+	}
+	if !applied || paused.State != StateStopping || paused.Revision != enabled.Revision+1 {
+		t.Fatalf("current lease applied=%t snapshot=%#v", applied, paused)
+	}
+}
+
 func TestPairingProblemNeverHidesPendingSession(t *testing.T) {
 	pairing := Pairing{
 		SessionID: "session-1", Peer: Peer{ID: "windows", Name: "Windows"},
@@ -484,6 +567,24 @@ func TestForgetReservationCommitsTrustRemovalAtomically(t *testing.T) {
 	}
 	if _, err := machine.Apply(Event{Type: EventTrustForgotten}); !errors.As(err, new(*TransitionError)) {
 		t.Fatalf("second forget commit error = %v, want TransitionError", err)
+	}
+}
+
+func TestTrustForgottenClearsPreviousDisconnectNotice(t *testing.T) {
+	machine := connectedMachine(t, RoleWindowsHost)
+	mustApply(t, machine, Event{
+		Type:       EventDisconnectRequested,
+		Disconnect: &Disconnect{Initiator: InitiatorPeer, Reason: ReasonUserDisconnect},
+	})
+	idle := mustApply(t, machine, Event{Type: EventStopCompleted})
+	if idle.LastDisconnect == nil || idle.Peer == nil {
+		t.Fatalf("pre-forget snapshot = %#v", idle)
+	}
+	mustApply(t, machine, Event{Type: EventTrustForgetStarted, Peer: &Peer{ID: idle.Peer.ID}})
+
+	forgotten := mustApply(t, machine, Event{Type: EventTrustForgotten})
+	if forgotten.Peer != nil || forgotten.TrustedPeers != 0 || forgotten.LastDisconnect != nil {
+		t.Fatalf("forgotten snapshot retained disconnect notice = %#v", forgotten)
 	}
 }
 

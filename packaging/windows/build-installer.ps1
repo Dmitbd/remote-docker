@@ -237,6 +237,7 @@ try {
         "/DSTATUS_SOURCE=$(Resolve-RequiredFile (Join-Path $PSScriptRoot 'scripts\provision-status.ps1'))",
         "/DPATH_VALIDATION_SOURCE=$(Resolve-RequiredFile (Join-Path $PSScriptRoot 'scripts\path-validation.ps1'))",
         "/DUNINSTALL_SOURCE=$(Resolve-RequiredFile (Join-Path $PSScriptRoot 'scripts\uninstall.ps1'))",
+        "/DWAIT_DESKTOP_SOURCE=$(Resolve-RequiredFile (Join-Path $PSScriptRoot 'scripts\wait-desktop-exit.ps1'))",
         "/DUPDATE_SOURCE=$(Resolve-RequiredFile (Join-Path $PSScriptRoot 'install-agent.ps1'))",
         $installerSource
     )

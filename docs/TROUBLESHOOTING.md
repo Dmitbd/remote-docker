@@ -61,7 +61,9 @@ docker context inspect remote-docker
 docker info
 ```
 
-The context description must be `Managed by Remote Docker`, and its endpoint must use `ssh://remote-docker-device-...`. Remote Docker refuses host/context overrides that bypass the trusted endpoint.
+The context description must be `Managed by Remote Docker; owner=<token>`, and its endpoint must use `ssh://remote-docker-device-...`. A legacy context without the ownership token is left unchanged and reported as a conflict instead of being claimed automatically.
+
+Remote Docker serializes its own context operations across processes and checks the exact ownership token, endpoint, and description before and after each change. Docker CLI does not provide an atomic compare-and-swap operation for contexts, so a manual or third-party `docker context create`, `update`, or `rm` issued during the small interval between those checks can still race with the app. Avoid changing `remote-docker` manually while pairing or removing a device; an observed mismatch is handled safely by leaving the context unchanged.
 
 ## `/usr/local/bin/docker` already exists
 

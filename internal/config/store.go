@@ -117,6 +117,14 @@ func migrate(cfg Config) (Config, Migration, error) {
 			cfg.Devices = nil
 		}
 	}
+	if cfg.SchemaVersion < 5 {
+		for generation, pending := range cfg.PendingRevocations {
+			if pending.Generation == "" {
+				pending.Generation = generation
+				cfg.PendingRevocations[generation] = pending
+			}
+		}
+	}
 	if cfg.SchemaVersion < CurrentSchemaVersion {
 		cfg.SchemaVersion = CurrentSchemaVersion
 	}
@@ -132,6 +140,9 @@ func validate(cfg Config) error {
 	}
 	if len(cfg.Devices) > 1 {
 		return errors.New("configuration supports only one trusted device")
+	}
+	if len(cfg.PendingRevocations) > 16 {
+		return errors.New("configuration contains too many pending revocations")
 	}
 	if cfg.ActiveDevice == "" {
 		// A single dormant public record is tolerated while an old pairing is

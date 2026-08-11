@@ -33,6 +33,30 @@ func TestDesktopControllerPublishesPausedLifecycleSnapshot(t *testing.T) {
 	}
 }
 
+func TestDesktopControllerStatusDoesNotPerformPairingIO(t *testing.T) {
+	machine := newLifecycleMachine(t, lifecycle.RoleWindowsHost)
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := &recordingLocalHandler{results: map[localapi.Method]any{
+		localapi.MethodPairStatus: localapi.PairingStatusResult{
+			SessionID: "session-1", Status: string(pairing.SessionPending),
+		},
+	}}
+	controller, _ := NewDesktopController(supervisor, fallback)
+	_, _ = controller.Handle(context.Background(), localapi.MethodEnable, nil)
+
+	result, err := controller.Handle(context.Background(), localapi.MethodStatus, nil)
+	if err != nil {
+		t.Fatalf("Status error = %v", err)
+	}
+	status, ok := result.(localapi.StatusResult)
+	if !ok || status.State != string(lifecycle.StateHostWaiting) || status.Pairing != nil {
+		t.Fatalf("Windows status = %#v", result)
+	}
+	if len(fallback.methods) != 0 {
+		t.Fatalf("Status delegated methods = %v, want pure lifecycle read", fallback.methods)
+	}
+}
+
 func TestDesktopControllerSeparatesEnableSearchAndPause(t *testing.T) {
 	machine := newLifecycleMachine(t, lifecycle.RoleMacClient)
 	runtime := newRecordingSessionRuntime()

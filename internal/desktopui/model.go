@@ -119,6 +119,7 @@ type State struct {
 	Lifecycle       string       `json:"lifecycle"`
 	SelectedSection string       `json:"selectedSection"`
 	LocalName       string       `json:"localName"`
+	PairSessionID   string       `json:"pairSessionId"`
 	Devices         []Device     `json:"devices"`
 	Operations      []Operation  `json:"operations"`
 	Connection      Connection   `json:"connection"`
@@ -148,6 +149,9 @@ func BuildState(input SnapshotInput, platform string, now time.Time) State {
 		state.Role = "Windows · запускает Docker"
 	} else {
 		state.Role = "Mac · отправляет Docker-команды"
+	}
+	if status.Pairing != nil {
+		state.PairSessionID = status.Pairing.SessionID
 	}
 	state.Connection, state.Operations = buildConnection(status, now)
 	state.Devices = buildDevices(status, input.Candidates)

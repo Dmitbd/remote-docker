@@ -117,6 +117,38 @@ func runPairingRevoke(runtime pairingRuntime, args []string, errorOutput io.Writ
 	return 0
 }
 
+func runPairingRevokeCommand(
+	ctx context.Context,
+	runtime pairingRuntime,
+	syncRuntime remoteSyncRuntime,
+	args []string,
+	errorOutput io.Writer,
+) int {
+	deviceID, ok := pairingDeviceArgument(args)
+	if !ok {
+		fmt.Fprintln(errorOutput, "invalid managed pairing request")
+		return 2
+	}
+	contents, err := os.ReadFile(runtime.AuthorizedKeysPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return runPairingRevoke(runtime, args, errorOutput)
+	}
+	if len(contents) == 0 {
+		return runPairingRevoke(runtime, args, errorOutput)
+	}
+	managedDeviceID, managed := managedPairingDeviceID(contents)
+	if !managed || managedDeviceID != deviceID {
+		return runPairingRevoke(runtime, args, errorOutput)
+	}
+	if syncRuntime != nil {
+		if err := syncRuntime.Revoke(ctx, deviceID); err != nil {
+			fmt.Fprintln(errorOutput, "cannot revoke managed Syncthing trust")
+			return 1
+		}
+	}
+	return runPairingRevoke(runtime, args, errorOutput)
+}
+
 func managedPairingDeviceID(contents []byte) (string, bool) {
 	key, comment, options, rest, err := ssh.ParseAuthorizedKey(contents)
 	if err != nil || key.Type() != ssh.KeyAlgoED25519 || len(options) != 0 || len(bytes.TrimSpace(rest)) != 0 {

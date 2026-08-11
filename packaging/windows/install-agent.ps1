@@ -54,6 +54,20 @@ function Assert-NoReparseTree {
     }
 }
 
+function Wait-RemoteDockerProcessExit {
+    param([int]$TimeoutSeconds = 30)
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $running = @(Get-Process -Name 'RemoteDocker' -ErrorAction SilentlyContinue)
+        if ($running.Count -eq 0) { return }
+        if ([DateTime]::UtcNow -ge $deadline) {
+            throw 'Remote Docker is still running after the shutdown request.'
+        }
+        Start-Sleep -Milliseconds 100
+    } while ($true)
+}
+
 Assert-Administrator
 $ApplicationRoot = Assert-RemoteDockerCanonicalPath -Path $ApplicationRoot -Description 'Application root'
 $resolvedInstallRoot = (Resolve-Path -LiteralPath $ApplicationRoot -ErrorAction Stop).Path
@@ -74,12 +88,11 @@ Assert-FreeReleaseBinary -Path $resolvedCandidate -Sha256 $ExpectedSha256
 if ((Get-AuthenticodeSignature -LiteralPath $activePath).Status -ne [System.Management.Automation.SignatureStatus]::NotSigned) {
     throw 'The installed binary does not belong to the free unsigned release channel.'
 }
-& $activePath --shutdown
-
 $updatesRoot = Join-Path $ApplicationRoot '.updates'
 $stagingRoot = Join-Path $updatesRoot $Version
 $stagedPath = Join-Path $stagingRoot 'RemoteDocker.exe'
-$backupPath = Join-Path $stagingRoot 'RemoteDocker.exe.previous'
+$retiredPath = Join-Path $stagingRoot 'RemoteDocker.exe.previous'
+$safeToCleanupStaging = $true
 if (-not (Test-Path -LiteralPath $updatesRoot)) {
     New-Item -ItemType Directory -Path $updatesRoot -Force | Out-Null
 }
@@ -100,11 +113,38 @@ try {
     )) {
         throw 'The verified staging path must be on the same volume as Remote Docker.'
     }
-    [System.IO.File]::Replace($stagedPath, $activePath, $backupPath, $true)
+    & $activePath --shutdown
+    $shutdownExitCode = $LASTEXITCODE
+    if ($shutdownExitCode -ne 0) {
+        throw "Remote Docker shutdown failed with exit code $shutdownExitCode."
+    }
+    Move-Item -LiteralPath $activePath -Destination $retiredPath
+    $safeToCleanupStaging = $false
+    try {
+        Wait-RemoteDockerProcessExit
+        Move-Item -LiteralPath $stagedPath -Destination $activePath
+        if (-not (Test-Path -LiteralPath $activePath -PathType Leaf)) {
+            throw 'The verified Remote Docker replacement is missing from the active path.'
+        }
+        $safeToCleanupStaging = $true
+    }
+    catch {
+        if (Test-Path -LiteralPath $activePath -PathType Leaf) {
+            $safeToCleanupStaging = $true
+        }
+        elseif (Test-Path -LiteralPath $retiredPath -PathType Leaf) {
+            Move-Item -LiteralPath $retiredPath -Destination $activePath
+            if (-not (Test-Path -LiteralPath $activePath -PathType Leaf)) {
+                throw 'The previous Remote Docker executable could not be restored.'
+            }
+            $safeToCleanupStaging = $true
+        }
+        throw
+    }
     Write-Output "Updated RemoteDocker.exe to version $Version."
 }
 finally {
-    if (Test-Path -LiteralPath $stagingRoot) {
+    if ($safeToCleanupStaging -and (Test-Path -LiteralPath $stagingRoot)) {
         Assert-NoReparseTree -Path $stagingRoot
         Remove-Item -LiteralPath $stagingRoot -Recurse -Force
     }

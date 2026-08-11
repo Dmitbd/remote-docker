@@ -208,7 +208,25 @@ func (m *Machine) Apply(event Event) (Snapshot, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.applyAndPublishLocked(event)
+}
 
+// ApplyIfRevision applies an event only while the caller still owns the exact
+// lifecycle snapshot it observed before starting asynchronous work.
+func (m *Machine) ApplyIfRevision(expected uint64, event Event) (Snapshot, bool, error) {
+	if m == nil {
+		return Snapshot{}, false, errors.New("lifecycle machine is nil")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.snapshot.Revision != expected {
+		return m.snapshot.Clone(), false, nil
+	}
+	current, err := m.applyAndPublishLocked(event)
+	return current, err == nil, err
+}
+
+func (m *Machine) applyAndPublishLocked(event Event) (Snapshot, error) {
 	if m.snapshot.Terminal && event.Type != EventStopCompleted {
 		return m.snapshot.Clone(), m.transitionError(event, "application shutdown is already in progress")
 	}
@@ -311,12 +329,17 @@ func (m *Machine) applyLocked(event Event) error {
 		pairing := *snapshot.Pairing
 		pairing.Status = PairingApproved
 		snapshot.Pairing = &pairing
+		snapshot.State = StateConnecting
+		snapshot.Docker.State = ServiceStarting
+		snapshot.Sync.State = ServiceStarting
 	case EventPairingRejected, EventPairingCancelled, EventPairingExpired:
-		if snapshot.State != StatePairing && snapshot.State != StatePairingCancellationPending || snapshot.Pairing == nil {
+		if snapshot.State != StatePairing && snapshot.State != StatePairingCancellationPending && snapshot.State != StateConnecting || snapshot.Pairing == nil {
 			return m.transitionError(event, "no pairing request exists")
 		}
 		cancellationPending := snapshot.State == StatePairingCancellationPending
 		snapshot.Pairing = nil
+		snapshot.Docker = DockerStatus{State: ServiceStopped}
+		snapshot.Sync = SyncStatus{State: ServiceStopped}
 		if snapshot.Problem != nil {
 			snapshot.State = StateNeedsAction
 		} else if cancellationPending {
@@ -332,7 +355,7 @@ func (m *Machine) applyLocked(event Event) error {
 			m.pairingCancellationFrom = ""
 		}
 	case EventPairingCompleted:
-		if snapshot.State != StatePairing || snapshot.Pairing == nil || snapshot.Pairing.Status != PairingApproved || event.Peer == nil || event.Peer.ID == "" {
+		if snapshot.State != StateConnecting || snapshot.Pairing == nil || snapshot.Pairing.Status != PairingApproved || event.Peer == nil || event.Peer.ID == "" {
 			return m.transitionError(event, "approved pairing metadata is unavailable")
 		}
 		peer := *event.Peer
@@ -467,6 +490,7 @@ func (m *Machine) applyLocked(event Event) error {
 		}
 		snapshot.Peer = nil
 		snapshot.TrustedPeers = 0
+		snapshot.LastDisconnect = nil
 		snapshot.ActionInProgress = false
 		m.forgetting = false
 		if snapshot.Problem != nil {
@@ -491,14 +515,14 @@ func (m *Machine) applyLocked(event Event) error {
 			if snapshot.State != StateNeedsAction {
 				m.problemFrom = snapshot.State
 			}
-		} else if snapshot.State != StatePairing && snapshot.State != StatePairingCancellationPending {
+		} else if snapshot.Pairing == nil && snapshot.State != StatePairingCancellationPending {
 			if snapshot.State != StateNeedsAction {
 				m.problemFrom = snapshot.State
 			}
 			snapshot.State = StateNeedsAction
 		}
 	case EventProblemCleared:
-		if snapshot.Problem == nil || snapshot.State != StateNeedsAction && snapshot.State != StatePairing && snapshot.State != StatePairingCancellationPending {
+		if snapshot.Problem == nil || snapshot.State != StateNeedsAction && snapshot.Pairing == nil && snapshot.State != StatePairingCancellationPending {
 			return m.transitionError(event, "no problem is active")
 		}
 		snapshot.Problem = nil

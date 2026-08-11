@@ -53,7 +53,7 @@ func newLocalSyncthingRuntime(options localSyncthingOptions) *localSyncthingRunt
 		options.HTTPClient = &http.Client{Timeout: agentProbeTimeout}
 	}
 	if options.ConfigTransactions == nil {
-		options.ConfigTransactions = &configTransactions{}
+		options.ConfigTransactions = newConfigTransactions(options.Store.Path)
 	}
 	return &localSyncthingRuntime{options: options}
 }
