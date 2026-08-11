@@ -254,6 +254,11 @@ func (s *Server) Reject(sessionID string) error {
 // ServeHTTP accepts the one confirmation request that completes pairing.
 func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Content-Type", "application/json")
+	response.Header().Set(protocolVersionHeader, CurrentProtocolVersion)
+	if request.Header.Get(protocolVersionHeader) != CurrentProtocolVersion {
+		writeError(response, http.StatusUpgradeRequired, "pairing protocol upgrade required; update Remote Docker on both devices")
+		return
+	}
 	if request.URL.Path == pairInfoPath {
 		s.serveInfo(response, request)
 		return

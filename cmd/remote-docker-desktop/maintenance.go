@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"time"
 
 	"github.com/Dmitbd/remote-docker/internal/credentials"
 	"github.com/Dmitbd/remote-docker/internal/localapi"
@@ -65,9 +66,10 @@ func productionMaintenanceDependencies() maintenanceDependencies {
 			return err
 		},
 		shutdownDesktop: func(ctx context.Context) error {
-			var result map[string]any
-			_ = (localapi.Client{}).Call(ctx, localapi.MethodShutdown, nil, &result)
-			return nil
+			return stopLegacyWindowsDesktop(ctx, 50*time.Millisecond, func(callCtx context.Context, method localapi.Method) error {
+				var result map[string]any
+				return (localapi.Client{}).Call(callCtx, method, nil, &result)
+			})
 		},
 	}
 }

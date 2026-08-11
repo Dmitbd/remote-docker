@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/Dmitbd/remote-docker/internal/config"
 )
 
 func TestStateLockSerializesProcesses(t *testing.T) {
@@ -72,6 +74,67 @@ func TestStateLockHelper(t *testing.T) {
 	}
 }
 
+func TestCompletionLeaseCoordinatesIndependentProcesses(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.json")
+	generation := "pairing-generation"
+	now := time.Now().UTC()
+	store := config.Store{Path: path}
+	if err := store.Save(config.Config{
+		SchemaVersion: config.CurrentSchemaVersion,
+		PendingRevocations: map[string]config.PendingRevocation{generation: {
+			Generation: generation, SessionID: "pairing-session",
+			CompletionLeaseToken:     "first-process-token",
+			CompletionLeaseExpiresAt: now.Add(time.Minute).Format(time.RFC3339Nano),
+			Device:                   config.Device{ClientDeviceID: "LOCAL-SYNC"},
+		}},
+	}); err != nil {
+		t.Fatalf("seed completion lease: %v", err)
+	}
+
+	live := completionLeaseHelperCommand(t, path, generation, now, false)
+	if output, err := live.CombinedOutput(); err != nil {
+		t.Fatalf("second process touched live completion lease: %v\n%s", err, output)
+	}
+	cfg, err := store.Load()
+	if err != nil || cfg.PendingRevocations[generation].CleanupRequested {
+		t.Fatalf("live lease after second process = %#v error=%v", cfg.PendingRevocations[generation], err)
+	}
+
+	afterCrash := completionLeaseHelperCommand(t, path, generation, now.Add(2*time.Minute), true)
+	if output, err := afterCrash.CombinedOutput(); err != nil {
+		t.Fatalf("second process did not recover expired completion lease: %v\n%s", err, output)
+	}
+	cfg, err = store.Load()
+	if err != nil || !cfg.PendingRevocations[generation].CleanupRequested {
+		t.Fatalf("expired lease after recovery = %#v error=%v", cfg.PendingRevocations[generation], err)
+	}
+}
+
+func TestCompletionLeaseProcessHelper(t *testing.T) {
+	if os.Getenv("REMOTE_DOCKER_COMPLETION_LEASE_HELPER") != "1" {
+		t.Skip("helper process")
+	}
+	now, err := time.Parse(time.RFC3339Nano, os.Getenv("REMOTE_DOCKER_COMPLETION_LEASE_NOW"))
+	if err != nil {
+		t.Fatalf("parse helper clock: %v", err)
+	}
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Store: config.Store{Path: os.Getenv("REMOTE_DOCKER_COMPLETION_LEASE_CONFIG")},
+		Now:   func() time.Time { return now },
+	})
+	active, err := coordinator.activatePendingCleanupIfAbandoned(
+		context.Background(), os.Getenv("REMOTE_DOCKER_COMPLETION_LEASE_GENERATION"),
+	)
+	if err != nil {
+		t.Fatalf("activate completion cleanup: %v", err)
+	}
+	wantActive := os.Getenv("REMOTE_DOCKER_COMPLETION_LEASE_ACTIVE") == "1"
+	if active != wantActive {
+		t.Fatalf("cleanup active=%t, want %t", active, wantActive)
+	}
+}
+
 func dockerContextLockHelperCommand(t *testing.T, lockPath, readyPath, releasePath string) *exec.Cmd {
 	t.Helper()
 	command := exec.Command(os.Args[0], "-test.run=^TestStateLockHelper$", "-test.v")
@@ -80,6 +143,23 @@ func dockerContextLockHelperCommand(t *testing.T, lockPath, readyPath, releasePa
 		"REMOTE_DOCKER_LOCK_PATH="+lockPath,
 		"REMOTE_DOCKER_LOCK_READY="+readyPath,
 		"REMOTE_DOCKER_LOCK_RELEASE="+releasePath,
+	)
+	return command
+}
+
+func completionLeaseHelperCommand(t *testing.T, configPath, generation string, now time.Time, wantActive bool) *exec.Cmd {
+	t.Helper()
+	active := "0"
+	if wantActive {
+		active = "1"
+	}
+	command := exec.Command(os.Args[0], "-test.run=^TestCompletionLeaseProcessHelper$", "-test.v")
+	command.Env = append(os.Environ(),
+		"REMOTE_DOCKER_COMPLETION_LEASE_HELPER=1",
+		"REMOTE_DOCKER_COMPLETION_LEASE_CONFIG="+configPath,
+		"REMOTE_DOCKER_COMPLETION_LEASE_GENERATION="+generation,
+		"REMOTE_DOCKER_COMPLETION_LEASE_NOW="+now.Format(time.RFC3339Nano),
+		"REMOTE_DOCKER_COMPLETION_LEASE_ACTIVE="+active,
 	)
 	return command
 }

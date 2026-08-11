@@ -146,6 +146,27 @@ func TestProductionAgentRuntimeServesPersistedStateOverLocalSocket(t *testing.T)
 	}
 }
 
+func TestUpgradeConfigPersistsCurrentSchemaUnderStateLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"schemaVersion":5,"workspaces":{"saved":{"path":"/tmp/saved"}}}`), 0o600); err != nil {
+		t.Fatalf("seed schema v5 config: %v", err)
+	}
+	if err := UpgradeConfig(context.Background(), path); err != nil {
+		t.Fatalf("UpgradeConfig() error = %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read upgraded config: %v", err)
+	}
+	if !bytes.Contains(raw, []byte(`"schemaVersion": 6`)) {
+		t.Fatalf("upgraded config = %s", raw)
+	}
+	cfg, err := (config.Store{Path: path}).Load()
+	if err != nil || cfg.Workspaces["saved"].Path != "/tmp/saved" {
+		t.Fatalf("upgraded config lost state: %#v error=%v", cfg, err)
+	}
+}
+
 func TestAgentRuntimeRunInvokesBoundedStartupRecoveryOnce(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	restorer := newInfrastructureRestorer(func(context.Context) (portrelay.Reconciler, error) {
@@ -1530,10 +1551,13 @@ func TestPendingCompletionJournalIsNotRevokedUntilItsLeaseEnds(t *testing.T) {
 	root := t.TempDir()
 	store := config.Store{Path: filepath.Join(root, "config.json")}
 	deviceID := "windows-peer"
+	now := time.Now().UTC()
 	if err := store.Save(config.Config{
 		SchemaVersion: config.CurrentSchemaVersion,
 		PendingRevocations: map[string]config.PendingRevocation{deviceID: {
-			SessionID: "session-1", Device: config.Device{ClientDeviceID: "LOCAL-SYNC"},
+			SessionID: "session-1", CompletionLeaseToken: "completion-owner",
+			CompletionLeaseExpiresAt: now.Add(time.Minute).Format(time.RFC3339Nano),
+			Device:                   config.Device{ClientDeviceID: "LOCAL-SYNC"},
 		}},
 	}); err != nil {
 		t.Fatalf("seed completion journal: %v", err)
@@ -1545,17 +1569,17 @@ func TestPendingCompletionJournalIsNotRevokedUntilItsLeaseEnds(t *testing.T) {
 	transport := &runtimePairingTransport{}
 	coordinator := newMacPairingCoordinator(macPairingOptions{
 		Store: store, Secrets: secrets, Transport: transport,
+		Now:           func() time.Time { return now },
 		SSHConfigPath: filepath.Join(root, "ssh_config"), ManagedSSHRoot: testManagedSSHRoot(t, root),
 		KnownHostsPath: filepath.Join(root, "known_hosts"),
 	})
-	coordinator.completingSession = "session-1"
 	if err := coordinator.ReconcilePendingRevocations(context.Background()); err != nil {
 		t.Fatalf("ReconcilePendingRevocations() with live lease error = %v", err)
 	}
 	if transport.revokeCalls != 0 {
 		t.Fatalf("live completion was revoked: calls=%d", transport.revokeCalls)
 	}
-	coordinator.completingSession = ""
+	now = now.Add(2 * time.Minute)
 	if err := coordinator.ReconcilePendingRevocations(context.Background()); err != nil {
 		t.Fatalf("ReconcilePendingRevocations() after restart error = %v", err)
 	}
@@ -1564,14 +1588,162 @@ func TestPendingCompletionJournalIsNotRevokedUntilItsLeaseEnds(t *testing.T) {
 	}
 }
 
+func TestDurableCompletionLeaseProtectsCommitFromSecondProcess(t *testing.T) {
+	root := t.TempDir()
+	store := config.Store{Path: filepath.Join(root, "config.json")}
+	secrets := credentials.NewMemoryStore()
+	transport := &blockingConfirmPairingTransport{
+		runtimePairingTransport: &runtimePairingTransport{hostKey: testAuthorizedKey(t)},
+		started:                 make(chan struct{}), release: make(chan struct{}),
+	}
+	options := macPairingOptions{
+		Store: store, Secrets: secrets, Transport: transport, Docker: &runtimeDockerExecutor{},
+		DockerCLI: "docker-real", DockerContext: "remote-docker",
+		ClientDeviceID: func(context.Context) (string, error) { return "LOCAL-SYNC", nil },
+		SSHConfigPath:  filepath.Join(root, "ssh_config"), ManagedSSHRoot: testManagedSSHRoot(t, root),
+		KnownHostsPath: filepath.Join(root, "known_hosts"), AgentSocketPath: filepath.Join(root, "ssh-agent.sock"),
+		ControlDir: filepath.Join(root, "control"),
+	}
+	first := newMacPairingCoordinator(options)
+	started, err := first.Start(context.Background(), "windows-peer")
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	statusDone := make(chan error, 1)
+	go func() {
+		_, err := first.Status(context.Background(), started.SessionID)
+		statusDone <- err
+	}()
+	waitForTestSignal(t, transport.started, "pairing confirmation")
+	secondOptions := options
+	secondOptions.ConfigTransactions = newConfigTransactions(store.Path)
+	second := newMacPairingCoordinator(secondOptions)
+	if err := second.ReconcilePendingRevocations(context.Background()); err != nil {
+		t.Fatalf("second-process reconcile: %v", err)
+	}
+	if transport.revokeCalls != 0 {
+		t.Fatalf("second process revoked live completion: calls=%d", transport.revokeCalls)
+	}
+	close(transport.release)
+	if err := waitForTestError(t, statusDone, "pairing completion"); err != nil {
+		t.Fatalf("pairing completion: %v", err)
+	}
+	cfg, err := store.Load()
+	if err != nil || cfg.ActiveDevice == "" || len(cfg.PendingRevocations) != 0 {
+		t.Fatalf("completed config = %#v error=%v", cfg, err)
+	}
+}
+
+func TestMacPairingReportsProtocolUpgradeGate(t *testing.T) {
+	transport := &runtimePairingTransport{bootstrapErr: pairing.ErrProtocolUpgradeRequired}
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Store:   config.Store{Path: filepath.Join(t.TempDir(), "config.json")},
+		Secrets: credentials.NewMemoryStore(), Transport: transport, Docker: &runtimeDockerExecutor{},
+		ClientDeviceID: func(context.Context) (string, error) { return "LOCAL-SYNC", nil },
+	})
+	_, err := coordinator.Start(context.Background(), "windows-peer")
+	var publicErr *localapi.PublicError
+	if !errors.As(err, &publicErr) || publicErr.Code != localapi.ErrorNeedsAction ||
+		!strings.Contains(strings.ToLower(publicErr.Message), "update remote docker") {
+		t.Fatalf("protocol mismatch error = %#v, want clear update gate", err)
+	}
+}
+
+func TestMacPairingDiscoveryReportsProtocolUpgradeGate(t *testing.T) {
+	transport := discoveryPairingTransport{
+		discover: func(context.Context) ([]discovery.Peer, error) {
+			return []discovery.Peer{{
+				InstanceID: "old-windows", DeviceID: "old-windows", Pairing: true, Port: tunnel.TunnelPort,
+				Addresses: []net.IP{net.ParseIP("192.168.1.20")},
+			}}, nil
+		},
+		inspect: func(context.Context, string, string) (pairing.Info, error) {
+			return pairing.Info{}, pairing.ErrProtocolUpgradeRequired
+		},
+	}
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Store: config.Store{Path: filepath.Join(t.TempDir(), "config.json")}, Transport: transport,
+	})
+	_, err := coordinator.Candidates(context.Background())
+	var publicErr *localapi.PublicError
+	if !errors.As(err, &publicErr) || publicErr.Code != localapi.ErrorNeedsAction ||
+		!strings.Contains(strings.ToLower(publicErr.Message), "update remote docker") {
+		t.Fatalf("protocol discovery mismatch error = %#v, want clear update gate", err)
+	}
+}
+
+func TestMacPairingDiscoveryKeepsCompatiblePeerBesideOldPeer(t *testing.T) {
+	transport := discoveryPairingTransport{
+		discover: func(context.Context) ([]discovery.Peer, error) {
+			return []discovery.Peer{
+				{InstanceID: "old-windows", DeviceID: "old-windows", Pairing: true, Port: tunnel.TunnelPort, Addresses: []net.IP{net.ParseIP("192.168.1.20")}},
+				{InstanceID: "new-windows", DeviceID: "new-windows", Pairing: true, Port: tunnel.TunnelPort, Addresses: []net.IP{net.ParseIP("192.168.1.21")}},
+			}, nil
+		},
+		inspect: func(_ context.Context, endpoint, instanceID string) (pairing.Info, error) {
+			if instanceID == "old-windows" {
+				return pairing.Info{}, pairing.ErrProtocolUpgradeRequired
+			}
+			return pairing.Info{InstanceID: instanceID, DisplayName: "Current Windows"}, nil
+		},
+	}
+	targets, err := transport.Candidates(context.Background())
+	if err != nil || len(targets) != 1 || targets[0].InstanceID != "new-windows" {
+		t.Fatalf("mixed-version discovery targets=%#v error=%v", targets, err)
+	}
+}
+
+func TestExpiredDurableCompletionLeaseResumesCleanupAfterCrash(t *testing.T) {
+	root := t.TempDir()
+	store := config.Store{Path: filepath.Join(root, "config.json")}
+	secrets := credentials.NewMemoryStore()
+	now := time.Now().UTC()
+	generation := "generation-crashed"
+	owner := "owner-crashed"
+	if err := store.Save(config.Config{
+		SchemaVersion: config.CurrentSchemaVersion,
+		PendingRevocations: map[string]config.PendingRevocation{generation: {
+			Generation: generation, SessionID: "session-crashed",
+			CompletionLeaseToken:     "dead-process",
+			CompletionLeaseExpiresAt: now.Add(-time.Second).Format(time.RFC3339Nano),
+			DockerRestored:           true, LocalCleaned: true,
+			Device: config.Device{
+				ClientDeviceID: "LOCAL-SYNC", PairingGeneration: generation, RevocationCredentialOwner: owner,
+			},
+		}},
+	}); err != nil {
+		t.Fatalf("seed crashed completion: %v", err)
+	}
+	if err := secrets.Put(owner, revocationProofCredential, bytes.Repeat([]byte{5}, pairing.RevocationProofSize)); err != nil {
+		t.Fatalf("seed proof: %v", err)
+	}
+	transport := &runtimePairingTransport{}
+	restarted := newMacPairingCoordinator(macPairingOptions{
+		Store: store, ConfigTransactions: newConfigTransactions(store.Path), Secrets: secrets, Transport: transport,
+		Now: func() time.Time { return now },
+	})
+	if err := restarted.ReconcilePendingRevocations(context.Background()); err != nil {
+		t.Fatalf("recover expired completion lease: %v", err)
+	}
+	if transport.revokeCalls != 1 {
+		t.Fatalf("remote revoke calls after crash = %d, want 1", transport.revokeCalls)
+	}
+	cfg, err := store.Load()
+	if err != nil || len(cfg.PendingRevocations) != 0 {
+		t.Fatalf("cleanup after expired completion lease = %#v error=%v", cfg.PendingRevocations, err)
+	}
+}
+
 func TestMacPairingPublishesRollbackJournalWithLiveLease(t *testing.T) {
 	root := t.TempDir()
 	store := config.Store{Path: filepath.Join(root, "config.json")}
 	proofOwner := "pairing-session-session-1"
+	now := time.Now().UTC()
 	if err := store.Save(config.Config{
 		SchemaVersion: config.CurrentSchemaVersion,
 		PendingRevocations: map[string]config.PendingRevocation{"generation-1": {
-			SessionID: "session-1", Device: config.Device{
+			SessionID: "session-1", CompletionLeaseToken: "starting-owner",
+			CompletionLeaseExpiresAt: now.Add(time.Minute).Format(time.RFC3339Nano), Device: config.Device{
 				ClientDeviceID: "LOCAL-SYNC", RevocationCredentialOwner: proofOwner,
 			},
 		}},
@@ -1586,9 +1758,9 @@ func TestMacPairingPublishesRollbackJournalWithLiveLease(t *testing.T) {
 	coordinator := newMacPairingCoordinator(macPairingOptions{
 		Store: store, Secrets: secrets, Transport: transport,
 		Docker:         &runtimeDockerExecutor{},
+		Now:            func() time.Time { return now },
 		ClientDeviceID: func(context.Context) (string, error) { return "LOCAL-SYNC", nil },
 	})
-	coordinator.starting = true
 	if err := coordinator.ReconcilePendingRevocations(context.Background()); err != nil {
 		t.Fatalf("ReconcilePendingRevocations() error = %v", err)
 	}
@@ -2602,7 +2774,7 @@ func TestMacPairingRemovesExactCreatedContextWhenLocalCommitFails(t *testing.T) 
 		ControlDir:      filepath.Join(root, "control"),
 		SaveConfig: func(cfg config.Config) error {
 			saves++
-			if saves == 4 {
+			if saves == 5 {
 				return errors.New("injected local commit failure")
 			}
 			return (config.Store{Path: filepath.Join(root, "config.json")}).Save(cfg)
@@ -2980,6 +3152,7 @@ type runtimePairingTransport struct {
 	cancelCalls       int
 	cancelCtxErr      error
 	bootstrapCalls    int
+	bootstrapErr      error
 	invalidDescriptor bool
 	afterBootstrap    func()
 	events            []string
@@ -3007,6 +3180,31 @@ type blockingBootstrapPairingTransport struct {
 	started chan struct{}
 	release chan struct{}
 	calls   int
+}
+
+type blockingConfirmPairingTransport struct {
+	*runtimePairingTransport
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (t *blockingConfirmPairingTransport) Confirm(
+	ctx context.Context,
+	target pairingTarget,
+	descriptor pairing.SessionDescriptor,
+	clientDeviceID, generation, authorizedKey, code string,
+	revocationProof []byte,
+) (pairing.DeviceRecord, error) {
+	t.once.Do(func() { close(t.started) })
+	select {
+	case <-t.release:
+		return t.runtimePairingTransport.Confirm(
+			ctx, target, descriptor, clientDeviceID, generation, authorizedKey, code, revocationProof,
+		)
+	case <-ctx.Done():
+		return pairing.DeviceRecord{}, ctx.Err()
+	}
 }
 
 func (t *blockingBootstrapPairingTransport) Bootstrap(ctx context.Context, selector string, key ed25519.PublicKey) (pairingTarget, pairing.SessionDescriptor, error) {
@@ -3143,6 +3341,9 @@ func (t *runtimePairingTransport) Candidates(context.Context) ([]pairingTarget, 
 func (t *runtimePairingTransport) Bootstrap(_ context.Context, _ string, clientPublicKey ed25519.PublicKey) (pairingTarget, pairing.SessionDescriptor, error) {
 	t.bootstrapCalls++
 	t.events = append(t.events, "bootstrap")
+	if t.bootstrapErr != nil {
+		return pairingTarget{}, pairing.SessionDescriptor{}, t.bootstrapErr
+	}
 	serverPublic, serverPrivate, _ := ed25519.GenerateKey(nil)
 	t.private = serverPrivate
 	descriptor := pairing.SessionDescriptor{

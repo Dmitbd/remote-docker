@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -155,6 +156,98 @@ func TestPairingBootstrapOverTLSBindsClientAndServerKeys(t *testing.T) {
 	assertHTTPStatus(t, err, http.StatusConflict)
 }
 
+func TestNewMacRejectsOldWindowsPairingProtocol(t *testing.T) {
+	identity := newServerIdentity(t)
+	oldWindows := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		var oldRequest struct {
+			SessionID       string `json:"session_id"`
+			Code            string `json:"code"`
+			ClientPublicKey []byte `json:"client_public_key"`
+			DeviceID        string `json:"device_id"`
+			AuthorizedKey   string `json:"authorized_key"`
+			RevocationProof []byte `json:"revocation_proof,omitempty"`
+		}
+		decoder := json.NewDecoder(request.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&oldRequest); err != nil {
+			response.WriteHeader(http.StatusBadRequest)
+			_, _ = response.Write([]byte(`{"error":"invalid pairing request"}`))
+			return
+		}
+		response.WriteHeader(http.StatusOK)
+	})
+	httpServer := newPairingTLSHandlerTestServer(t, identity, oldWindows)
+	defer httpServer.Close()
+	clientPublicKey, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey(client) error = %v", err)
+	}
+	descriptor := SessionDescriptor{
+		ID: "0123456789abcdef0123456789abcdef", Nonce: bytes.Repeat([]byte{1}, 32),
+		ServerPublicKey: identity.PublicKey(), ClientPublicKey: clientPublicKey,
+		ExpiresAt: time.Now().Add(time.Minute),
+	}
+	client := Client{
+		BaseURL: httpServer.URL, Session: descriptor, HTTPClient: NewPinnedHTTPClient(identity.PublicKey(), nil),
+		DeviceID: "mac-new", Generation: "generation-new", AuthorizedKey: "ssh-ed25519 KEY",
+	}
+	code, err := client.Code()
+	if err != nil {
+		t.Fatalf("Code() error = %v", err)
+	}
+	_, _, err = client.Confirm(context.Background(), code)
+	if !errors.Is(err, ErrProtocolUpgradeRequired) {
+		t.Fatalf("new Mac / old Windows error = %v, want upgrade gate", err)
+	}
+}
+
+func TestNewWindowsRejectsOldMacPairingProtocol(t *testing.T) {
+	identity := newServerIdentity(t)
+	server, err := NewServer(identity)
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	clientPublicKey, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey(client) error = %v", err)
+	}
+	descriptor, err := server.StartSession(clientPublicKey, MaxSessionTTL)
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+	if err := server.Approve(descriptor.ID); err != nil {
+		t.Fatalf("Approve() error = %v", err)
+	}
+	httpServer := newPairingTLSTestServer(t, server)
+	defer httpServer.Close()
+	code, _ := Code(descriptor)
+	payload, err := json.Marshal(struct {
+		SessionID       string `json:"session_id"`
+		Code            string `json:"code"`
+		ClientPublicKey []byte `json:"client_public_key"`
+		DeviceID        string `json:"device_id"`
+		AuthorizedKey   string `json:"authorized_key"`
+	}{descriptor.ID, code, clientPublicKey, "old-mac", "ssh-ed25519 KEY"})
+	if err != nil {
+		t.Fatalf("encode old request: %v", err)
+	}
+	request, err := http.NewRequest(http.MethodPost, httpServer.URL+pairPath, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("create old request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := NewPinnedHTTPClient(identity.PublicKey(), nil).Do(request)
+	if err != nil {
+		t.Fatalf("old Mac request: %v", err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	if response.StatusCode != http.StatusUpgradeRequired || !bytes.Contains(bytes.ToLower(body), []byte("upgrade")) {
+		t.Fatalf("old Mac / new Windows status=%d body=%s", response.StatusCode, body)
+	}
+}
+
 func TestPairingBootstrapRejectsWhenTrustedPeerAlreadyExists(t *testing.T) {
 	server, err := NewServer(newServerIdentity(t), WithSessionGuard(func(context.Context) error {
 		return errors.New("trusted peer exists")
@@ -244,6 +337,7 @@ func TestPairingInfoEndpointRejectsBodiesAndNonGETMethods(t *testing.T) {
 		httptest.NewRequest(http.MethodPost, pairInfoPath, nil),
 		httptest.NewRequest(http.MethodGet, pairInfoPath, strings.NewReader("unexpected")),
 	} {
+		request.Header.Set(protocolVersionHeader, CurrentProtocolVersion)
 		response := httptest.NewRecorder()
 		server.ServeHTTP(response, request)
 		if response.Code == http.StatusOK {
@@ -627,6 +721,29 @@ func newPairingTLSTestServer(t *testing.T, server *Server) *httptest.Server {
 	tlsConfig.GetCertificate = nil
 	tlsConfig.Certificates = []tls.Certificate{*certificate}
 	httpServer := httptest.NewUnstartedServer(server)
+	httpServer.TLS = tlsConfig
+	httpServer.StartTLS()
+	return httpServer
+}
+
+func newPairingTLSHandlerTestServer(t *testing.T, identity ServerIdentity, handler http.Handler) *httptest.Server {
+	t.Helper()
+	server, err := NewServer(identity)
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	tlsConfig, err := server.TLSConfig()
+	if err != nil {
+		t.Fatalf("TLSConfig() error = %v", err)
+	}
+	certificate, err := tlsConfig.GetCertificate(&tls.ClientHelloInfo{})
+	if err != nil {
+		t.Fatalf("GetCertificate() error = %v", err)
+	}
+	tlsConfig = tlsConfig.Clone()
+	tlsConfig.GetCertificate = nil
+	tlsConfig.Certificates = []tls.Certificate{*certificate}
+	httpServer := httptest.NewUnstartedServer(handler)
 	httpServer.TLS = tlsConfig
 	httpServer.StartTLS()
 	return httpServer

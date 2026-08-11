@@ -83,17 +83,18 @@ type macPairingOptions struct {
 }
 
 type pendingPairing struct {
-	target          pairingTarget
-	descriptor      pairing.SessionDescriptor
-	clientDeviceID  string
-	authorizedKey   string
-	privateKeyPEM   []byte
-	tunnelIdentity  []byte
-	revocationProof []byte
-	revocationOwner string
-	cleanupID       string
-	completing      bool
-	record          *pairing.DeviceRecord
+	target               pairingTarget
+	descriptor           pairing.SessionDescriptor
+	clientDeviceID       string
+	authorizedKey        string
+	privateKeyPEM        []byte
+	tunnelIdentity       []byte
+	revocationProof      []byte
+	revocationOwner      string
+	cleanupID            string
+	completionLeaseToken string
+	completing           bool
+	record               *pairing.DeviceRecord
 }
 
 type pendingCancellation struct {
@@ -102,14 +103,13 @@ type pendingCancellation struct {
 }
 
 type macPairingCoordinator struct {
-	options           macPairingOptions
-	mu                sync.Mutex
-	artifactsMu       sync.Mutex
-	pending           *pendingPairing
-	cancellation      *pendingCancellation
-	starting          bool
-	completingSession string
-	cleanupCursor     string
+	options       macPairingOptions
+	mu            sync.Mutex
+	artifactsMu   sync.Mutex
+	pending       *pendingPairing
+	cancellation  *pendingCancellation
+	starting      bool
+	cleanupCursor string
 }
 
 func newMacPairingCoordinator(options macPairingOptions) *macPairingCoordinator {
@@ -172,6 +172,9 @@ func (c *macPairingCoordinator) Candidates(ctx context.Context) (localapi.PairCa
 	}
 	targets, err := c.options.Transport.Candidates(ctx)
 	if err != nil {
+		if errors.Is(err, pairing.ErrProtocolUpgradeRequired) {
+			return localapi.PairCandidatesResult{}, needsAction("update Remote Docker on both Mac and Windows before pairing")
+		}
 		if hasTrustedDevice {
 			return result, nil
 		}
@@ -286,6 +289,9 @@ func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (loc
 		clearSecret(privateKeyPEM)
 		clearSecret(tunnelIdentity)
 		clearSecret(revocationProof)
+		if errors.Is(err, pairing.ErrProtocolUpgradeRequired) {
+			return localapi.PairStartResult{}, needsAction("update Remote Docker on both Mac and Windows before pairing")
+		}
 		return localapi.PairStartResult{}, unavailable("cannot start private-LAN pairing session")
 	}
 	code, err := pairing.Code(descriptor)
@@ -307,6 +313,12 @@ func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (loc
 		_ = c.cancelDetached(target, descriptor)
 		return localapi.PairStartResult{}, unavailable("cannot create pairing generation")
 	}
+	completionLeaseToken, err := randomDeviceID()
+	if err != nil {
+		clearPendingSecrets(&pendingPairing{privateKeyPEM: privateKeyPEM, tunnelIdentity: tunnelIdentity, revocationProof: revocationProof})
+		_ = c.cancelDetached(target, descriptor)
+		return localapi.PairStartResult{}, unavailable("cannot create pairing completion lease")
+	}
 	revocationOwner := "pairing-generation-" + cleanupID
 	journalDevice := config.Device{
 		Name: target.Name, Address: target.Address, ClientDeviceID: clientDeviceID,
@@ -321,6 +333,8 @@ func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (loc
 	}
 	if err := c.persistPendingRevocation(ctx, cleanupID, config.PendingRevocation{
 		Device: journalDevice, Generation: cleanupID, SessionID: descriptor.ID,
+		CompletionLeaseToken:     completionLeaseToken,
+		CompletionLeaseExpiresAt: c.completionLeaseDeadline(descriptor.ExpiresAt).Format(time.RFC3339Nano),
 	}); err != nil {
 		_ = c.options.Secrets.Delete(revocationOwner, revocationProofCredential)
 		clearPendingSecrets(&pendingPairing{privateKeyPEM: privateKeyPEM, tunnelIdentity: tunnelIdentity, revocationProof: revocationProof})
@@ -332,6 +346,7 @@ func (c *macPairingCoordinator) Start(ctx context.Context, selector string) (loc
 		authorizedKey: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPublicKey))),
 		privateKeyPEM: privateKeyPEM, tunnelIdentity: tunnelIdentity,
 		revocationProof: revocationProof, revocationOwner: revocationOwner, cleanupID: cleanupID,
+		completionLeaseToken: completionLeaseToken,
 	}
 	c.mu.Lock()
 	c.pending = pending
@@ -412,15 +427,15 @@ func (c *macPairingCoordinator) readStatus(ctx context.Context, sessionID string
 		return result, nil
 	}
 	c.pending.completing = true
-	c.completingSession = sessionID
 	c.mu.Unlock()
-	defer func() {
+	if err := c.renewCompletionLease(ctx, pending.cleanupID, pending.completionLeaseToken); err != nil {
 		c.mu.Lock()
-		if c.completingSession == sessionID {
-			c.completingSession = ""
+		if c.pending != nil && c.pending.descriptor.ID == sessionID {
+			c.pending.completing = false
 		}
 		c.mu.Unlock()
-	}()
+		return localapi.PairingStatusResult{}, err
+	}
 	device, err := c.complete(ctx, sessionID, pending)
 	if err != nil {
 		c.mu.Lock()
@@ -459,6 +474,9 @@ func (c *macPairingCoordinator) complete(ctx context.Context, sessionID string, 
 			ctx, pending.target, pending.descriptor, pending.clientDeviceID, pending.cleanupID, pending.authorizedKey, wantCode, pending.revocationProof,
 		)
 		if err != nil {
+			if errors.Is(err, pairing.ErrProtocolUpgradeRequired) {
+				return fail(needsAction("update Remote Docker on both Mac and Windows before pairing"), dockercli.ContextChange{})
+			}
 			return fail(unavailable("pairing confirmation failed"), dockercli.ContextChange{})
 		}
 		c.mu.Lock()
@@ -1161,7 +1179,75 @@ func (c *macPairingCoordinator) updatePendingContextLocked(deviceID string, chan
 func (c *macPairingCoordinator) requestPendingCleanup(deviceID string) error {
 	return c.updatePendingRevocation(deviceID, func(pending *config.PendingRevocation) {
 		pending.CleanupRequested = true
+		pending.CompletionLeaseToken = ""
+		pending.CompletionLeaseExpiresAt = ""
 	})
+}
+
+func (c *macPairingCoordinator) completionLeaseDeadline(sessionExpiresAt time.Time) time.Time {
+	deadline := c.options.Now().UTC().Add(c.options.RemoteCleanupLease)
+	if sessionDeadline := sessionExpiresAt.UTC().Add(pairingRollbackTimeout); sessionDeadline.After(deadline) {
+		deadline = sessionDeadline
+	}
+	return deadline
+}
+
+func (c *macPairingCoordinator) renewCompletionLease(ctx context.Context, generation, token string) error {
+	if token == "" {
+		return needsAction("pairing completion lease is missing")
+	}
+	return c.options.ConfigTransactions.RunContext(ctx, func() error {
+		cfg, err := loadAgentConfig(c.options.Store)
+		if err != nil {
+			return unavailable("cannot refresh pairing completion lease")
+		}
+		pending, exists := cfg.PendingRevocations[generation]
+		if !exists || pending.CleanupRequested || pending.CompletionLeaseToken != token {
+			return needsAction("pairing completion lease is no longer active")
+		}
+		deadline := c.options.Now().UTC().Add(c.options.RemoteCleanupLease)
+		if currentDeadline, parseErr := time.Parse(time.RFC3339Nano, pending.CompletionLeaseExpiresAt); parseErr == nil && currentDeadline.After(deadline) {
+			deadline = currentDeadline
+		}
+		pending.CompletionLeaseExpiresAt = deadline.Format(time.RFC3339Nano)
+		cfg.PendingRevocations[generation] = pending
+		if err := c.options.SaveConfig(cfg); err != nil {
+			return unavailable("cannot save pairing completion lease")
+		}
+		return nil
+	})
+}
+
+func (c *macPairingCoordinator) activatePendingCleanupIfAbandoned(ctx context.Context, generation string) (bool, error) {
+	active := false
+	err := c.options.ConfigTransactions.RunContext(ctx, func() error {
+		cfg, err := loadAgentConfig(c.options.Store)
+		if err != nil {
+			return unavailable("cannot refresh pairing completion lease")
+		}
+		pending, exists := cfg.PendingRevocations[generation]
+		if !exists {
+			return nil
+		}
+		if pending.CleanupRequested {
+			active = true
+			return nil
+		}
+		expiresAt, parseErr := time.Parse(time.RFC3339Nano, pending.CompletionLeaseExpiresAt)
+		if pending.CompletionLeaseToken != "" && parseErr == nil && c.options.Now().UTC().Before(expiresAt) {
+			return nil
+		}
+		pending.CleanupRequested = true
+		pending.CompletionLeaseToken = ""
+		pending.CompletionLeaseExpiresAt = ""
+		cfg.PendingRevocations[generation] = pending
+		if err := c.options.SaveConfig(cfg); err != nil {
+			return unavailable("cannot activate abandoned pairing cleanup")
+		}
+		active = true
+		return nil
+	})
+	return active, err
 }
 
 func (c *macPairingCoordinator) ReconcilePendingRevocations(ctx context.Context) error {
@@ -1173,15 +1259,12 @@ func (c *macPairingCoordinator) ReconcilePendingRevocations(ctx context.Context)
 	var reconcileErrors []error
 	for id, pending := range cfg.PendingRevocations {
 		if !pending.CleanupRequested {
-			c.mu.Lock()
-			leased := c.starting || pending.SessionID != "" && (c.completingSession == pending.SessionID ||
-				c.pending != nil && c.pending.descriptor.ID == pending.SessionID)
-			c.mu.Unlock()
-			if leased {
+			active, err := c.activatePendingCleanupIfAbandoned(ctx, id)
+			if err != nil {
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("activate cleanup %s: %w", id, err))
 				continue
 			}
-			if err := c.requestPendingCleanup(id); err != nil {
-				reconcileErrors = append(reconcileErrors, fmt.Errorf("activate cleanup %s: %w", id, err))
+			if !active {
 				continue
 			}
 		}
@@ -1265,6 +1348,7 @@ func (t discoveryPairingTransport) Candidates(ctx context.Context) ([]pairingTar
 		return nil, err
 	}
 	targets := make([]pairingTarget, 0, len(peers))
+	var protocolErr error
 	for _, peer := range peers {
 		if len(peer.Addresses) == 0 {
 			continue
@@ -1283,7 +1367,12 @@ func (t discoveryPairingTransport) Candidates(ctx context.Context) ([]pairingTar
 		target, inspectErr := t.inspectPeer(ctx, peer, peer.Addresses)
 		if inspectErr == nil {
 			targets = append(targets, target)
+		} else if errors.Is(inspectErr, pairing.ErrProtocolUpgradeRequired) {
+			protocolErr = inspectErr
 		}
+	}
+	if len(targets) == 0 && protocolErr != nil {
+		return nil, protocolErr
 	}
 	return targets, nil
 }

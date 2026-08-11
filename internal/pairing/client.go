@@ -69,6 +69,7 @@ func Inspect(ctx context.Context, baseURL, expectedInstanceID string, httpClient
 	if err != nil {
 		return Info{}, fmt.Errorf("create pairing info request: %w", err)
 	}
+	request.Header.Set(protocolVersionHeader, CurrentProtocolVersion)
 	client := httpClient
 	if client == nil {
 		client = unverifiedTLS13Client(5 * time.Second)
@@ -84,6 +85,9 @@ func Inspect(ctx context.Context, baseURL, expectedInstanceID string, httpClient
 	}
 	if len(raw) > 4<<10 {
 		return Info{}, errors.New("pairing info response exceeds size limit")
+	}
+	if err := validateProtocolVersion(response); err != nil {
+		return Info{}, err
 	}
 	if response.StatusCode != http.StatusOK {
 		return Info{}, &HTTPError{StatusCode: response.StatusCode, Message: "pairing info unavailable"}
@@ -135,6 +139,7 @@ func Bootstrap(ctx context.Context, baseURL string, clientPublicKey ed25519.Publ
 		return SessionDescriptor{}, fmt.Errorf("create pairing session request: %w", err)
 	}
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(protocolVersionHeader, CurrentProtocolVersion)
 	client := httpClient
 	if client == nil {
 		client = unverifiedTLS13Client(15 * time.Second)
@@ -147,6 +152,9 @@ func Bootstrap(ctx context.Context, baseURL string, clientPublicKey ed25519.Publ
 	raw, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
 		return SessionDescriptor{}, fmt.Errorf("read pairing session response: %w", err)
+	}
+	if err := validateProtocolVersion(response); err != nil {
+		return SessionDescriptor{}, err
 	}
 	if response.StatusCode != http.StatusOK {
 		var body struct {
@@ -253,6 +261,7 @@ func (c *Client) Cancel(ctx context.Context) error {
 		return fmt.Errorf("create pairing cancellation request: %w", err)
 	}
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(protocolVersionHeader, CurrentProtocolVersion)
 	response, raw, err := c.doPinned(request, 16<<10)
 	if err != nil {
 		return err
@@ -292,6 +301,7 @@ func (c *Client) Confirm(ctx context.Context, code string) (DeviceRecord, []byte
 		return DeviceRecord{}, nil, fmt.Errorf("create pairing request: %w", err)
 	}
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(protocolVersionHeader, CurrentProtocolVersion)
 
 	httpClient := c.HTTPClient
 	if httpClient == nil {
@@ -305,6 +315,9 @@ func (c *Client) Confirm(ctx context.Context, code string) (DeviceRecord, []byte
 	raw, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
 		return DeviceRecord{}, nil, fmt.Errorf("read pairing response: %w", err)
+	}
+	if err := validateProtocolVersion(response); err != nil {
+		return DeviceRecord{}, raw, err
 	}
 	if response.StatusCode != http.StatusOK {
 		var body struct {
@@ -348,6 +361,7 @@ func (c *Client) Revoke(ctx context.Context, deviceID, generation string, proof 
 }
 
 func (c *Client) doPinned(request *http.Request, limit int64) (*http.Response, []byte, error) {
+	request.Header.Set(protocolVersionHeader, CurrentProtocolVersion)
 	httpClient := c.HTTPClient
 	if httpClient == nil {
 		httpClient = pinnedHTTPClient(c.Session.ServerPublicKey)
@@ -364,7 +378,17 @@ func (c *Client) doPinned(request *http.Request, limit int64) (*http.Response, [
 	if int64(len(raw)) > limit {
 		return nil, nil, errors.New("pairing session response exceeds size limit")
 	}
+	if err := validateProtocolVersion(response); err != nil {
+		return nil, raw, err
+	}
 	return response, raw, nil
+}
+
+func validateProtocolVersion(response *http.Response) error {
+	if response == nil || response.Header.Get(protocolVersionHeader) != CurrentProtocolVersion {
+		return ErrProtocolUpgradeRequired
+	}
+	return nil
 }
 
 func decodeHTTPError(statusCode int, raw []byte) error {

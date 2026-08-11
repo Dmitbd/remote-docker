@@ -15,15 +15,18 @@ import (
 
 const (
 	// MaxSessionTTL is the longest permitted pairing window.
-	MaxSessionTTL       = 120 * time.Second
-	maxAttempts         = 5
-	RevocationProofSize = 32
+	MaxSessionTTL          = 120 * time.Second
+	maxAttempts            = 5
+	RevocationProofSize    = 32
+	CurrentProtocolVersion = "2"
+	protocolVersionHeader  = "X-Remote-Docker-Pairing-Version"
 )
 
 var (
-	ErrSessionActive  = errors.New("a pairing session is already active")
-	ErrInvalidSession = errors.New("invalid pairing session")
-	ErrSessionState   = errors.New("pairing session is in a different state")
+	ErrSessionActive           = errors.New("a pairing session is already active")
+	ErrInvalidSession          = errors.New("invalid pairing session")
+	ErrSessionState            = errors.New("pairing session is in a different state")
+	ErrProtocolUpgradeRequired = errors.New("pairing requires the same current Remote Docker version on both devices")
 )
 
 // SessionState is the user-visible phase of the two-device approval flow.

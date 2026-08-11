@@ -3,13 +3,16 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/Dmitbd/remote-docker/internal/config"
+	"github.com/Dmitbd/remote-docker/internal/desktop"
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
+	"github.com/Dmitbd/remote-docker/internal/localapi"
 )
 
 func TestWaitForDesktopShutdownRequiresCompletion(t *testing.T) {
@@ -28,6 +31,97 @@ func TestWaitForDesktopShutdownRequiresCompletion(t *testing.T) {
 	if err := waitForDesktopShutdown(failed, time.Second); !errors.Is(err, wantErr) {
 		t.Fatalf("failed waitForDesktopShutdown() error = %v, want %v", err, wantErr)
 	}
+}
+
+func TestDesktopUpgradeGateStopsLegacyWriterBeforePersistingV6(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"schemaVersion":5}`), 0o600); err != nil {
+		t.Fatalf("seed schema v5 config: %v", err)
+	}
+	events := []string{}
+	lock := &recordingInstanceLock{onClose: func() { events = append(events, "unlock") }}
+	got, err := acquireDesktopUpgradeGate(context.Background(), "windows", path, desktopUpgradeDependencies{
+		acquireInstance: func(string) (desktop.InstanceLock, error) {
+			events = append(events, "lock")
+			return lock, nil
+		},
+		stopLegacy: func(context.Context) error {
+			events = append(events, "stop-legacy")
+			return nil
+		},
+		upgradeConfig: func(context.Context, string) error {
+			events = append(events, "write-v6")
+			return nil
+		},
+	})
+	if err != nil || got != lock {
+		t.Fatalf("acquireDesktopUpgradeGate() lock=%#v error=%v", got, err)
+	}
+	want := []string{"lock", "stop-legacy", "write-v6"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("upgrade gate order = %v, want %v", events, want)
+	}
+	_ = got.Close()
+}
+
+func TestDesktopUpgradeGateReleasesInstanceWhenLegacyStopFails(t *testing.T) {
+	wantErr := errors.New("legacy process did not stop")
+	closed := false
+	_, err := acquireDesktopUpgradeGate(context.Background(), "windows", filepath.Join(t.TempDir(), "config.json"), desktopUpgradeDependencies{
+		acquireInstance: func(string) (desktop.InstanceLock, error) {
+			return &recordingInstanceLock{onClose: func() { closed = true }}, nil
+		},
+		stopLegacy:    func(context.Context) error { return wantErr },
+		upgradeConfig: func(context.Context, string) error { t.Fatal("config upgraded before legacy stop"); return nil },
+	})
+	if !errors.Is(err, wantErr) || !closed {
+		t.Fatalf("upgrade gate error=%v closed=%t", err, closed)
+	}
+}
+
+func TestStopLegacyWindowsDesktopWaitsUntilLocalOwnerExits(t *testing.T) {
+	calls := []localapi.Method{}
+	statusCalls := 0
+	err := stopLegacyWindowsDesktop(context.Background(), time.Millisecond, func(_ context.Context, method localapi.Method) error {
+		calls = append(calls, method)
+		if method == localapi.MethodStatus {
+			statusCalls++
+			if statusCalls >= 3 {
+				return os.ErrNotExist
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("stopLegacyWindowsDesktop() error = %v", err)
+	}
+	want := []localapi.Method{
+		localapi.MethodStatus,
+		localapi.MethodShutdown, localapi.MethodStatus,
+		localapi.MethodShutdown, localapi.MethodStatus,
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("legacy shutdown calls = %v, want %v", calls, want)
+	}
+}
+
+func TestStopLegacyWindowsDesktopFailsClosedOnAmbiguousStatusError(t *testing.T) {
+	wantErr := context.DeadlineExceeded
+	err := stopLegacyWindowsDesktop(context.Background(), time.Millisecond, func(context.Context, localapi.Method) error {
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("ambiguous status error = %v, want fail-closed %v", err, wantErr)
+	}
+}
+
+type recordingInstanceLock struct{ onClose func() }
+
+func (l *recordingInstanceLock) Close() error {
+	if l.onClose != nil {
+		l.onClose()
+	}
+	return nil
 }
 
 func TestInitialTrustedPeerRestoresOnlyActivePublicRecord(t *testing.T) {
