@@ -1,6 +1,6 @@
 package config
 
-const CurrentSchemaVersion = 5
+const CurrentSchemaVersion = 6
 
 // Config contains non-secret application settings.
 type Config struct {
@@ -46,16 +46,18 @@ type DockerContextChange struct {
 // PendingRevocation keeps only the public cleanup metadata for a device that
 // is no longer trusted locally but still needs a best-effort remote revoke.
 type PendingRevocation struct {
-	Device           Device              `json:"device"`
-	DockerContext    DockerContextChange `json:"dockerContext,omitempty"`
-	Generation       string              `json:"generation,omitempty"`
-	SessionID        string              `json:"sessionId,omitempty"`
-	LocalDeviceID    string              `json:"localDeviceId,omitempty"`
-	CleanupRequested bool                `json:"cleanupRequested,omitempty"`
-	RemoteRevoked    bool                `json:"remoteRevoked,omitempty"`
-	DockerRestored   bool                `json:"dockerRestored,omitempty"`
-	LocalCleaned     bool                `json:"localCleaned,omitempty"`
-	Finished         bool                `json:"finished,omitempty"`
+	Device                Device              `json:"device"`
+	DockerContext         DockerContextChange `json:"dockerContext,omitempty"`
+	Generation            string              `json:"generation,omitempty"`
+	SessionID             string              `json:"sessionId,omitempty"`
+	LocalDeviceID         string              `json:"localDeviceId,omitempty"`
+	CleanupRequested      bool                `json:"cleanupRequested,omitempty"`
+	RemoteRevoked         bool                `json:"remoteRevoked,omitempty"`
+	CleanupLeaseToken     string              `json:"cleanupLeaseToken,omitempty"`
+	CleanupLeaseExpiresAt string              `json:"cleanupLeaseExpiresAt,omitempty"`
+	DockerRestored        bool                `json:"dockerRestored,omitempty"`
+	LocalCleaned          bool                `json:"localCleaned,omitempty"`
+	Finished              bool                `json:"finished,omitempty"`
 }
 
 // Workspace is the persisted public registration used by bind-mount policy.

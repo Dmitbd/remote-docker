@@ -124,7 +124,7 @@ func (r windowsPairingRegistry) Forget(deviceID string) error {
 
 func (r windowsPairingRegistry) runConfigTransaction(operation func() error) error {
 	if r.configTransactions == nil {
-		return operation()
+		return newConfigTransactions(r.store.Path).Run(operation)
 	}
 	return r.configTransactions.Run(operation)
 }

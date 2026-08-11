@@ -12,22 +12,22 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-type fileDockerContextLocker struct{ path string }
+type fileStateLocker struct{ path string }
 
-func newDockerContextLocker(path string) dockerContextLocker {
-	return fileDockerContextLocker{path: path}
+func newStateLocker(path string) stateLocker {
+	return fileStateLocker{path: path}
 }
 
-func (l fileDockerContextLocker) WithLock(ctx context.Context, operation func() error) error {
+func (l fileStateLocker) WithLock(ctx context.Context, operation func() error) error {
 	if !filepath.IsAbs(l.path) {
-		return errors.New("Docker context lock path must be absolute")
+		return errors.New("state lock path must be absolute")
 	}
 	if err := os.MkdirAll(filepath.Dir(l.path), 0o700); err != nil {
-		return errors.New("create Docker context lock directory")
+		return errors.New("create state lock directory")
 	}
 	file, err := os.OpenFile(l.path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return errors.New("open Docker context lock")
+		return errors.New("open state lock")
 	}
 	defer file.Close()
 
@@ -37,7 +37,7 @@ func (l fileDockerContextLocker) WithLock(ctx context.Context, operation func() 
 			break
 		}
 		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
-			return errors.New("acquire Docker context lock")
+			return errors.New("acquire state lock")
 		}
 		timer := time.NewTimer(10 * time.Millisecond)
 		select {

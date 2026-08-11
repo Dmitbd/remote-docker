@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-func TestDockerContextLockSerializesProcesses(t *testing.T) {
+func TestStateLockSerializesProcesses(t *testing.T) {
 	root := t.TempDir()
-	lockPath := filepath.Join(root, "docker-context.lock")
+	lockPath := filepath.Join(root, "state.lock")
 	firstReady := filepath.Join(root, "first-ready")
 	releaseFirst := filepath.Join(root, "release-first")
 	secondReady := filepath.Join(root, "second-ready")
@@ -46,14 +46,14 @@ func TestDockerContextLockSerializesProcesses(t *testing.T) {
 	waitForLockMarker(t, secondReady)
 }
 
-func TestDockerContextLockHelper(t *testing.T) {
+func TestStateLockHelper(t *testing.T) {
 	if os.Getenv("REMOTE_DOCKER_LOCK_HELPER") != "1" {
 		t.Skip("helper process")
 	}
 	lockPath := os.Getenv("REMOTE_DOCKER_LOCK_PATH")
 	readyPath := os.Getenv("REMOTE_DOCKER_LOCK_READY")
 	releasePath := os.Getenv("REMOTE_DOCKER_LOCK_RELEASE")
-	locker := newDockerContextLocker(lockPath)
+	locker := newStateLocker(lockPath)
 	if err := locker.WithLock(context.Background(), func() error {
 		if err := os.WriteFile(readyPath, []byte("ready"), 0o600); err != nil {
 			return err
@@ -74,7 +74,7 @@ func TestDockerContextLockHelper(t *testing.T) {
 
 func dockerContextLockHelperCommand(t *testing.T, lockPath, readyPath, releasePath string) *exec.Cmd {
 	t.Helper()
-	command := exec.Command(os.Args[0], "-test.run=^TestDockerContextLockHelper$", "-test.v")
+	command := exec.Command(os.Args[0], "-test.run=^TestStateLockHelper$", "-test.v")
 	command.Env = append(os.Environ(),
 		"REMOTE_DOCKER_LOCK_HELPER=1",
 		"REMOTE_DOCKER_LOCK_PATH="+lockPath,

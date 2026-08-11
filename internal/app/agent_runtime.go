@@ -131,7 +131,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 	_, knownHostsPath, agentSocketPath, controlDir := defaultRuntimePaths(configPath)
 	sshConfigPath := managedSSHRoot.SSHConfigPath()
 	store := config.Store{Path: configPath}
-	configTransactions := &configTransactions{}
+	configTransactions := newConfigTransactions(configPath)
 	secrets := credentials.NewKeyringStore()
 	dockerCLI := realDockerCLIPath(executablePath)
 	dockerEnv, err := sshtransport.ManagedDockerEnvironment(os.Environ(), dockerCLI, sshConfigPath)
@@ -1011,19 +1011,54 @@ type runtimePairingCoordinator interface {
 }
 
 type configTransactions struct {
-	mu sync.Mutex
+	mu     sync.Mutex
+	locker stateLocker
 }
 
 func (t *configTransactions) Run(operation func() error) error {
+	return t.RunContext(context.Background(), operation)
+}
+
+// RunContext serializes every config read-modify-write across both goroutines
+// and processes. Callers that also mutate pairing artifacts must always lock
+// in this order: artifacts mutex, state OS lock, in-process config mutex.
+func (t *configTransactions) RunContext(ctx context.Context, operation func() error) error {
 	if operation == nil {
 		return nil
 	}
 	if t == nil {
 		return operation()
 	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
+	run := func() error {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		return operation()
+	}
+	if t.locker == nil {
+		return run()
+	}
+	return t.locker.WithLock(ctx, run)
+}
+
+// RunLocked is only for helpers nested inside an existing RunContext. It
+// makes the non-recursive state-lock boundary explicit and prevents a second
+// acquisition of either lock.
+func (t *configTransactions) RunLocked(operation func() error) error {
+	if operation == nil {
+		return nil
+	}
 	return operation()
+}
+
+func newConfigTransactions(configPath string) *configTransactions {
+	// Reuse the original Docker transaction lock identity so older processes
+	// still serialize Docker mutations; schema v6 makes older config writers
+	// fail closed once the new state has been persisted.
+	lockPath := filepath.Join(filepath.Dir(configPath), "docker-context.lock")
+	if !filepath.IsAbs(lockPath) {
+		lockPath = filepath.Join(os.TempDir(), "remote-docker-context.lock")
+	}
+	return &configTransactions{locker: newStateLocker(lockPath)}
 }
 
 type productionAgentController struct {
@@ -1345,9 +1380,7 @@ func (c *productionAgentController) runConfigTransaction(operation func() error)
 	if c.configTransactions != nil {
 		return c.configTransactions.Run(operation)
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return operation()
+	return newConfigTransactions(c.store.Path).Run(operation)
 }
 
 func decodeControlParams(raw json.RawMessage, destination any) error {

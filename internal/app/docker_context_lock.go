@@ -2,6 +2,6 @@ package app
 
 import "context"
 
-type dockerContextLocker interface {
+type stateLocker interface {
 	WithLock(context.Context, func() error) error
 }

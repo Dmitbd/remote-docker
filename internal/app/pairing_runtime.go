@@ -37,6 +37,8 @@ const pairingDiscoveryTimeout = 3 * time.Second
 
 const revocationProofCredential = "pairing-revocation-proof"
 
+const minimumRemoteCleanupLease = time.Minute
+
 type pairingTarget struct {
 	InstanceID           string
 	Name                 string
@@ -74,7 +76,10 @@ type macPairingOptions struct {
 	SaveConfig              func(config.Config) error
 	BeforeConfigTransaction func()
 	CleanupTaskTimeout      time.Duration
-	DockerContextLocker     dockerContextLocker
+	RemoteCleanupTimeout    time.Duration
+	DockerCleanupTimeout    time.Duration
+	RemoteCleanupLease      time.Duration
+	Now                     func() time.Time
 }
 
 type pendingPairing struct {
@@ -109,7 +114,7 @@ type macPairingCoordinator struct {
 
 func newMacPairingCoordinator(options macPairingOptions) *macPairingCoordinator {
 	if options.ConfigTransactions == nil {
-		options.ConfigTransactions = &configTransactions{}
+		options.ConfigTransactions = newConfigTransactions(options.Store.Path)
 	}
 	if options.RemovePinnedHost == nil {
 		options.RemovePinnedHost = sshtransport.RemovePinnedHost
@@ -125,12 +130,20 @@ func newMacPairingCoordinator(options macPairingOptions) *macPairingCoordinator 
 	if options.CleanupTaskTimeout <= 0 {
 		options.CleanupTaskTimeout = pairingRollbackTimeout
 	}
-	if options.DockerContextLocker == nil {
-		lockPath := filepath.Join(filepath.Dir(options.Store.Path), "docker-context.lock")
-		if !filepath.IsAbs(lockPath) {
-			lockPath = filepath.Join(os.TempDir(), "remote-docker-context.lock")
+	if options.RemoteCleanupTimeout <= 0 {
+		options.RemoteCleanupTimeout = options.CleanupTaskTimeout
+	}
+	if options.DockerCleanupTimeout <= 0 {
+		options.DockerCleanupTimeout = options.CleanupTaskTimeout
+	}
+	if options.RemoteCleanupLease <= 0 {
+		options.RemoteCleanupLease = 2 * (options.RemoteCleanupTimeout + options.DockerCleanupTimeout)
+		if options.RemoteCleanupLease < minimumRemoteCleanupLease {
+			options.RemoteCleanupLease = minimumRemoteCleanupLease
 		}
-		options.DockerContextLocker = newDockerContextLocker(lockPath)
+	}
+	if options.Now == nil {
+		options.Now = time.Now
 	}
 	return &macPairingCoordinator{options: options}
 }
@@ -505,17 +518,17 @@ func (c *macPairingCoordinator) commitPairingArtifacts(
 	c.artifactsMu.Lock()
 	defer c.artifactsMu.Unlock()
 	alias := "remote-docker-device-" + remoteDeviceID
-	if err := sshtransport.PinKnownHost(c.options.KnownHostsPath, alias, record.SSHHostPublicKey); err != nil {
-		return device, dockercli.ContextChange{}, unavailable("cannot pin paired SSH identity")
-	}
-	if err := sshtransport.WriteConfig(c.options.SSHConfigPath, sshtransport.Config{
-		DeviceID: remoteDeviceID, HostName: "127.0.0.1", Port: tunnel.DockerRelayPort,
-		AgentSocket: c.options.AgentSocketPath, KnownHostsFile: c.options.KnownHostsPath, ControlDir: c.options.ControlDir,
-	}); err != nil {
-		return device, dockercli.ContextChange{}, unavailable("cannot write managed SSH configuration")
-	}
 	var contextChange dockercli.ContextChange
-	err := c.options.DockerContextLocker.WithLock(ctx, func() error {
+	err := c.options.ConfigTransactions.RunContext(ctx, func() error {
+		if err := sshtransport.PinKnownHost(c.options.KnownHostsPath, alias, record.SSHHostPublicKey); err != nil {
+			return unavailable("cannot pin paired SSH identity")
+		}
+		if err := sshtransport.WriteConfig(c.options.SSHConfigPath, sshtransport.Config{
+			DeviceID: remoteDeviceID, HostName: "127.0.0.1", Port: tunnel.DockerRelayPort,
+			AgentSocket: c.options.AgentSocketPath, KnownHostsFile: c.options.KnownHostsPath, ControlDir: c.options.ControlDir,
+		}); err != nil {
+			return unavailable("cannot write managed SSH configuration")
+		}
 		var planErr error
 		contextChange, planErr = dockercli.PlanContext(
 			ctx, c.options.Docker, c.options.DockerCLI, c.options.DockerContext, "ssh://"+alias, pending.cleanupID,
@@ -537,7 +550,7 @@ func (c *macPairingCoordinator) commitPairingArtifacts(
 		}
 		device.DockerContext = contextChangeToConfig(contextChange)
 		device.DockerContext.RemoveOnUnpair = contextChange.Created || !contextChange.Changed()
-		return c.options.ConfigTransactions.Run(func() error {
+		return c.options.ConfigTransactions.RunLocked(func() error {
 			cfg, loadErr := loadAgentConfig(c.options.Store)
 			if loadErr != nil {
 				return unavailable("cannot read paired device configuration")
@@ -679,11 +692,11 @@ func (c *macPairingCoordinator) moveActiveToPending(ctx context.Context, deviceI
 			Name: c.options.DockerContext, CurrentHost: "ssh://remote-docker-device-" + deviceID, Created: true,
 		}
 	}
-	err = c.options.DockerContextLocker.WithLock(ctx, func() error {
-		if c.options.BeforeConfigTransaction != nil {
-			c.options.BeforeConfigTransaction()
-		}
-		return c.options.ConfigTransactions.Run(func() error {
+	if c.options.BeforeConfigTransaction != nil {
+		c.options.BeforeConfigTransaction()
+	}
+	err = c.options.ConfigTransactions.RunContext(ctx, func() error {
+		return c.options.ConfigTransactions.RunLocked(func() error {
 			cfg, err := loadAgentConfig(c.options.Store)
 			if err != nil {
 				return unavailable("cannot refresh paired device configuration")
@@ -716,51 +729,200 @@ func (c *macPairingCoordinator) moveActiveToPending(ctx context.Context, deviceI
 }
 
 func (c *macPairingCoordinator) cleanupPendingRevocation(ctx context.Context, deviceID string, localOnly bool, contextOverride dockercli.ContextChange) error {
-	pending, exists, err := c.loadPendingRevocation(deviceID)
-	if err != nil || !exists {
-		return err
-	}
 	var stageErrors []error
-	if !pending.RemoteRevoked {
-		if localOnly {
-			if err := c.updatePendingRevocation(deviceID, func(current *config.PendingRevocation) {
-				current.RemoteRevoked = true
-			}); err != nil {
-				stageErrors = append(stageErrors, err)
+	pending, leaseToken, ownsCleanup, performRemote, err := c.reservePendingCleanup(ctx, deviceID, localOnly)
+	if err != nil {
+		stageErrors = append(stageErrors, err)
+	}
+	if !ownsCleanup || pending.Generation == "" {
+		return errors.Join(stageErrors...)
+	}
+	keepLease := false
+	dockerCtx, cancelDocker := context.WithTimeout(ctx, c.options.DockerCleanupTimeout)
+	if err := c.restorePendingDocker(dockerCtx, deviceID, contextOverride); err != nil {
+		stageErrors = append(stageErrors, err)
+	}
+	cancelDocker()
+	if ctx.Err() == nil {
+		if err := c.cleanPendingLocalArtifacts(ctx, deviceID); err != nil {
+			stageErrors = append(stageErrors, err)
+		}
+	} else {
+		stageErrors = append(stageErrors, ctx.Err())
+	}
+	leaseCurrent, renewErr := c.renewPendingCleanup(ctx, deviceID, leaseToken)
+	if renewErr != nil {
+		stageErrors = append(stageErrors, renewErr)
+		return errors.Join(stageErrors...)
+	}
+	if !leaseCurrent {
+		return errors.Join(stageErrors...)
+	}
+	if performRemote && ctx.Err() == nil {
+		proofOwner := pending.Device.RevocationCredentialOwner
+		if proofOwner == "" {
+			proofOwner = deviceID
+		}
+		proof, proofErr := c.options.Secrets.Get(proofOwner, revocationProofCredential)
+		revokeErr := proofErr
+		if proofErr == nil {
+			pairingGeneration := pending.Device.PairingGeneration
+			if pairingGeneration == "" {
+				pairingGeneration = pending.Generation
 			}
-		} else {
-			proofOwner := pending.Device.RevocationCredentialOwner
-			if proofOwner == "" {
-				proofOwner = deviceID
-			}
-			proof, proofErr := c.options.Secrets.Get(proofOwner, revocationProofCredential)
-			if proofErr == nil {
-				pairingGeneration := pending.Device.PairingGeneration
-				if pairingGeneration == "" {
-					pairingGeneration = pending.Generation
-				}
-				revokeErr := c.options.Transport.Revoke(ctx, pending.Device, pending.Device.ClientDeviceID, pairingGeneration, proof)
+			leaseCurrent, renewErr = c.renewPendingCleanup(ctx, deviceID, leaseToken)
+			if renewErr != nil || !leaseCurrent {
 				clearSecret(proof)
-				if revokeErr == nil {
-					if err := c.updatePendingRevocation(deviceID, func(current *config.PendingRevocation) {
-						current.RemoteRevoked = true
-					}); err != nil {
-						stageErrors = append(stageErrors, err)
-					}
+				if renewErr != nil {
+					stageErrors = append(stageErrors, renewErr)
 				}
+				return errors.Join(stageErrors...)
 			}
+			remoteCtx, cancelRemote := context.WithTimeout(ctx, c.options.RemoteCleanupTimeout)
+			revokeErr = c.options.Transport.Revoke(remoteCtx, pending.Device, pending.Device.ClientDeviceID, pairingGeneration, proof)
+			cancelRemote()
+			clearSecret(proof)
+		}
+		if err := c.completeRemoteCleanup(ctx, deviceID, leaseToken, revokeErr); err != nil {
+			stageErrors = append(stageErrors, err)
+			keepLease = true
+		}
+	} else if performRemote {
+		if err := c.completeRemoteCleanup(ctx, deviceID, leaseToken, ctx.Err()); err != nil {
+			stageErrors = append(stageErrors, err)
+			keepLease = true
 		}
 	}
-	if err := c.restorePendingDocker(ctx, deviceID, contextOverride); err != nil {
+	if err := c.finishPendingRevocation(ctx, deviceID); err != nil {
 		stageErrors = append(stageErrors, err)
 	}
-	if err := c.cleanPendingLocalArtifacts(deviceID); err != nil {
-		stageErrors = append(stageErrors, err)
-	}
-	if err := c.finishPendingRevocation(deviceID); err != nil {
-		stageErrors = append(stageErrors, err)
+	if !keepLease {
+		if err := c.releasePendingCleanup(ctx, deviceID, leaseToken); err != nil {
+			stageErrors = append(stageErrors, err)
+		}
 	}
 	return errors.Join(stageErrors...)
+}
+
+func (c *macPairingCoordinator) reservePendingCleanup(
+	ctx context.Context,
+	generation string,
+	localOnly bool,
+) (config.PendingRevocation, string, bool, bool, error) {
+	leaseToken, err := randomDeviceID()
+	if err != nil {
+		return config.PendingRevocation{}, "", false, false, unavailable("cannot reserve pairing cleanup")
+	}
+	var result config.PendingRevocation
+	ownsCleanup := false
+	performRemote := false
+	err = c.options.ConfigTransactions.RunContext(ctx, func() error {
+		cfg, err := loadAgentConfig(c.options.Store)
+		if err != nil {
+			return unavailable("cannot refresh pending pairing removal")
+		}
+		pending, exists := cfg.PendingRevocations[generation]
+		if !exists {
+			return nil
+		}
+		if pending.Generation == "" {
+			pending.Generation = generation
+		}
+		if pending.Generation != generation {
+			return unavailable("pairing cleanup generation changed")
+		}
+		result = pending
+		now := c.options.Now().UTC()
+		leaseActive := pending.CleanupLeaseToken != ""
+		if leaseActive {
+			expiresAt, parseErr := time.Parse(time.RFC3339Nano, pending.CleanupLeaseExpiresAt)
+			leaseActive = parseErr == nil && expiresAt.After(now)
+		}
+		if leaseActive {
+			if localOnly {
+				return needsAction("remote pairing cleanup is already in progress")
+			}
+			return nil
+		}
+		if localOnly {
+			pending.RemoteRevoked = true
+		}
+		pending.CleanupLeaseToken = leaseToken
+		pending.CleanupLeaseExpiresAt = now.Add(c.options.RemoteCleanupLease).Format(time.RFC3339Nano)
+		cfg.PendingRevocations[generation] = pending
+		if err := c.options.SaveConfig(cfg); err != nil {
+			return unavailable("cannot save pairing cleanup reservation")
+		}
+		result = pending
+		ownsCleanup = true
+		performRemote = !pending.RemoteRevoked
+		return nil
+	})
+	return result, leaseToken, ownsCleanup, performRemote, err
+}
+
+func (c *macPairingCoordinator) renewPendingCleanup(ctx context.Context, generation, leaseToken string) (bool, error) {
+	current := false
+	err := c.options.ConfigTransactions.RunContext(ctx, func() error {
+		cfg, err := loadAgentConfig(c.options.Store)
+		if err != nil {
+			return unavailable("cannot refresh pairing cleanup lease")
+		}
+		pending, exists := cfg.PendingRevocations[generation]
+		if !exists || pending.CleanupLeaseToken != leaseToken {
+			return nil
+		}
+		pending.CleanupLeaseExpiresAt = c.options.Now().UTC().Add(c.options.RemoteCleanupLease).Format(time.RFC3339Nano)
+		cfg.PendingRevocations[generation] = pending
+		if err := c.options.SaveConfig(cfg); err != nil {
+			return unavailable("cannot renew pairing cleanup lease")
+		}
+		current = true
+		return nil
+	})
+	return current, err
+}
+
+func (c *macPairingCoordinator) completeRemoteCleanup(ctx context.Context, generation, leaseToken string, revokeErr error) error {
+	return c.options.ConfigTransactions.RunContext(ctx, func() error {
+		cfg, err := loadAgentConfig(c.options.Store)
+		if err != nil {
+			return unavailable("cannot refresh remote pairing cleanup")
+		}
+		pending, exists := cfg.PendingRevocations[generation]
+		if !exists || pending.CleanupLeaseToken != leaseToken {
+			return nil
+		}
+		if revokeErr != nil {
+			return nil
+		}
+		pending.RemoteRevoked = true
+		cfg.PendingRevocations[generation] = pending
+		if err := c.options.SaveConfig(cfg); err != nil {
+			return unavailable("cannot save remote pairing cleanup result")
+		}
+		return nil
+	})
+}
+
+func (c *macPairingCoordinator) releasePendingCleanup(ctx context.Context, generation, leaseToken string) error {
+	return c.options.ConfigTransactions.RunContext(ctx, func() error {
+		cfg, err := loadAgentConfig(c.options.Store)
+		if err != nil {
+			return unavailable("cannot refresh pairing cleanup lease")
+		}
+		pending, exists := cfg.PendingRevocations[generation]
+		if !exists || pending.CleanupLeaseToken != leaseToken {
+			return nil
+		}
+		pending.CleanupLeaseToken = ""
+		pending.CleanupLeaseExpiresAt = ""
+		cfg.PendingRevocations[generation] = pending
+		if err := c.options.SaveConfig(cfg); err != nil {
+			return unavailable("cannot release pairing cleanup lease")
+		}
+		return nil
+	})
 }
 
 func (c *macPairingCoordinator) loadPendingRevocation(generation string) (config.PendingRevocation, bool, error) {
@@ -786,6 +948,15 @@ func (c *macPairingCoordinator) updatePendingRevocation(
 	update func(*config.PendingRevocation),
 ) error {
 	return c.options.ConfigTransactions.Run(func() error {
+		return c.updatePendingRevocationLocked(generation, update)
+	})
+}
+
+func (c *macPairingCoordinator) updatePendingRevocationLocked(
+	generation string,
+	update func(*config.PendingRevocation),
+) error {
+	return c.options.ConfigTransactions.RunLocked(func() error {
 		cfg, err := loadAgentConfig(c.options.Store)
 		if err != nil {
 			return unavailable("cannot refresh pending pairing removal")
@@ -812,8 +983,8 @@ func (c *macPairingCoordinator) updatePendingRevocation(
 func (c *macPairingCoordinator) restorePendingDocker(ctx context.Context, generation string, contextOverride dockercli.ContextChange) error {
 	c.artifactsMu.Lock()
 	defer c.artifactsMu.Unlock()
-	return c.options.DockerContextLocker.WithLock(ctx, func() error {
-		return c.options.ConfigTransactions.Run(func() error {
+	return c.options.ConfigTransactions.RunContext(ctx, func() error {
+		return c.options.ConfigTransactions.RunLocked(func() error {
 			cfg, err := loadAgentConfig(c.options.Store)
 			if err != nil {
 				return unavailable("cannot refresh Docker pairing cleanup")
@@ -850,10 +1021,10 @@ func (c *macPairingCoordinator) restorePendingDocker(ctx context.Context, genera
 	})
 }
 
-func (c *macPairingCoordinator) cleanPendingLocalArtifacts(generation string) error {
+func (c *macPairingCoordinator) cleanPendingLocalArtifacts(ctx context.Context, generation string) error {
 	c.artifactsMu.Lock()
 	defer c.artifactsMu.Unlock()
-	return c.options.ConfigTransactions.Run(func() error {
+	return c.options.ConfigTransactions.RunContext(ctx, func() error {
 		cfg, err := loadAgentConfig(c.options.Store)
 		if err != nil {
 			return unavailable("cannot refresh local pairing cleanup")
@@ -899,11 +1070,13 @@ func (c *macPairingCoordinator) cleanPendingLocalArtifacts(generation string) er
 	})
 }
 
-func (c *macPairingCoordinator) finishPendingRevocation(generation string) error {
-	if err := c.updatePendingRevocation(generation, func(pending *config.PendingRevocation) {
-		if pending.RemoteRevoked && pending.DockerRestored && pending.LocalCleaned {
-			pending.Finished = true
-		}
+func (c *macPairingCoordinator) finishPendingRevocation(ctx context.Context, generation string) error {
+	if err := c.options.ConfigTransactions.RunContext(ctx, func() error {
+		return c.updatePendingRevocationLocked(generation, func(pending *config.PendingRevocation) {
+			if pending.RemoteRevoked && pending.DockerRestored && pending.LocalCleaned {
+				pending.Finished = true
+			}
+		})
 	}); err != nil {
 		return err
 	}
@@ -918,7 +1091,7 @@ func (c *macPairingCoordinator) finishPendingRevocation(generation string) error
 	if err := c.options.Secrets.Delete(proofOwner, revocationProofCredential); err != nil && !errors.Is(err, credentials.ErrNotFound) {
 		return unavailable("cannot delete pairing rollback proof")
 	}
-	return c.options.ConfigTransactions.Run(func() error {
+	return c.options.ConfigTransactions.RunContext(ctx, func() error {
 		cfg, err := loadAgentConfig(c.options.Store)
 		if err != nil {
 			return unavailable("cannot finalize pending pairing removal")
@@ -939,13 +1112,13 @@ func (c *macPairingCoordinator) finishPendingRevocation(generation string) error
 }
 
 func (c *macPairingCoordinator) persistPendingRevocation(ctx context.Context, deviceID string, pending config.PendingRevocation) error {
-	return c.options.DockerContextLocker.WithLock(ctx, func() error {
+	return c.options.ConfigTransactions.RunContext(ctx, func() error {
 		return c.persistPendingRevocationLocked(deviceID, pending)
 	})
 }
 
 func (c *macPairingCoordinator) persistPendingRevocationLocked(deviceID string, pending config.PendingRevocation) error {
-	return c.options.ConfigTransactions.Run(func() error {
+	return c.options.ConfigTransactions.RunLocked(func() error {
 		cfg, err := loadAgentConfig(c.options.Store)
 		if err != nil {
 			return unavailable("cannot read pairing rollback journal")
@@ -973,13 +1146,13 @@ func (c *macPairingCoordinator) updatePendingDevice(cleanupID, localDeviceID str
 }
 
 func (c *macPairingCoordinator) updatePendingContext(ctx context.Context, deviceID string, change config.DockerContextChange) error {
-	return c.options.DockerContextLocker.WithLock(ctx, func() error {
+	return c.options.ConfigTransactions.RunContext(ctx, func() error {
 		return c.updatePendingContextLocked(deviceID, change)
 	})
 }
 
 func (c *macPairingCoordinator) updatePendingContextLocked(deviceID string, change config.DockerContextChange) error {
-	return c.updatePendingRevocation(deviceID, func(pending *config.PendingRevocation) {
+	return c.updatePendingRevocationLocked(deviceID, func(pending *config.PendingRevocation) {
 		pending.DockerContext = change
 		pending.Device.DockerContext = change
 	})
@@ -1033,9 +1206,7 @@ func (c *macPairingCoordinator) ReconcilePendingRevocations(ctx context.Context)
 			reconcileErrors = append(reconcileErrors, ctx.Err())
 			break
 		}
-		taskCtx, cancel := context.WithTimeout(ctx, c.options.CleanupTaskTimeout)
-		err := c.cleanupPendingRevocation(taskCtx, id, false, dockercli.ContextChange{})
-		cancel()
+		err := c.cleanupPendingRevocation(ctx, id, false, dockercli.ContextChange{})
 		c.mu.Lock()
 		c.cleanupCursor = id
 		c.mu.Unlock()

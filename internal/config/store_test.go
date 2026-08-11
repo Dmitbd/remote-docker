@@ -91,7 +91,8 @@ func TestStoreRoundTripsCleanupGenerationAndDurableStages(t *testing.T) {
 		SchemaVersion: CurrentSchemaVersion,
 		PendingRevocations: map[string]PendingRevocation{"generation-2": {
 			Generation: "generation-2", SessionID: "session-2", CleanupRequested: true,
-			RemoteRevoked: true, DockerRestored: true, LocalCleaned: true, Finished: true,
+			RemoteRevoked: true, CleanupLeaseToken: "lease-2", CleanupLeaseExpiresAt: "2026-08-11T12:00:00Z",
+			DockerRestored: true, LocalCleaned: true, Finished: true,
 			Device: Device{PairingGeneration: "generation-2"},
 		}},
 	}
@@ -104,6 +105,24 @@ func TestStoreRoundTripsCleanupGenerationAndDurableStages(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("round trip = %#v, want %#v", got, want)
+	}
+}
+
+func TestStoreMigratesSchemaV5BeforePersistingCleanupLeases(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	legacy := `{"schemaVersion":5,"pendingRevocations":{"generation-5":{"generation":"generation-5","cleanupRequested":true,"device":{"clientDeviceId":"LOCAL-SYNC"}}}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write schema v5 config: %v", err)
+	}
+	got, migration, err := (Store{Path: path}).LoadWithMigration()
+	if err != nil {
+		t.Fatalf("LoadWithMigration() error = %v", err)
+	}
+	pending := got.PendingRevocations["generation-5"]
+	if got.SchemaVersion != CurrentSchemaVersion || CurrentSchemaVersion != 6 ||
+		migration.FromVersion != 5 || migration.ToVersion != 6 || pending.Generation != "generation-5" ||
+		pending.CleanupLeaseToken != "" || pending.CleanupLeaseExpiresAt != "" {
+		t.Fatalf("schema-v5 cleanup migration = cfg=%#v migration=%#v", got, migration)
 	}
 }
 

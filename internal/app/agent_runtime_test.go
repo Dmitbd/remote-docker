@@ -1126,7 +1126,7 @@ func TestPendingRevocationFailureDoesNotBlockOtherCleanupTasks(t *testing.T) {
 
 func TestLocalOnlyRemovalIsDurableInTheSlotReleaseTransaction(t *testing.T) {
 	store := config.Store{Path: filepath.Join(t.TempDir(), "config.json")}
-	locker := &trackingDockerContextLocker{}
+	locker := &trackingStateLocker{}
 	device := config.Device{
 		Name: "Windows", ClientDeviceID: "LOCAL-SYNC", PairingGeneration: "pairing-generation",
 	}
@@ -1137,7 +1137,7 @@ func TestLocalOnlyRemovalIsDurableInTheSlotReleaseTransaction(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed active device: %v", err)
 	}
-	coordinator := newMacPairingCoordinator(macPairingOptions{Store: store, DockerContextLocker: locker})
+	coordinator := newMacPairingCoordinator(macPairingOptions{Store: store, ConfigTransactions: &configTransactions{locker: locker}})
 	generation, err := coordinator.moveActiveToPending(context.Background(), "windows-peer", device, true)
 	if err != nil {
 		t.Fatalf("moveActiveToPending() error = %v", err)
@@ -1191,6 +1191,267 @@ func TestPendingRevocationUsesIndependentTimeoutForEveryTask(t *testing.T) {
 	}
 	if _, exists := cfg.PendingRevocations["generation-b"]; exists {
 		t.Fatalf("fast task was starved: %#v", cfg.PendingRevocations)
+	}
+}
+
+func TestLocalOnlyLeasePreventsRemoteRevokeAfterRestart(t *testing.T) {
+	root := t.TempDir()
+	store, secrets, generation := seedPendingRemoteCleanup(t, root)
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load pending cleanup: %v", err)
+	}
+	pending := cfg.PendingRevocations[generation]
+	pending.LocalCleaned = false
+	cfg.PendingRevocations[generation] = pending
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("prepare local cleanup race: %v", err)
+	}
+	transport := &blockingRevokeTransport{}
+	localStageStarted := make(chan struct{})
+	releaseLocalStage := make(chan struct{})
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Store: store, ConfigTransactions: newConfigTransactions(store.Path), Secrets: secrets, Transport: transport,
+		RemoveSSHConfig: func(sshtransport.ManagedRoot, string) error {
+			close(localStageStarted)
+			<-releaseLocalStage
+			return nil
+		},
+	})
+	localDone := make(chan error, 1)
+	go func() {
+		localDone <- coordinator.cleanupPendingRevocation(context.Background(), generation, true, dockercli.ContextChange{})
+	}()
+	waitForTestSignal(t, localStageStarted, "local-only cleanup stage")
+	competing := newMacPairingCoordinator(macPairingOptions{
+		Store: store, ConfigTransactions: newConfigTransactions(store.Path), Secrets: secrets, Transport: transport,
+	})
+	competingAttempted := make(chan struct{})
+	competingDone := make(chan error, 1)
+	go func() {
+		close(competingAttempted)
+		competingDone <- competing.cleanupPendingRevocation(context.Background(), generation, false, dockercli.ContextChange{})
+	}()
+	waitForTestSignal(t, competingAttempted, "competing remote cleanup attempt")
+	if got := transport.calls.Load(); got != 0 {
+		t.Fatalf("remote revoke calls while local-only owns generation = %d, want 0", got)
+	}
+	close(releaseLocalStage)
+	if err := waitForTestError(t, localDone, "local-only cleanup completion"); err != nil {
+		t.Fatalf("local-only cleanup: %v", err)
+	}
+	if err := waitForTestError(t, competingDone, "competing remote cleanup"); err != nil {
+		t.Fatalf("competing remote cleanup: %v", err)
+	}
+	restarted := newMacPairingCoordinator(macPairingOptions{
+		Store: store, ConfigTransactions: newConfigTransactions(store.Path), Secrets: secrets, Transport: transport,
+	})
+	if err := restarted.ReconcilePendingRevocations(context.Background()); err != nil {
+		t.Fatalf("restart reconcile: %v", err)
+	}
+	if got := transport.calls.Load(); got != 0 {
+		t.Fatalf("remote revoke calls after accepted local-only = %d, want 0", got)
+	}
+}
+
+func TestRemoteRevokeLeaseWinsBeforeLocalOnly(t *testing.T) {
+	root := t.TempDir()
+	store, secrets, generation := seedPendingRemoteCleanup(t, root)
+	transport := &blockingRevokeTransport{started: make(chan struct{}), release: make(chan struct{})}
+	remote := newMacPairingCoordinator(macPairingOptions{
+		Store: store, ConfigTransactions: newConfigTransactions(store.Path), Secrets: secrets, Transport: transport,
+	})
+	local := newMacPairingCoordinator(macPairingOptions{
+		Store: store, ConfigTransactions: newConfigTransactions(store.Path), Secrets: secrets, Transport: transport,
+	})
+	remoteDone := make(chan error, 1)
+	go func() {
+		remoteDone <- remote.cleanupPendingRevocation(context.Background(), generation, false, dockercli.ContextChange{})
+	}()
+	waitForTestSignal(t, transport.started, "remote revoke start")
+	err := local.cleanupPendingRevocation(context.Background(), generation, true, dockercli.ContextChange{})
+	var publicErr *localapi.PublicError
+	if !errors.As(err, &publicErr) || publicErr.Code != localapi.ErrorNeedsAction {
+		t.Fatalf("local-only while remote lease is active error = %v, want clear needs-action state", err)
+	}
+	close(transport.release)
+	if err := waitForTestError(t, remoteDone, "remote cleanup completion"); err != nil {
+		t.Fatalf("remote cleanup: %v", err)
+	}
+	if got := transport.calls.Load(); got != 1 {
+		t.Fatalf("remote revoke calls = %d, want exactly 1", got)
+	}
+}
+
+func TestTwoCleanupWorkersShareGenerationLease(t *testing.T) {
+	root := t.TempDir()
+	store, secrets, generation := seedPendingRemoteCleanup(t, root)
+	transport := &blockingRevokeTransport{started: make(chan struct{}), release: make(chan struct{})}
+	first := newMacPairingCoordinator(macPairingOptions{
+		Store: store, ConfigTransactions: newConfigTransactions(store.Path), Secrets: secrets, Transport: transport,
+	})
+	second := newMacPairingCoordinator(macPairingOptions{
+		Store: store, ConfigTransactions: newConfigTransactions(store.Path), Secrets: secrets, Transport: transport,
+	})
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- first.cleanupPendingRevocation(context.Background(), generation, false, dockercli.ContextChange{})
+	}()
+	waitForTestSignal(t, transport.started, "first remote revoke")
+	if err := second.cleanupPendingRevocation(context.Background(), generation, false, dockercli.ContextChange{}); err != nil {
+		t.Fatalf("second cleanup worker: %v", err)
+	}
+	if got := transport.calls.Load(); got != 1 {
+		t.Fatalf("concurrent remote revoke calls = %d, want 1", got)
+	}
+	close(transport.release)
+	if err := waitForTestError(t, firstDone, "first cleanup worker"); err != nil {
+		t.Fatalf("first cleanup worker: %v", err)
+	}
+}
+
+func TestExpiredRemoteCleanupLeaseIsRecoverable(t *testing.T) {
+	root := t.TempDir()
+	store, secrets, generation := seedPendingRemoteCleanup(t, root)
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load pending cleanup: %v", err)
+	}
+	pending := cfg.PendingRevocations[generation]
+	pending.CleanupLeaseToken = "abandoned-owner"
+	pending.CleanupLeaseExpiresAt = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+	cfg.PendingRevocations[generation] = pending
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("seed abandoned lease: %v", err)
+	}
+	transport := &blockingRevokeTransport{}
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Store: store, ConfigTransactions: newConfigTransactions(store.Path), Secrets: secrets, Transport: transport,
+	})
+	if err := coordinator.ReconcilePendingRevocations(context.Background()); err != nil {
+		t.Fatalf("recover abandoned lease: %v", err)
+	}
+	if got := transport.calls.Load(); got != 1 {
+		t.Fatalf("remote revoke calls after abandoned lease = %d, want 1", got)
+	}
+}
+
+func TestCleanupRenewsLeaseBeforeRemoteRevoke(t *testing.T) {
+	root := t.TempDir()
+	store, secrets, generation := seedPendingRemoteCleanup(t, root)
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load pending cleanup: %v", err)
+	}
+	pending := cfg.PendingRevocations[generation]
+	pending.LocalCleaned = false
+	cfg.PendingRevocations[generation] = pending
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("prepare lease renewal: %v", err)
+	}
+	now := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
+	transport := &blockingRevokeTransport{beforeRevoke: func() {
+		cfg, err := store.Load()
+		if err != nil {
+			t.Fatalf("load renewed lease: %v", err)
+		}
+		expiresAt, err := time.Parse(time.RFC3339Nano, cfg.PendingRevocations[generation].CleanupLeaseExpiresAt)
+		if err != nil || !expiresAt.After(now) {
+			t.Fatalf("lease was not renewed before revoke: expires=%s now=%s error=%v", expiresAt, now, err)
+		}
+	}}
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Store: store, ConfigTransactions: newConfigTransactions(store.Path), Secrets: secrets, Transport: transport,
+		Now: func() time.Time { return now }, RemoteCleanupLease: time.Minute,
+		RemoveSSHConfig: func(sshtransport.ManagedRoot, string) error {
+			now = now.Add(2 * time.Minute)
+			return nil
+		},
+	})
+	if err := coordinator.cleanupPendingRevocation(context.Background(), generation, false, dockercli.ContextChange{}); err != nil {
+		t.Fatalf("cleanup with renewed lease: %v", err)
+	}
+	if got := transport.calls.Load(); got != 1 {
+		t.Fatalf("remote revoke calls = %d, want 1", got)
+	}
+}
+
+func TestRemoteTimeoutDoesNotCancelDockerRestoreOrLaterGeneration(t *testing.T) {
+	root := t.TempDir()
+	store := config.Store{Path: filepath.Join(root, "config.json")}
+	secrets := credentials.NewMemoryStore()
+	host := "ssh://remote-docker-device-slow"
+	pending := map[string]config.PendingRevocation{}
+	for _, item := range []struct{ generation, deviceID string }{{"generation-a", "slow"}, {"generation-b", "fast"}} {
+		owner := "owner-" + item.generation
+		pending[item.generation] = config.PendingRevocation{
+			Generation: item.generation, CleanupRequested: true, LocalCleaned: true,
+			DockerContext: config.DockerContextChange{
+				Name: "remote-docker", CurrentHost: host, OwnerToken: item.generation, Created: true,
+			},
+			Device: config.Device{ClientDeviceID: item.deviceID, PairingGeneration: item.generation, RevocationCredentialOwner: owner},
+		}
+		if item.deviceID == "fast" {
+			entry := pending[item.generation]
+			entry.DockerRestored = true
+			entry.DockerContext = config.DockerContextChange{}
+			pending[item.generation] = entry
+		}
+		if err := secrets.Put(owner, revocationProofCredential, bytes.Repeat([]byte{4}, pairing.RevocationProofSize)); err != nil {
+			t.Fatalf("seed proof: %v", err)
+		}
+	}
+	if err := store.Save(config.Config{SchemaVersion: config.CurrentSchemaVersion, PendingRevocations: pending}); err != nil {
+		t.Fatalf("seed pending cleanup: %v", err)
+	}
+	docker := &contextObservingDockerExecutor{managedContextExecutor: managedContextExecutor{host: host, description: "Managed by Remote Docker; owner=generation-a"}}
+	transport := &deadlineBlockingPairingTransport{runtimePairingTransport: &runtimePairingTransport{}}
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Store: store, ConfigTransactions: newConfigTransactions(store.Path), Secrets: secrets, Transport: transport,
+		Docker: docker, DockerCLI: "docker-real", RemoteCleanupTimeout: 20 * time.Millisecond,
+		DockerCleanupTimeout: time.Second,
+	})
+	if err := coordinator.ReconcilePendingRevocations(context.Background()); err != nil {
+		t.Fatalf("reconcile independent cleanup stages: %v", err)
+	}
+	if docker.contextErr != nil || !docker.restored {
+		t.Fatalf("Docker restore context=%v restored=%t", docker.contextErr, docker.restored)
+	}
+	if !reflect.DeepEqual(transport.calls, []string{"slow", "fast"}) {
+		t.Fatalf("remote calls = %#v, want slow timeout followed by fast generation", transport.calls)
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load cleanup journal: %v", err)
+	}
+	left, exists := cfg.PendingRevocations["generation-a"]
+	if !exists || !left.DockerRestored || !left.LocalCleaned || left.RemoteRevoked {
+		t.Fatalf("journal should retain only unfinished network stage: %#v", left)
+	}
+	if _, exists := cfg.PendingRevocations["generation-b"]; exists {
+		t.Fatalf("later generation was not serviced: %#v", cfg.PendingRevocations)
+	}
+}
+
+func TestParentCancellationStopsRemoteCleanup(t *testing.T) {
+	root := t.TempDir()
+	store, secrets, generation := seedPendingRemoteCleanup(t, root)
+	transport := &blockingRevokeTransport{started: make(chan struct{})}
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Store: store, ConfigTransactions: newConfigTransactions(store.Path), Secrets: secrets, Transport: transport,
+		RemoteCleanupTimeout: time.Minute,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- coordinator.cleanupPendingRevocation(ctx, generation, false, dockercli.ContextChange{})
+	}()
+	waitForTestSignal(t, transport.started, "remote cleanup start")
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("parent cancellation left cleanup goroutine blocked")
 	}
 }
 
@@ -1851,6 +2112,71 @@ func TestSharedConfigTransactionPreservesWorkspaceRemoveBeforeForget(t *testing.
 	}
 }
 
+func TestStateConfigTransactionSerializesIndependentOwners(t *testing.T) {
+	root := t.TempDir()
+	store := config.Store{Path: filepath.Join(root, "config.json")}
+	if err := store.Save(config.Config{SchemaVersion: config.CurrentSchemaVersion}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	journalOwner := newConfigTransactions(store.Path)
+	workspaceOwner := newConfigTransactions(store.Path)
+	workspacePath := t.TempDir()
+	workspaceLoaded := make(chan struct{})
+	releaseWorkspace := make(chan struct{})
+	controller := &productionAgentController{
+		store: store, configTransactions: workspaceOwner,
+		beforeConfigSave: func() {
+			close(workspaceLoaded)
+			<-releaseWorkspace
+		},
+	}
+	workspaceDone := make(chan error, 1)
+	go func() {
+		_, err := controller.addWorkspace(workspacePath)
+		workspaceDone <- err
+	}()
+	waitForTestSignal(t, workspaceLoaded, "workspace stale read")
+	journalAttempted := make(chan struct{})
+	journalDone := make(chan error, 1)
+	go func() {
+		close(journalAttempted)
+		journalDone <- journalOwner.Run(func() error {
+			cfg, err := loadAgentConfig(store)
+			if err != nil {
+				return err
+			}
+			cfg.PendingRevocations = map[string]config.PendingRevocation{"generation-1": {
+				Generation: "generation-1", CleanupRequested: true, RemoteRevoked: true,
+				DockerRestored: true, LocalCleaned: true,
+			}}
+			return store.Save(cfg)
+		})
+	}()
+	waitForTestSignal(t, journalAttempted, "journal transaction attempt")
+	select {
+	case err := <-journalDone:
+		t.Fatalf("independent journal owner bypassed state transaction: %v", err)
+	default:
+	}
+	close(releaseWorkspace)
+	if err := waitForTestError(t, workspaceDone, "workspace owner completion"); err != nil {
+		t.Fatalf("workspace transaction: %v", err)
+	}
+	if err := waitForTestError(t, journalDone, "journal owner completion"); err != nil {
+		t.Fatalf("journal transaction: %v", err)
+	}
+	cfg, err := store.Load()
+	if err != nil || len(cfg.Workspaces) != 1 || len(cfg.PendingRevocations) != 1 {
+		t.Fatalf("cross-process state transaction lost data: cfg=%#v error=%v", cfg, err)
+	}
+	restarted := newMacPairingCoordinator(macPairingOptions{
+		Store: store, ConfigTransactions: newConfigTransactions(store.Path), Secrets: credentials.NewMemoryStore(),
+	})
+	if err := restarted.ReconcilePendingRevocations(context.Background()); err != nil {
+		t.Fatalf("restart could not recover durable journal: %v", err)
+	}
+}
+
 type localForgetFixture struct {
 	root      string
 	deviceID  string
@@ -2305,7 +2631,7 @@ func TestMacPairingRemovesExactCreatedContextWhenLocalCommitFails(t *testing.T) 
 func TestMacPairingPersistsDockerRollbackIntentBeforeContextMutation(t *testing.T) {
 	root := t.TempDir()
 	store := config.Store{Path: filepath.Join(root, "config.json")}
-	locker := &trackingDockerContextLocker{}
+	locker := &trackingStateLocker{}
 	docker := &dockerIntentCheckingExecutor{beforeMutation: func() error {
 		if !locker.held {
 			return errors.New("Docker context process lock is not held")
@@ -2325,8 +2651,8 @@ func TestMacPairingPersistsDockerRollbackIntentBeforeContextMutation(t *testing.
 	coordinator := newMacPairingCoordinator(macPairingOptions{
 		Store: store, Secrets: credentials.NewMemoryStore(),
 		Transport: &runtimePairingTransport{hostKey: testAuthorizedKey(t)}, Docker: docker,
-		DockerContextLocker: locker,
-		DockerCLI:           "docker-real", DockerContext: "remote-docker",
+		ConfigTransactions: &configTransactions{locker: locker},
+		DockerCLI:          "docker-real", DockerContext: "remote-docker",
 		ClientDeviceID: func(context.Context) (string, error) { return "LOCAL-SYNC", nil },
 		SSHConfigPath:  filepath.Join(root, "ssh_config"), ManagedSSHRoot: testManagedSSHRoot(t, root),
 		KnownHostsPath: filepath.Join(root, "known_hosts"), AgentSocketPath: filepath.Join(root, "ssh-agent.sock"),
@@ -2374,10 +2700,11 @@ func TestRestartedCleanupTreatsDockerOwnershipLossAsTerminal(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed pending cleanup: %v", err)
 	}
-	locker := &trackingDockerContextLocker{}
+	locker := &trackingStateLocker{}
 	docker := &managedContextExecutor{host: host, description: "Managed by Remote Docker; owner=cleanup-b"}
 	coordinator := newMacPairingCoordinator(macPairingOptions{
-		Store: store, Secrets: credentials.NewMemoryStore(), Docker: docker, DockerCLI: "docker-real", DockerContextLocker: locker,
+		Store: store, Secrets: credentials.NewMemoryStore(), Docker: docker, DockerCLI: "docker-real",
+		ConfigTransactions: &configTransactions{locker: locker},
 	})
 
 	if err := coordinator.ReconcilePendingRevocations(context.Background()); err != nil {
@@ -2439,6 +2766,54 @@ func TestRestartAfterDockerPreconditionFailureDoesNotDeleteForeignContext(t *tes
 	}
 }
 
+func TestRestartAfterUnknownDockerCreateDoesNotDeleteForeignContext(t *testing.T) {
+	root := t.TempDir()
+	store := config.Store{Path: filepath.Join(root, "config.json")}
+	cleanupID := "cleanup-a"
+	host := "ssh://remote-docker-device-peer"
+	firstDocker := &unknownCreateResultExecutor{}
+	first := newMacPairingCoordinator(macPairingOptions{
+		Store: store, ConfigTransactions: newConfigTransactions(store.Path), Secrets: credentials.NewMemoryStore(),
+		Docker: firstDocker, DockerCLI: "docker-real", DockerContext: "remote-docker",
+		KnownHostsPath: filepath.Join(root, "known_hosts"), SSHConfigPath: filepath.Join(root, "ssh_config"),
+		ManagedSSHRoot: testManagedSSHRoot(t, root), AgentSocketPath: filepath.Join(root, "agent.sock"), ControlDir: filepath.Join(root, "control"),
+	})
+	if err := first.persistPendingRevocation(context.Background(), cleanupID, config.PendingRevocation{
+		Generation: cleanupID, RemoteRevoked: true, LocalCleaned: true,
+	}); err != nil {
+		t.Fatalf("persist initial cleanup journal: %v", err)
+	}
+	_, change, err := first.commitPairingArtifacts(context.Background(), pendingPairing{cleanupID: cleanupID}, "peer", pairing.DeviceRecord{
+		SSHHostPublicKey: testAuthorizedKey(t),
+	}, config.Device{})
+	if err == nil || !errors.Is(firstDocker.createErr, context.Canceled) || !change.Created || change.OwnerToken != cleanupID {
+		t.Fatalf("unknown Docker create change=%#v createErr=%v error=%v", change, firstDocker.createErr, err)
+	}
+	cfg, loadErr := store.Load()
+	pending, exists := cfg.PendingRevocations[cleanupID]
+	if loadErr != nil || !exists || pending.DockerContext.OwnerToken != cleanupID || pending.DockerRestored {
+		t.Fatalf("durable unknown-result journal = %#v exists=%t error=%v", pending, exists, loadErr)
+	}
+
+	restartedDocker := &managedContextExecutor{host: host, description: "Managed by Remote Docker; owner=cleanup-b"}
+	restarted := newMacPairingCoordinator(macPairingOptions{
+		Store: store, ConfigTransactions: newConfigTransactions(store.Path), Secrets: credentials.NewMemoryStore(),
+		Docker: restartedDocker, DockerCLI: "docker-real",
+	})
+	if err := restarted.ReconcilePendingRevocations(context.Background()); err != nil {
+		t.Fatalf("restart recovery: %v", err)
+	}
+	for _, command := range restartedDocker.Commands() {
+		if len(command) >= 2 && (command[1] == "rm" || command[1] == "update") {
+			t.Fatalf("foreign context was mutated after unknown create: %#v", restartedDocker.Commands())
+		}
+	}
+	cfg, loadErr = store.Load()
+	if loadErr != nil || len(cfg.PendingRevocations) != 0 {
+		t.Fatalf("proven ownership mismatch was not terminal: %#v error=%v", cfg.PendingRevocations, loadErr)
+	}
+}
+
 func TestRestartedCleanupKeepsJournalWhenDockerInspectIsAmbiguous(t *testing.T) {
 	root := t.TempDir()
 	store := config.Store{Path: filepath.Join(root, "config.json")}
@@ -2468,9 +2843,114 @@ func TestRestartedCleanupKeepsJournalWhenDockerInspectIsAmbiguous(t *testing.T) 
 	}
 }
 
-type trackingDockerContextLocker struct {
+type trackingStateLocker struct {
 	held    bool
 	entries int
+}
+
+func seedPendingRemoteCleanup(t *testing.T, root string) (config.Store, *credentials.MemoryStore, string) {
+	t.Helper()
+	store := config.Store{Path: filepath.Join(root, "config.json")}
+	secrets := credentials.NewMemoryStore()
+	generation := "generation-1"
+	owner := "owner-generation-1"
+	if err := store.Save(config.Config{
+		SchemaVersion: config.CurrentSchemaVersion,
+		PendingRevocations: map[string]config.PendingRevocation{generation: {
+			Generation: generation, CleanupRequested: true, DockerRestored: true, LocalCleaned: true,
+			Device: config.Device{ClientDeviceID: "windows", PairingGeneration: generation, RevocationCredentialOwner: owner},
+		}},
+	}); err != nil {
+		t.Fatalf("seed pending cleanup: %v", err)
+	}
+	if err := secrets.Put(owner, revocationProofCredential, bytes.Repeat([]byte{3}, pairing.RevocationProofSize)); err != nil {
+		t.Fatalf("seed cleanup proof: %v", err)
+	}
+	return store, secrets, generation
+}
+
+type blockingRevokeTransport struct {
+	calls        atomic.Int32
+	started      chan struct{}
+	release      chan struct{}
+	once         sync.Once
+	beforeRevoke func()
+}
+
+func (t *blockingRevokeTransport) Candidates(context.Context) ([]pairingTarget, error) {
+	return nil, nil
+}
+func (t *blockingRevokeTransport) Bootstrap(context.Context, string, ed25519.PublicKey) (pairingTarget, pairing.SessionDescriptor, error) {
+	return pairingTarget{}, pairing.SessionDescriptor{}, errors.New("unused")
+}
+func (t *blockingRevokeTransport) Status(context.Context, pairingTarget, pairing.SessionDescriptor) (pairing.SessionStatus, error) {
+	return pairing.SessionStatus{}, errors.New("unused")
+}
+func (t *blockingRevokeTransport) Cancel(context.Context, pairingTarget, pairing.SessionDescriptor) error {
+	return errors.New("unused")
+}
+func (t *blockingRevokeTransport) Confirm(context.Context, pairingTarget, pairing.SessionDescriptor, string, string, string, string, []byte) (pairing.DeviceRecord, error) {
+	return pairing.DeviceRecord{}, errors.New("unused")
+}
+func (t *blockingRevokeTransport) Revoke(ctx context.Context, _ config.Device, _, _ string, _ []byte) error {
+	t.calls.Add(1)
+	if t.beforeRevoke != nil {
+		t.beforeRevoke()
+	}
+	if t.started != nil {
+		t.once.Do(func() { close(t.started) })
+	}
+	if t.release == nil {
+		if t.started != nil {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}
+	select {
+	case <-t.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type contextObservingDockerExecutor struct {
+	managedContextExecutor
+	contextErr error
+	restored   bool
+}
+
+func (e *contextObservingDockerExecutor) Run(ctx context.Context, invocation dockercli.Invocation) error {
+	e.contextErr = ctx.Err()
+	if len(invocation.Args) >= 2 && (invocation.Args[1] == "rm" || invocation.Args[1] == "update") {
+		e.restored = true
+	}
+	return e.managedContextExecutor.Run(ctx, invocation)
+}
+
+type unknownCreateResultExecutor struct {
+	inspect   int
+	createErr error
+}
+
+func (e *unknownCreateResultExecutor) Run(_ context.Context, invocation dockercli.Invocation) error {
+	if len(invocation.Args) < 2 || invocation.Args[0] != "context" {
+		return nil
+	}
+	switch invocation.Args[1] {
+	case "inspect":
+		e.inspect++
+		if e.inspect <= 2 {
+			return runtimeExitError{code: 1}
+		}
+		return runtimeExitError{code: 2}
+	case "create":
+		e.createErr = context.Canceled
+		return e.createErr
+	default:
+		return nil
+	}
 }
 
 type inspectFailureDockerExecutor struct{}
@@ -2479,7 +2959,7 @@ func (inspectFailureDockerExecutor) Run(context.Context, dockercli.Invocation) e
 	return runtimeExitError{code: 2}
 }
 
-func (l *trackingDockerContextLocker) WithLock(_ context.Context, operation func() error) error {
+func (l *trackingStateLocker) WithLock(_ context.Context, operation func() error) error {
 	l.held = true
 	l.entries++
 	defer func() { l.held = false }()
