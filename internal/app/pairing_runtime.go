@@ -538,6 +538,9 @@ func (c *macPairingCoordinator) commitPairingArtifacts(
 	alias := "remote-docker-device-" + remoteDeviceID
 	var contextChange dockercli.ContextChange
 	err := c.options.ConfigTransactions.RunContext(ctx, func() error {
+		if err := c.requireCompletionLeaseLocked(pending.cleanupID, pending.completionLeaseToken); err != nil {
+			return err
+		}
 		if err := sshtransport.PinKnownHost(c.options.KnownHostsPath, alias, record.SSHHostPublicKey); err != nil {
 			return unavailable("cannot pin paired SSH identity")
 		}
@@ -597,6 +600,25 @@ func (c *macPairingCoordinator) commitPairingArtifacts(
 		return device, contextChange, unavailable("cannot create managed Docker context")
 	}
 	return device, contextChange, nil
+}
+
+func (c *macPairingCoordinator) requireCompletionLeaseLocked(generation, token string) error {
+	if generation == "" || token == "" {
+		return needsAction("pairing completion lease is missing")
+	}
+	cfg, err := loadAgentConfig(c.options.Store)
+	if err != nil {
+		return unavailable("cannot verify pairing completion lease")
+	}
+	pending, exists := cfg.PendingRevocations[generation]
+	if !exists || pending.CleanupRequested || pending.CompletionLeaseToken != token {
+		return needsAction("pairing completion lease is no longer active")
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, pending.CompletionLeaseExpiresAt)
+	if err != nil || !c.options.Now().UTC().Before(expiresAt) {
+		return needsAction("pairing completion lease has expired")
+	}
+	return nil
 }
 
 func (c *macPairingCoordinator) Approve(context.Context, string) (localapi.PairingStatusResult, error) {

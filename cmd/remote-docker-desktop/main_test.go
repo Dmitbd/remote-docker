@@ -49,6 +49,10 @@ func TestDesktopUpgradeGateStopsLegacyWriterBeforePersistingV6(t *testing.T) {
 			events = append(events, "stop-legacy")
 			return nil
 		},
+		confirmLegacyStopped: func(context.Context) error {
+			events = append(events, "confirm-stopped")
+			return nil
+		},
 		upgradeConfig: func(context.Context, string) error {
 			events = append(events, "write-v6")
 			return nil
@@ -57,11 +61,30 @@ func TestDesktopUpgradeGateStopsLegacyWriterBeforePersistingV6(t *testing.T) {
 	if err != nil || got != lock {
 		t.Fatalf("acquireDesktopUpgradeGate() lock=%#v error=%v", got, err)
 	}
-	want := []string{"lock", "stop-legacy", "write-v6"}
+	want := []string{"lock", "stop-legacy", "confirm-stopped", "write-v6"}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("upgrade gate order = %v, want %v", events, want)
 	}
 	_ = got.Close()
+}
+
+func TestDesktopUpgradeGateRejectsPipeAbsenceWhileLegacyProcessExists(t *testing.T) {
+	wantErr := errors.New("legacy process still starting")
+	upgraded := false
+	_, err := acquireDesktopUpgradeGate(context.Background(), "windows", filepath.Join(t.TempDir(), "config.json"), desktopUpgradeDependencies{
+		acquireInstance: func(string) (desktop.InstanceLock, error) { return &recordingInstanceLock{}, nil },
+		stopLegacy:      func(context.Context) error { return nil },
+		confirmLegacyStopped: func(context.Context) error {
+			return wantErr
+		},
+		upgradeConfig: func(context.Context, string) error {
+			upgraded = true
+			return nil
+		},
+	})
+	if !errors.Is(err, wantErr) || upgraded {
+		t.Fatalf("upgrade gate error=%v upgraded=%t, want process proof failure", err, upgraded)
+	}
 }
 
 func TestDesktopUpgradeGateReleasesInstanceWhenLegacyStopFails(t *testing.T) {
@@ -71,8 +94,9 @@ func TestDesktopUpgradeGateReleasesInstanceWhenLegacyStopFails(t *testing.T) {
 		acquireInstance: func(string) (desktop.InstanceLock, error) {
 			return &recordingInstanceLock{onClose: func() { closed = true }}, nil
 		},
-		stopLegacy:    func(context.Context) error { return wantErr },
-		upgradeConfig: func(context.Context, string) error { t.Fatal("config upgraded before legacy stop"); return nil },
+		stopLegacy:           func(context.Context) error { return wantErr },
+		confirmLegacyStopped: func(context.Context) error { return nil },
+		upgradeConfig:        func(context.Context, string) error { t.Fatal("config upgraded before legacy stop"); return nil },
 	})
 	if !errors.Is(err, wantErr) || !closed {
 		t.Fatalf("upgrade gate error=%v closed=%t", err, closed)

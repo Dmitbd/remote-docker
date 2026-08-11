@@ -177,6 +177,76 @@ func TestProvisionScriptReportsEarlyValidationFailuresToInstaller(t *testing.T) 
 	}
 }
 
+func TestWindowsUpdaterStopsBeforeReplacingAnUnconfirmedDesktop(t *testing.T) {
+	script := readWindowsPackagingFile(t, "install-agent.ps1")
+	ordered := []string{
+		"& $activePath --shutdown",
+		"$shutdownExitCode = $LASTEXITCODE",
+		"if ($shutdownExitCode -ne 0)",
+		"Move-Item -LiteralPath $activePath -Destination $retiredPath",
+		"        Wait-RemoteDockerProcessExit",
+		"Move-Item -LiteralPath $stagedPath -Destination $activePath",
+	}
+	assertFragmentsInOrder(t, "install-agent.ps1", script, ordered)
+}
+
+func TestWindowsUpdaterPreservesRetiredBinaryUntilReplacementOrRestoreIsVerified(t *testing.T) {
+	script := readWindowsPackagingFile(t, "install-agent.ps1")
+	retire := strings.Index(script, "Move-Item -LiteralPath $activePath -Destination $retiredPath")
+	unsafeCleanup := strings.Index(script, "$safeToCleanupStaging = $false")
+	restore := strings.Index(script, "Move-Item -LiteralPath $retiredPath -Destination $activePath")
+	restoreVerified := -1
+	if restore >= 0 {
+		if relative := strings.Index(script[restore:], "$safeToCleanupStaging = $true"); relative >= 0 {
+			restoreVerified = restore + relative
+		}
+	}
+	cleanupGuard := strings.LastIndex(script, "if ($safeToCleanupStaging -and (Test-Path -LiteralPath $stagingRoot))")
+	cleanup := strings.LastIndex(script, "Remove-Item -LiteralPath $stagingRoot -Recurse -Force")
+	if retire < 0 || unsafeCleanup <= retire || restore <= unsafeCleanup || restoreVerified <= restore || cleanupGuard <= restoreVerified || cleanup <= cleanupGuard {
+		t.Fatal("install-agent.ps1 can delete the retired executable before replacement or restoration is verified")
+	}
+}
+
+func TestWindowsInstallerStopsBeforeReplacingAnUnconfirmedDesktop(t *testing.T) {
+	script := readWindowsPackagingFile(t, filepath.Join("installer", "RemoteDocker.nsi"))
+	ordered := []string{
+		"nsExec::ExecToStack /TIMEOUT=15000 '\"$INSTDIR\\RemoteDocker.exe\" --shutdown'",
+		"${If} $0 != \"0\"",
+		"Rename \"$INSTDIR\\RemoteDocker.exe\" \"$INSTDIR\\RemoteDocker.exe.upgrade-old\"",
+		"-File \"$PLUGINSDIR\\wait-desktop-exit.ps1\"",
+		"File /oname=RemoteDocker.exe \"${APP_SOURCE}\"",
+	}
+	assertFragmentsInOrder(t, "RemoteDocker.nsi", script, ordered)
+}
+
+func TestWindowsInstallerChecksRollbackBeforeClaimingSafeAbort(t *testing.T) {
+	script := readWindowsPackagingFile(t, filepath.Join("installer", "RemoteDocker.nsi"))
+	waitRestore := strings.Index(script, "Goto desktop_restore_binary")
+	binaryFailed := strings.Index(script, "desktop_binary_failed:")
+	binaryRestore := -1
+	if binaryFailed >= 0 {
+		if relative := strings.Index(script[binaryFailed:], "Goto desktop_restore_binary"); relative >= 0 {
+			binaryRestore = binaryFailed + relative
+		}
+	}
+	restoreLabel := strings.Index(script, "desktop_restore_binary:")
+	clearErrors := -1
+	if restoreLabel >= 0 {
+		if relative := strings.Index(script[restoreLabel:], "ClearErrors"); relative >= 0 {
+			clearErrors = restoreLabel + relative
+		}
+	}
+	rename := strings.Index(script, "Rename \"$INSTDIR\\RemoteDocker.exe.upgrade-old\" \"$INSTDIR\\RemoteDocker.exe\"")
+	restoreError := strings.Index(script, "IfErrors desktop_restore_failed")
+	activeCheck := strings.Index(script, "IfFileExists \"$INSTDIR\\RemoteDocker.exe\" desktop_shutdown_failed desktop_restore_failed")
+	restoreFailed := strings.Index(script, "desktop_restore_failed:")
+	backupCheck := strings.Index(script, "IfFileExists \"$INSTDIR\\RemoteDocker.exe.upgrade-old\" desktop_restore_backup_preserved desktop_restore_backup_missing")
+	if waitRestore < 0 || binaryFailed <= waitRestore || binaryRestore <= binaryFailed || restoreLabel <= binaryRestore || clearErrors <= restoreLabel || rename <= clearErrors || restoreError <= rename || activeCheck <= restoreError || restoreFailed <= activeCheck || backupCheck <= restoreFailed {
+		t.Fatal("RemoteDocker.nsi can claim a safe abort without verifying the restored executable or preserving its backup")
+	}
+}
+
 func TestProvisionFirstBootIsLFStableAndIdempotentAfterPartialImport(t *testing.T) {
 	script := readWindowsScript(t, "provision.ps1")
 
@@ -247,6 +317,31 @@ func readWindowsScript(t *testing.T, name string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(contents)
+}
+
+func readWindowsPackagingFile(t *testing.T, name string) string {
+	t.Helper()
+	path := filepath.Join("..", "..", "packaging", "windows", name)
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(contents)
+}
+
+func assertFragmentsInOrder(t *testing.T, name, contents string, fragments []string) {
+	t.Helper()
+	last := -1
+	for _, fragment := range fragments {
+		position := strings.Index(contents, fragment)
+		if position < 0 {
+			t.Fatalf("%s is missing %q", name, fragment)
+		}
+		if position <= last {
+			t.Fatalf("%s fragment %q is out of order", name, fragment)
+		}
+		last = position
+	}
 }
 
 type recordingApplyExecutor struct {

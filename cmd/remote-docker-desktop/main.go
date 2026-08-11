@@ -174,9 +174,10 @@ func run() error {
 }
 
 type desktopUpgradeDependencies struct {
-	acquireInstance func(string) (desktop.InstanceLock, error)
-	stopLegacy      func(context.Context) error
-	upgradeConfig   func(context.Context, string) error
+	acquireInstance      func(string) (desktop.InstanceLock, error)
+	stopLegacy           func(context.Context) error
+	confirmLegacyStopped func(context.Context) error
+	upgradeConfig        func(context.Context, string) error
 }
 
 func productionDesktopUpgradeDependencies() desktopUpgradeDependencies {
@@ -187,6 +188,13 @@ func productionDesktopUpgradeDependencies() desktopUpgradeDependencies {
 				var result map[string]any
 				return (localapi.Client{}).Call(callCtx, method, nil, &result)
 			})
+		},
+		confirmLegacyStopped: func(ctx context.Context) error {
+			executablePath, err := os.Executable()
+			if err != nil {
+				return errors.New("locate desktop executable for upgrade gate")
+			}
+			return desktop.WaitForNoOtherInstance(ctx, executablePath, 50*time.Millisecond)
 		},
 		upgradeConfig: app.UpgradeConfig,
 	}
@@ -205,11 +213,15 @@ func acquireDesktopUpgradeGate(
 		return nil, err
 	}
 	if platform == "windows" {
-		if dependencies.stopLegacy == nil {
+		if dependencies.stopLegacy == nil || dependencies.confirmLegacyStopped == nil {
 			_ = instance.Close()
-			return nil, errors.New("legacy desktop shutdown is unavailable")
+			return nil, errors.New("legacy desktop shutdown proof is unavailable")
 		}
 		if err := dependencies.stopLegacy(ctx); err != nil {
+			_ = instance.Close()
+			return nil, err
+		}
+		if err := dependencies.confirmLegacyStopped(ctx); err != nil {
 			_ = instance.Close()
 			return nil, err
 		}

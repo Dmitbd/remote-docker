@@ -1634,6 +1634,50 @@ func TestDurableCompletionLeaseProtectsCommitFromSecondProcess(t *testing.T) {
 	}
 }
 
+func TestExpiredCompletionLeaseCannotCommitLocalArtifacts(t *testing.T) {
+	root := t.TempDir()
+	store := config.Store{Path: filepath.Join(root, "config.json")}
+	now := time.Now().UTC()
+	generation := "expired-completion"
+	token := "expired-owner"
+	if err := store.Save(config.Config{
+		SchemaVersion: config.CurrentSchemaVersion,
+		PendingRevocations: map[string]config.PendingRevocation{generation: {
+			Generation: generation, CompletionLeaseToken: token,
+			CompletionLeaseExpiresAt: now.Add(-time.Second).Format(time.RFC3339Nano),
+		}},
+	}); err != nil {
+		t.Fatalf("seed expired completion lease: %v", err)
+	}
+	docker := &runtimeDockerExecutor{}
+	knownHostsPath := filepath.Join(root, "known_hosts")
+	sshConfigPath := filepath.Join(root, "ssh_config")
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Store: store, Secrets: credentials.NewMemoryStore(), Docker: docker,
+		DockerCLI: "docker-real", DockerContext: "remote-docker",
+		KnownHostsPath: knownHostsPath, SSHConfigPath: sshConfigPath,
+		AgentSocketPath: filepath.Join(root, "ssh-agent.sock"), ControlDir: filepath.Join(root, "control"),
+		Now: func() time.Time { return now },
+	})
+	_, _, err := coordinator.commitPairingArtifacts(
+		context.Background(),
+		pendingPairing{cleanupID: generation, completionLeaseToken: token},
+		"peer", pairing.DeviceRecord{SSHHostPublicKey: testAuthorizedKey(t)}, config.Device{},
+	)
+	var publicErr *localapi.PublicError
+	if !errors.As(err, &publicErr) || publicErr.Code != localapi.ErrorNeedsAction {
+		t.Fatalf("expired completion commit error = %v, want needs-action", err)
+	}
+	for _, path := range []string{knownHostsPath, sshConfigPath} {
+		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("expired completion wrote %s: %v", path, statErr)
+		}
+	}
+	if commands := docker.calls; len(commands) != 0 {
+		t.Fatalf("expired completion mutated Docker: %#v", commands)
+	}
+}
+
 func TestMacPairingReportsProtocolUpgradeGate(t *testing.T) {
 	transport := &runtimePairingTransport{bootstrapErr: pairing.ErrProtocolUpgradeRequired}
 	coordinator := newMacPairingCoordinator(macPairingOptions{
@@ -2900,6 +2944,7 @@ func TestRestartAfterDockerPreconditionFailureDoesNotDeleteForeignContext(t *tes
 	root := t.TempDir()
 	store := config.Store{Path: filepath.Join(root, "config.json")}
 	cleanupID := "cleanup-a"
+	completionToken := "completion-a"
 	host := "ssh://remote-docker-device-peer"
 	firstDocker := &contextCreatedBeforeApplyExecutor{host: host, description: "Managed by Remote Docker; owner=cleanup-b"}
 	first := newMacPairingCoordinator(macPairingOptions{
@@ -2909,15 +2954,19 @@ func TestRestartAfterDockerPreconditionFailureDoesNotDeleteForeignContext(t *tes
 	})
 	if err := first.persistPendingRevocation(context.Background(), cleanupID, config.PendingRevocation{
 		Generation: cleanupID, RemoteRevoked: true, LocalCleaned: true,
+		CompletionLeaseToken: completionToken, CompletionLeaseExpiresAt: time.Now().Add(time.Minute).Format(time.RFC3339Nano),
 	}); err != nil {
 		t.Fatalf("persist initial cleanup journal: %v", err)
 	}
-	pending := pendingPairing{cleanupID: cleanupID}
+	pending := pendingPairing{cleanupID: cleanupID, completionLeaseToken: completionToken}
 	_, change, err := first.commitPairingArtifacts(context.Background(), pending, "peer", pairing.DeviceRecord{
 		SSHHostPublicKey: testAuthorizedKey(t),
 	}, config.Device{})
 	if err == nil || !change.Created || change.OwnerToken != cleanupID {
 		t.Fatalf("commitPairingArtifacts() change=%#v error=%v, want durable failed create plan", change, err)
+	}
+	if err := first.requestPendingCleanup(cleanupID); err != nil {
+		t.Fatalf("activate cleanup after failed commit: %v", err)
 	}
 	cfg, loadErr := store.Load()
 	if loadErr != nil || cfg.PendingRevocations[cleanupID].DockerContext.OwnerToken != cleanupID {
@@ -2942,6 +2991,7 @@ func TestRestartAfterUnknownDockerCreateDoesNotDeleteForeignContext(t *testing.T
 	root := t.TempDir()
 	store := config.Store{Path: filepath.Join(root, "config.json")}
 	cleanupID := "cleanup-a"
+	completionToken := "completion-a"
 	host := "ssh://remote-docker-device-peer"
 	firstDocker := &unknownCreateResultExecutor{}
 	first := newMacPairingCoordinator(macPairingOptions{
@@ -2952,14 +3002,20 @@ func TestRestartAfterUnknownDockerCreateDoesNotDeleteForeignContext(t *testing.T
 	})
 	if err := first.persistPendingRevocation(context.Background(), cleanupID, config.PendingRevocation{
 		Generation: cleanupID, RemoteRevoked: true, LocalCleaned: true,
+		CompletionLeaseToken: completionToken, CompletionLeaseExpiresAt: time.Now().Add(time.Minute).Format(time.RFC3339Nano),
 	}); err != nil {
 		t.Fatalf("persist initial cleanup journal: %v", err)
 	}
-	_, change, err := first.commitPairingArtifacts(context.Background(), pendingPairing{cleanupID: cleanupID}, "peer", pairing.DeviceRecord{
+	_, change, err := first.commitPairingArtifacts(context.Background(), pendingPairing{
+		cleanupID: cleanupID, completionLeaseToken: completionToken,
+	}, "peer", pairing.DeviceRecord{
 		SSHHostPublicKey: testAuthorizedKey(t),
 	}, config.Device{})
 	if err == nil || !errors.Is(firstDocker.createErr, context.Canceled) || !change.Created || change.OwnerToken != cleanupID {
 		t.Fatalf("unknown Docker create change=%#v createErr=%v error=%v", change, firstDocker.createErr, err)
+	}
+	if err := first.requestPendingCleanup(cleanupID); err != nil {
+		t.Fatalf("activate cleanup after unknown create: %v", err)
 	}
 	cfg, loadErr := store.Load()
 	pending, exists := cfg.PendingRevocations[cleanupID]
