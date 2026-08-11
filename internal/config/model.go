@@ -1,6 +1,6 @@
 package config
 
-const CurrentSchemaVersion = 4
+const CurrentSchemaVersion = 5
 
 // Config contains non-secret application settings.
 type Config struct {
@@ -27,6 +27,7 @@ type Device struct {
 	TransportVersion          int                 `json:"transportVersion,omitempty"`
 	RevocationProofHash       string              `json:"revocationProofHash,omitempty"`
 	RevocationCredentialOwner string              `json:"revocationCredentialOwner,omitempty"`
+	PairingGeneration         string              `json:"pairingGeneration,omitempty"`
 	DockerContext             DockerContextChange `json:"dockerContext,omitempty"`
 }
 
@@ -45,9 +46,14 @@ type DockerContextChange struct {
 type PendingRevocation struct {
 	Device           Device              `json:"device"`
 	DockerContext    DockerContextChange `json:"dockerContext,omitempty"`
+	Generation       string              `json:"generation,omitempty"`
 	SessionID        string              `json:"sessionId,omitempty"`
 	LocalDeviceID    string              `json:"localDeviceId,omitempty"`
 	CleanupRequested bool                `json:"cleanupRequested,omitempty"`
+	RemoteRevoked    bool                `json:"remoteRevoked,omitempty"`
+	DockerRestored   bool                `json:"dockerRestored,omitempty"`
+	LocalCleaned     bool                `json:"localCleaned,omitempty"`
+	Finished         bool                `json:"finished,omitempty"`
 }
 
 // Workspace is the persisted public registration used by bind-mount policy.

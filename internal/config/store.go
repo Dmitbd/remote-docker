@@ -117,6 +117,14 @@ func migrate(cfg Config) (Config, Migration, error) {
 			cfg.Devices = nil
 		}
 	}
+	if cfg.SchemaVersion < 5 {
+		for generation, pending := range cfg.PendingRevocations {
+			if pending.Generation == "" {
+				pending.Generation = generation
+				cfg.PendingRevocations[generation] = pending
+			}
+		}
+	}
 	if cfg.SchemaVersion < CurrentSchemaVersion {
 		cfg.SchemaVersion = CurrentSchemaVersion
 	}

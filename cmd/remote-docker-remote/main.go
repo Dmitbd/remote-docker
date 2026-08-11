@@ -49,7 +49,9 @@ func main() {
 	case "pairing-install":
 		os.Exit(runPairingInstall(context.Background(), defaultPairingRuntime(), os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
 	case "pairing-revoke":
-		os.Exit(runPairingRevoke(defaultPairingRuntime(), os.Args[2:], os.Stderr))
+		os.Exit(runPairingRevokeCommand(
+			context.Background(), defaultPairingRuntime(), defaultRemoteSyncRuntime(), os.Args[2:], os.Stderr,
+		))
 	case "runtime-prepare":
 		if len(os.Args) != 2 {
 			os.Exit(2)
@@ -141,9 +143,9 @@ func runRPCWithPresenceMarker(
 			decoder.DisallowUnknownFields()
 			if err := decoder.Decode(&params); err != nil {
 				outgoing.Error = &rpcError{Code: -32602, Message: "invalid params"}
-			} else if syncRuntime != nil && syncRuntime.Revoke(context.Background(), params.DeviceID) != nil {
-				outgoing.Error = &rpcError{Code: -32001, Message: "managed pairing revocation failed"}
-			} else if code := runPairingRevoke(pairingRuntime, []string{"--device", params.DeviceID}, io.Discard); code != 0 {
+			} else if code := runPairingRevokeCommand(
+				context.Background(), pairingRuntime, syncRuntime, []string{"--device", params.DeviceID}, io.Discard,
+			); code != 0 {
 				outgoing.Error = &rpcError{Code: -32001, Message: "managed pairing revocation failed"}
 			} else {
 				outgoing.Result = map[string]any{"revoked": true}

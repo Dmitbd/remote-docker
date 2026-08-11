@@ -55,6 +55,26 @@ func EnsureContext(
 	host string,
 	expectedPreviousHost ...string,
 ) (ContextChange, error) {
+	change, err := PlanContext(ctx, executor, cli, name, host, expectedPreviousHost...)
+	if err != nil {
+		return ContextChange{}, err
+	}
+	if err := ApplyContext(ctx, executor, cli, change); err != nil {
+		return ContextChange{}, err
+	}
+	return change, nil
+}
+
+// PlanContext observes the managed context and returns the exact mutation and
+// rollback record without changing Docker state.
+func PlanContext(
+	ctx context.Context,
+	executor Executor,
+	cli string,
+	name string,
+	host string,
+	expectedPreviousHost ...string,
+) (ContextChange, error) {
 	if !managedEndpoint(host) {
 		return ContextChange{}, fmt.Errorf("%w: requested endpoint is not managed by Remote Docker", ErrContextCollision)
 	}
@@ -79,32 +99,44 @@ func EnsureContext(
 		if len(expectedPreviousHost) == 0 || expectedPreviousHost[0] == "" || previousHost != expectedPreviousHost[0] {
 			return ContextChange{}, fmt.Errorf("%w: %q does not point to the exact previous managed endpoint", ErrContextCollision, name)
 		}
-		if err := updateContext(ctx, executor, cli, name, host); err != nil {
-			return ContextChange{}, err
-		}
 		return change, nil
 	}
 	if ExitCode(inspectErr) != 1 {
 		return ContextChange{}, fmt.Errorf("inspect docker context %q: %w", name, inspectErr)
 	}
 
+	change.Created = true
+	return change, nil
+}
+
+// ApplyContext applies a previously observed plan. Callers can durably save
+// the ContextChange before invoking this mutation.
+func ApplyContext(ctx context.Context, executor Executor, cli string, change ContextChange) error {
+	if change.Name == "" || !managedEndpoint(change.CurrentHost) || change.Created && change.PreviousHost != "" {
+		return fmt.Errorf("%w: managed Docker context plan is invalid", ErrContextCollision)
+	}
+	if !change.Changed() {
+		return nil
+	}
+	if !change.Created {
+		return updateContext(ctx, executor, cli, change.Name, change.CurrentHost)
+	}
+	var stderr bytes.Buffer
 	createErr := executor.Run(ctx, Invocation{
 		Binary: cli,
 		Args: []string{
 			"context", "create",
 			"--description", managedContextDescription,
-			"--docker", "host=" + host,
-			name,
+			"--docker", "host=" + change.CurrentHost,
+			change.Name,
 		},
 		Stdout: io.Discard,
 		Stderr: &stderr,
 	})
 	if createErr != nil {
-		return ContextChange{}, fmt.Errorf("create docker context %q: %w", name, createErr)
+		return fmt.Errorf("create docker context %q: %w", change.Name, createErr)
 	}
-
-	change.Created = true
-	return change, nil
+	return nil
 }
 
 // RestoreContext rolls back a change only while the exact managed context

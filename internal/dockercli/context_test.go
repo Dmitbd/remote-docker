@@ -45,6 +45,29 @@ func TestEnsureContextCreatesMissingManagedContext(t *testing.T) {
 	}
 }
 
+func TestPlanAndApplyContextSeparateObservationFromMutation(t *testing.T) {
+	executor := &recordingExecutor{results: []executorResult{{err: codedError{code: 1}}, {}}}
+	change, err := PlanContext(
+		context.Background(), executor, "docker-real", "remote-docker", "ssh://remote-docker-device-peer",
+	)
+	if err != nil {
+		t.Fatalf("PlanContext() error = %v", err)
+	}
+	if !change.Created || !reflect.DeepEqual(executor.args(), [][]string{{"context", "inspect", "remote-docker"}}) {
+		t.Fatalf("plan change=%#v commands=%#v", change, executor.args())
+	}
+	if err := ApplyContext(context.Background(), executor, "docker-real", change); err != nil {
+		t.Fatalf("ApplyContext() error = %v", err)
+	}
+	want := [][]string{
+		{"context", "inspect", "remote-docker"},
+		{"context", "create", "--description", managedContextDescription, "--docker", "host=ssh://remote-docker-device-peer", "remote-docker"},
+	}
+	if !reflect.DeepEqual(executor.args(), want) {
+		t.Fatalf("commands = %#v, want %#v", executor.args(), want)
+	}
+}
+
 func TestRestoreContextRevertsOnlyExpectedManagedEndpoint(t *testing.T) {
 	executor := &recordingExecutor{results: []executorResult{
 		{stdout: `[{"Name":"remote-docker","Metadata":{"Description":"Managed by Remote Docker"},"Endpoints":{"docker":{"Host":"ssh://remote-docker-device-new"}}}]`},

@@ -158,6 +158,43 @@ func TestRPCPairingRevokeUsesManagedAuthorizationRuntime(t *testing.T) {
 	}
 }
 
+func TestPairingRevokeCommandRemovesSyncthingAndSSHTrust(t *testing.T) {
+	root := t.TempDir()
+	runtime := pairingRuntime{AuthorizedKeysPath: filepath.Join(root, "authorized_keys")}
+	if err := os.WriteFile(runtime.AuthorizedKeysPath, []byte(testAuthorizedLine(t, "mac-device")), 0o600); err != nil {
+		t.Fatalf("seed authorized keys: %v", err)
+	}
+	syncOperations := &recordingRemoteSync{}
+	if code := runPairingRevokeCommand(
+		context.Background(), runtime, syncOperations, []string{"--device", "mac-device"}, &bytes.Buffer{},
+	); code != 0 {
+		t.Fatalf("runPairingRevokeCommand() code = %d", code)
+	}
+	if syncOperations.revoked != "mac-device" {
+		t.Fatalf("revoked Syncthing device = %q, want mac-device", syncOperations.revoked)
+	}
+	if contents, _ := os.ReadFile(runtime.AuthorizedKeysPath); len(contents) != 0 {
+		t.Fatalf("authorized keys after command revoke = %q", contents)
+	}
+}
+
+func TestPairingRevokeCommandIsIdempotentAfterTrustWasAlreadyRemoved(t *testing.T) {
+	root := t.TempDir()
+	runtime := pairingRuntime{AuthorizedKeysPath: filepath.Join(root, "authorized_keys")}
+	if err := os.WriteFile(runtime.AuthorizedKeysPath, nil, 0o600); err != nil {
+		t.Fatalf("seed empty authorized keys: %v", err)
+	}
+	syncOperations := &recordingRemoteSync{revokeErr: errors.New("Syncthing identity is already absent")}
+	if code := runPairingRevokeCommand(
+		context.Background(), runtime, syncOperations, []string{"--device", "mac-device"}, &bytes.Buffer{},
+	); code != 0 {
+		t.Fatalf("idempotent runPairingRevokeCommand() code = %d", code)
+	}
+	if syncOperations.revoked != "" {
+		t.Fatalf("already-complete revoke called Syncthing again for %q", syncOperations.revoked)
+	}
+}
+
 func TestRPCDiagnosticsExposeTypedObservationAndExactRecoveryOnly(t *testing.T) {
 	operations := &recordingRemoteDiagnostics{
 		observation: remoteDiagnosticObservation{
@@ -342,11 +379,12 @@ type recordingRemoteSync struct {
 	statusFolder string
 	statusDevice string
 	revoked      string
+	revokeErr    error
 }
 
 func (r *recordingRemoteSync) Revoke(_ context.Context, deviceID string) error {
 	r.revoked = deviceID
-	return nil
+	return r.revokeErr
 }
 
 func (r *recordingRemoteSync) Configure(_ context.Context, params remoteSyncConfigureParams) error {
