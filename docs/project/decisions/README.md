@@ -2,7 +2,7 @@
 
 **Статус документа:** Текущее
 
-**Проверено относительно:** `main` @ `3dc60ed`
+**Проверено относительно:** `main` @ `cfc06ec`
 **Дата содержательной проверки:** 2026-08-11
 
 ADR фиксирует не задачу и не коммит, а значимое решение, которое влияет на долгосрочную архитектуру, пользовательский контракт или безопасность.
@@ -40,6 +40,7 @@ ADR нужен при изменении:
 | [0004](0004-authenticated-tunnel-no-insecure-docker-api.md) | Принято | Один authenticated tunnel вместо открытого Docker API и raw internal services |
 | [0005](0005-manual-startup-and-explicit-finish.md) | Принято | Manual startup и explicit Finish work вместо autostart |
 | [0006](0006-free-unsigned-packages.md) | Принято | Бесплатные unsigned packages с проверяемым происхождением |
+| [0007](0007-versioned-pairing-transactional-cleanup.md) | Принято | Версионированный pairing и durable transactional cleanup |
 
 ## Шаблон
 

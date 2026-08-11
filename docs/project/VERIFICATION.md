@@ -2,7 +2,7 @@
 
 **Статус документа:** Текущее
 
-**Проверено относительно:** `main` @ `3dc60ed`, активная ветка @ `fd6a26f`
+**Проверено относительно:** `main` @ `cfc06ec`
 **Дата содержательной проверки:** 2026-08-11
 
 ## Правила доказательств
@@ -19,7 +19,7 @@
 | Область | Существующее доказательство | Статус для `main` |
 |---|---|---|
 | Lifecycle state machine | `internal/lifecycle/*_test.go` | Реализовано в CI, не физическая проверка |
-| Pairing protocol и runtime | `internal/pairing`, `internal/app` tests | Реализовано в CI, активная ветка требует focused review |
+| Pairing protocol и runtime | `internal/pairing`, `internal/app` tests | Focused race/review пройдены для `cfc06ec`; не физическая проверка |
 | Tunnel TLS/yamux/reconnect | `internal/tunnel`, `tests/transportlab` | Реализовано в CI; flake см. RD-B009 |
 | Docker command analysis/preflight | `internal/dockercli`, `internal/app` tests | Реализовано в CI, не реальный проект |
 | Workspace policy/sync control | `internal/workspace`, `internal/syncer`, `internal/app` tests | Реализовано в CI, не две физические файловые системы |
@@ -28,6 +28,14 @@
 | WSL/package contracts | integration scripts и Pester | Частично platform-specific |
 
 Конкретный PR запускает только относящиеся к изменению packages и contracts согласно `AGENTS.md`.
+
+### Интеграционная проверка 2026-08-11
+
+- Focused race tests пройдены для pairing/runtime/config/Docker ownership/file lock/lifecycle/local API/desktop UI и затронутых commands.
+- Новый `process-wait` и `single-instance` путь пройден отдельно с race detector; известный общий `ProcessLauncher` race остаётся в RD-B008.
+- Windows cross-compilation пройдена для `internal/app`, `internal/desktop` и desktop command.
+- `internal/provision` contracts проверяют shutdown exit code, ожидание процесса и сохранение rollback binary.
+- Физический запуск Windows и реальная NSIS-сборка этим результатом не подтверждены.
 
 ## Packaging checks
 
@@ -43,7 +51,7 @@
 
 ## Физическая Mac↔Windows матрица
 
-Начальный статус всех строк — **Не проверено** для release artifact, созданного после активной pairing fix-ветки.
+Начальный статус всех строк — **Не проверено** для release artifact, созданного после `main` @ `cfc06ec`.
 
 | Сценарий | Ожидаемый результат | Статус |
 |---|---|---|
@@ -161,4 +169,4 @@ Evidence summary:
 Открытые backlog IDs:
 ```
 
-На 2026-08-11 физического прогона release candidate после `fix/desktop-pairing-state` нет.
+На 2026-08-11 физического прогона release candidate после `main` @ `cfc06ec` нет.

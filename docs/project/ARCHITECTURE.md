@@ -1,16 +1,13 @@
 # Архитектура Remote Docker
 
-**Статус документа:** Текущее + В активной ветке + Целевое состояние
+**Статус документа:** Текущее + Целевое состояние
 
-**Текущее проверено относительно:** `main` @ `3dc60ed`
-
-**Активная ветка проверена относительно:** `fix/desktop-pairing-state` @ `fd6a26f`
+**Текущее проверено относительно:** `main` @ `cfc06ec`
 **Дата содержательной проверки:** 2026-08-11
 
 ## Как читать статусы
 
 - **Текущее** — находится в `main` и подтверждено production-кодом.
-- **В активной ветке** — находится только в `fix/desktop-pairing-state`, не является частью `main` и ещё требует независимого review и физической проверки.
 - **Целевое состояние** — обязательное свойство рабочего MVP, которое может быть реализовано не полностью.
 
 ## Системная граница
@@ -106,11 +103,11 @@ Source workspaces размещаются в Linux filesystem WSL, а не в `/m
 
 Pairing endpoint использует тот же внешний port `49221`, но отдельный TLS ALPN от рабочего tunnel.
 
-### В активной ветке
+Pairing reconciliation использует side-effect-free observation: status polling не подтверждает trust и не создаёт артефакты. Completion выполняется отдельно под durable session/generation lease.
 
-`fix/desktop-pairing-state` добавляет background reconciliation, side-effect-free observation, durable rollback journal, revocation proof, pairing generation, completion/cleanup leases, ownership token Docker Context, cross-process file locks и explicit upgrade gate. Эти механизмы пока не являются контрактом `main`.
+До remote confirmation Mac сохраняет rollback journal и revocation proof. Cleanup имеет отдельные durable стадии для remote revoke, Docker Context и локальных SSH/credential артефактов. Cross-process file locks, generation-scoped leases и schema upgrade gate защищают операции от параллельных процессов Remote Docker и несовместимых writers.
 
-Последний local HEAD `fd6a26f` закрывает известные review findings по startup gap, проверке shutdown updater/installer и продлению completion lease. Для него ещё не зафиксированы независимое принятие и физический Mac↔Windows результат.
+Pairing protocol версионирован. Несовместимые Mac и Windows получают явное требование обновить оба приложения вместо попытки продолжить с различающимся wire-контрактом. Автоматические проверки этого пути пройдены; физический Mac↔Windows результат остаётся обязательным.
 
 ## Рабочий tunnel
 
@@ -200,9 +197,7 @@ UI не определяет состояние самостоятельно: о
 - WSL хранит authorized SSH identity, Syncthing configuration и managed Docker data;
 - installer хранит application/data roots и владеет только своими shortcuts/firewall rules.
 
-### В активной ветке
-
-Pairing generation, revocation proof, rollback stages, cleanup lease и Docker Context owner token делают cleanup restart-safe и cross-process-aware. До merge эти поля нельзя считать форматом текущего `main` config.
+Pairing generation, revocation proof, rollback stages, cleanup lease и Docker Context owner token входят в текущий config schema. Docker Context изменяется или восстанавливается только при точном совпадении owner token, endpoint и managed description; неоднозначное ownership приводит к fail-closed результату без мутации чужого context.
 
 ## Lifecycle операций
 
@@ -236,10 +231,10 @@ Pairing generation, revocation proof, rollback stages, cleanup lease и Docker C
 |---|---|
 | Один Mac client и один Windows host в MVP | Текущее |
 | Нет незащищённого Docker API в LAN | Текущее |
-| Необратимые pairing/cleanup действия имеют явный owner и durable intent | В активной ветке |
-| Status/snapshot не выполняет скрытое completion или revoke | В активной ветке |
-| Cleanup идемпотентен и не изменяет чужие ресурсы | Текущее частично; усилено в активной ветке |
-| Независимые cleanup stages имеют независимые bounded contexts | В активной ветке |
+| Необратимые pairing/cleanup действия имеют явный owner и durable intent | Текущее |
+| Status/snapshot не выполняет скрытое completion или revoke | Текущее |
+| Cleanup идемпотентен и не изменяет чужие ресурсы | Текущее; требует физической проверки |
+| Независимые cleanup stages имеют независимые bounded contexts | Текущее |
 | Finish work прекращает всю принадлежащую приложению фоновую работу | Целевое; требует физической проверки |
 | Документы не выдают автоматические tests за физическое доказательство | Текущее правило проекта |
 
@@ -251,5 +246,5 @@ Pairing generation, revocation proof, rollback stages, cleanup lease и Docker C
 - Только TCP publications; UDP и host networking не поддерживаются.
 - Workspaces первой версии ограничены Mac paths ниже `/Users`.
 - Packages unsigned и требуют checksum/manifest verification.
-- Docker CLI не предоставляет абсолютный atomic compare-and-swap для context относительно произвольного внешнего CLI process; приложение использует ownership checks и fail-closed policy в активной ветке.
+- Docker CLI не предоставляет absolute atomic compare-and-swap для context относительно произвольного внешнего CLI process; приложение сериализует свои процессы и использует ownership checks с fail-closed policy.
 - Влияние VPN/security software и длительные resource leaks требуют физической проверки.

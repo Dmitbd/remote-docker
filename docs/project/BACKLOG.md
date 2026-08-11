@@ -2,7 +2,7 @@
 
 **Статус документа:** Текущее
 
-**Проверено относительно:** `main` @ `3dc60ed`, активная ветка @ `fd6a26f`
+**Проверено относительно:** `main` @ `cfc06ec`
 **Дата содержательной проверки:** 2026-08-11
 
 Backlog содержит только незавершённую работу. Наличие пункта не разрешает агенту автоматически брать его в текущую задачу.
@@ -40,7 +40,7 @@ Backlog содержит только незавершённую работу. �
 - **Приоритет:** P1
 - **Доказательство:** Требует устройства
 - **Влияние:** Без подтверждённого pairing пользователь не может начать основной Docker workflow; stale trust ломает повторное подключение.
-- **Известно:** Пользователь ранее наблюдал отсутствие Windows approval UI, непринятый code и stale forgotten device. В активной ветке есть исправления, но `fd6a26f` ещё не имеет принятого физического результата.
+- **Известно:** Пользователь ранее наблюдал отсутствие Windows approval UI, непринятый code и stale forgotten device. Исправления pairing reconciliation и restart-safe cleanup влиты в `main`, но физический результат для нового artifact ещё не зафиксирован.
 - **Критерий завершения:** Search → select → code on both devices → approve/reject/cancel → connected → disconnect → forget → repeat pairing работает без restart UI и без stale state.
 - **Проверка:** Реальные Mac и Windows, fresh config и upgrade config; результаты на обоих UI фиксируются в `VERIFICATION.md`.
 - **Связано:** [MVP](PRODUCT.md), [pairing architecture](ARCHITECTURE.md#discovery-и-pairing).
@@ -73,7 +73,7 @@ Backlog содержит только незавершённую работу. �
 - **Приоритет:** P1
 - **Доказательство:** Требует устройства
 - **Влияние:** Ошибка установки или update может оставить старый process, некорректный WSL state либо затронуть чужие OS resources.
-- **Известно:** Packaging tests существуют; активная ветка добавляет проверяемый shutdown gate. Реальный NSIS/PowerShell/WSL lifecycle после `fd6a26f` не проверен.
+- **Известно:** Packaging contracts и проверяемый shutdown/rollback gate находятся в `main`. Реальный NSIS/PowerShell/WSL lifecycle после `cfc06ec` не проверен.
 - **Критерий завершения:** Fresh install, same-version retry, supported update, reboot continuation, normal uninstall и explicit data removal дают заявленный результат без видимых зависших consoles и autostart.
 - **Проверка:** Windows installer UI, logs, process list, WSL distributions, firewall rules, app/data directories и preserved Docker data.
 - **Связано:** `docs/INSTALL.md`, `tests/integration/windows_package.Tests.ps1`, [verification](VERIFICATION.md#install-update-uninstall).
@@ -100,18 +100,7 @@ Backlog содержит только незавершённую работу. �
 - **Проверка:** Физическая network matrix с timestamps и process/connection snapshots.
 - **Связано:** [security boundary](ARCHITECTURE.md#security-boundaries), [network verification](VERIFICATION.md#сеть-и-recovery).
 
-### RD-B007: Завершить review и интеграцию pairing lifecycle fix-ветки
-
-- **Тип:** Дефект
-- **Приоритет:** P1
-- **Доказательство:** Подтверждено кодом
-- **Влияние:** `main` не содержит исправления пользовательских pairing/UI проблем и restart-safe cleanup, разработанных в активной ветке.
-- **Известно:** `fix/desktop-pairing-state` @ `fd6a26f` изменяет pairing reconciliation, rollback, context ownership, process upgrade и installer shutdown. Последние три review findings исправлены, но новый HEAD ещё не имеет независимого итогового verdict.
-- **Критерий завершения:** Один ограниченный independent review не находит достижимых Critical/Important в согласованном MVP scope; ветка проходит относящиеся tests и затем физическую RD-B001/RD-B004 проверку перед release.
-- **Проверка:** Review `main...fd6a26f`, focused race/package checks и реальные устройства.
-- **Связано:** [active branch architecture](ARCHITECTURE.md#в-активной-ветке).
-
-## Важно, но не должно расширять текущую pairing-задачу
+## Важно, но не блокирует текущую физическую проверку
 
 ### RD-B008: Изолировать race чтения состояния UI subprocess
 
