@@ -276,14 +276,25 @@ Describe 'Windows Setup EXE contract' {
         $script = Read-RepositoryFile $updateScript
         $hashCheck = $script.IndexOf('Get-FileHash')
         $signatureCheck = $script.IndexOf('Get-AuthenticodeSignature')
-        $replace = $script.IndexOf('[System.IO.File]::Replace')
+        $shutdownExit = $script.IndexOf('$shutdownExitCode = $LASTEXITCODE')
+        $retire = $script.IndexOf('Move-Item -LiteralPath $activePath -Destination $retiredPath')
+        $wait = $script.IndexOf('        Wait-RemoteDockerProcessExit')
+        $activate = $script.IndexOf('Move-Item -LiteralPath $stagedPath -Destination $activePath')
+        $rollback = $script.IndexOf('Move-Item -LiteralPath $retiredPath -Destination $activePath')
+        $cleanupGuard = $script.IndexOf('if ($safeToCleanupStaging -and (Test-Path -LiteralPath $stagingRoot))')
 
         $script | Should -Match 'RemoteDocker\.exe'
         $script | Should -Match '--shutdown'
         $script | Should -Not -Match 'RemoteDockerAgent|RemoteDockerTray|Start-Process'
+        $script | Should -Not -Match '\[System\.IO\.File\]::Replace'
         $hashCheck | Should -BeGreaterThan -1
         $signatureCheck | Should -BeGreaterThan $hashCheck
-        $replace | Should -BeGreaterThan $signatureCheck
+        $shutdownExit | Should -BeGreaterThan $signatureCheck
+        $retire | Should -BeGreaterThan $shutdownExit
+        $wait | Should -BeGreaterThan $retire
+        $activate | Should -BeGreaterThan $wait
+        $rollback | Should -BeGreaterThan $activate
+        $cleanupGuard | Should -BeGreaterThan $rollback
     }
 
     It 'keeps public installer content generic' {
