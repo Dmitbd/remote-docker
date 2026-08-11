@@ -47,6 +47,8 @@ There is no application autostart on either computer. After a Windows reboot, la
 
 Detailed steps are in [Installation](docs/INSTALL.md). Recovery guidance is in [Troubleshooting](docs/TROUBLESHOOTING.md).
 
+Project goals, architecture, verification status, decisions, and structured backlog are maintained in [Project documentation](docs/project/README.md).
+
 ## Application states
 
 - **Paused**: the application is open, but discovery, hosting, synchronization, relays, and managed Docker work are stopped.
