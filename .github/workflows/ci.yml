@@ -33,7 +33,7 @@ permissions:
   contents: read
 
 env:
-  REMOTE_DOCKER_VERSION: '0.2.7'
+  REMOTE_DOCKER_VERSION: '0.2.8'
 
 jobs:
   rootfs:
