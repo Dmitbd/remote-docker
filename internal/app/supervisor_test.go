@@ -252,6 +252,191 @@ func TestSupervisorCancelConnectionStopsOwnedRuntimeOnce(t *testing.T) {
 	}
 }
 
+func TestSupervisorCancelConnectionCancelsAndJoinsInflightStart(t *testing.T) {
+	trusted := lifecycle.Peer{ID: "windows", Name: "Windows"}
+	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(trusted))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventConnectionStartReserved}); err != nil {
+		t.Fatalf("Apply(EventConnectionStartReserved) error = %v", err)
+	}
+	runtime := newRecordingSessionRuntime()
+	startEntered := make(chan struct{})
+	startResolved := make(chan struct{})
+	stopEntered := make(chan struct{})
+	releaseStop := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseCleanup := func() { releaseOnce.Do(func() { close(releaseStop) }) }
+	runtime.start = func(ctx context.Context) error {
+		close(startEntered)
+		<-ctx.Done()
+		close(startResolved)
+		return ctx.Err()
+	}
+	runtime.stop = func(context.Context) error {
+		close(stopEntered)
+		<-releaseStop
+		return nil
+	}
+	supervisor, err := NewSupervisor(machine, runtime)
+	if err != nil {
+		t.Fatalf("NewSupervisor() error = %v", err)
+	}
+	startCtx, cancelStart := context.WithCancel(context.Background())
+	defer cancelStart()
+	defer releaseCleanup()
+	startDone := make(chan error, 1)
+	go func() { startDone <- supervisor.Start(startCtx) }()
+	select {
+	case <-startEntered:
+	case <-time.After(time.Second):
+		t.Fatal("runtime Start() did not begin")
+	}
+
+	cancelDone := make(chan error, 1)
+	go func() { cancelDone <- supervisor.CancelConnection(context.Background()) }()
+	select {
+	case <-startResolved:
+	case err := <-cancelDone:
+		t.Fatalf("CancelConnection() returned before startup resolved: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("CancelConnection() did not cancel in-flight startup")
+	}
+	select {
+	case <-stopEntered:
+	case <-time.After(time.Second):
+		t.Fatal("CancelConnection() did not start owned cleanup after startup resolved")
+	}
+	select {
+	case err := <-cancelDone:
+		t.Fatalf("CancelConnection() completed before owned cleanup: %v", err)
+	default:
+	}
+	if got := supervisor.Snapshot(); got.State != lifecycle.StateStopping || !got.ActionInProgress {
+		t.Fatalf("snapshot before cleanup completion = %#v", got)
+	}
+
+	releaseCleanup()
+	if err := <-cancelDone; err != nil {
+		t.Fatalf("CancelConnection() error = %v", err)
+	}
+	if err := <-startDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start() error = %v, want context cancellation", err)
+	}
+	if calls, reason := runtime.stopSnapshot(); calls != 1 || reason != lifecycle.StopCancelConnection {
+		t.Fatalf("runtime stop calls=%d reason=%q", calls, reason)
+	}
+	if got := supervisor.Snapshot(); got.State != lifecycle.StateClientReady || got.ActionInProgress ||
+		got.TrustedPeers != 1 || got.Peer == nil || got.Peer.ID != trusted.ID {
+		t.Fatalf("post-cancel snapshot = %#v", got)
+	}
+}
+
+func TestSupervisorCancelConnectionDoesNotStartRuntimeAfterStartupLeaseIsCancelled(t *testing.T) {
+	trusted := lifecycle.Peer{ID: "windows", Name: "Windows"}
+	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(trusted))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventConnectionStartReserved}); err != nil {
+		t.Fatalf("Apply(EventConnectionStartReserved) error = %v", err)
+	}
+	runtime := newRecordingSessionRuntime()
+	watchdog := &recordingCrashWatchdog{}
+	factoryEntered := make(chan struct{})
+	releaseFactory := make(chan struct{})
+	supervisor, err := NewSupervisor(machine, runtime, WithWatchdogFactory(func() (CrashWatchdog, error) {
+		close(factoryEntered)
+		<-releaseFactory
+		return watchdog, nil
+	}))
+	if err != nil {
+		t.Fatalf("NewSupervisor() error = %v", err)
+	}
+	startDone := make(chan error, 1)
+	go func() { startDone <- supervisor.Start(context.Background()) }()
+	select {
+	case <-factoryEntered:
+	case <-time.After(time.Second):
+		t.Fatal("watchdog factory did not begin")
+	}
+
+	cancelDone := make(chan error, 1)
+	updates, unsubscribe := machine.Subscribe()
+	defer unsubscribe()
+	<-updates
+	go func() { cancelDone <- supervisor.CancelConnection(context.Background()) }()
+	for snapshot := range updates {
+		if snapshot.State == lifecycle.StateStopping {
+			break
+		}
+	}
+	close(releaseFactory)
+	if err := <-startDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start() error = %v, want context cancellation", err)
+	}
+	if err := <-cancelDone; err != nil {
+		t.Fatalf("CancelConnection() error = %v", err)
+	}
+	if runtime.startCalls != 0 || runtime.stopCalls != 0 || watchdog.cleanStops != 1 {
+		t.Fatalf("cancelled pre-runtime startup: runtime=%#v watchdog clean stops=%d", runtime, watchdog.cleanStops)
+	}
+	if got := supervisor.Snapshot(); got.State != lifecycle.StateClientReady || got.ActionInProgress ||
+		got.TrustedPeers != 1 || got.Peer == nil || got.Peer.ID != trusted.ID {
+		t.Fatalf("post-cancel snapshot = %#v", got)
+	}
+}
+
+func TestSupervisorCancelConnectionRetriesFailedPairingStop(t *testing.T) {
+	machine := newLifecycleMachine(t, lifecycle.RoleMacClient)
+	runtime := newRecordingSessionRuntime()
+	stopFailure := errors.New("owned runtime is still stopping")
+	runtime.stop = func(context.Context) error {
+		calls, _ := runtime.stopSnapshot()
+		if calls == 1 {
+			return stopFailure
+		}
+		return nil
+	}
+	supervisor, err := NewSupervisor(machine, runtime)
+	if err != nil {
+		t.Fatalf("NewSupervisor() error = %v", err)
+	}
+	if err := supervisor.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventSearchStarted}); err != nil {
+		t.Fatalf("Apply(EventSearchStarted) error = %v", err)
+	}
+	pairing := lifecycle.Pairing{
+		SessionID: "session-retry", Peer: lifecycle.Peer{ID: "windows", Name: "Windows"}, Code: "123456",
+	}
+	if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &pairing}); err != nil {
+		t.Fatalf("Apply(EventPairingStarted) error = %v", err)
+	}
+
+	if err := supervisor.CancelConnection(context.Background()); !errors.Is(err, stopFailure) {
+		t.Fatalf("first CancelConnection() error = %v, want stop failure", err)
+	}
+	retryable := supervisor.Snapshot()
+	if retryable.State != lifecycle.StatePairing || retryable.ActionInProgress || retryable.Problem != nil ||
+		retryable.Pairing == nil || retryable.Pairing.SessionID != pairing.SessionID || retryable.Pairing.Code != pairing.Code ||
+		!machine.Allowed(lifecycle.CommandCancelConnection) {
+		t.Fatalf("retryable pairing snapshot = %#v", retryable)
+	}
+
+	if err := supervisor.CancelConnection(context.Background()); err != nil {
+		t.Fatalf("second CancelConnection() error = %v", err)
+	}
+	if calls, reason := runtime.stopSnapshot(); calls != 2 || reason != lifecycle.StopCancelConnection {
+		t.Fatalf("runtime stop calls=%d reason=%q", calls, reason)
+	}
+	if got := supervisor.Snapshot(); got.State != lifecycle.StateClientReady || got.Pairing != nil || got.ActionInProgress {
+		t.Fatalf("retried cancellation snapshot = %#v", got)
+	}
+}
+
 func newLifecycleMachine(t *testing.T, role lifecycle.Role) *lifecycle.Machine {
 	t.Helper()
 	machine, err := lifecycle.NewMachine(role, "Device")
@@ -271,6 +456,7 @@ type recordingSessionRuntime struct {
 	onStart    func()
 	onStop     func()
 	startErr   error
+	start      func(context.Context) error
 	stop       func(context.Context) error
 }
 
@@ -285,15 +471,19 @@ func newRecordingSessionRuntime() *recordingSessionRuntime {
 	return &recordingSessionRuntime{done: make(chan error, 1)}
 }
 
-func (r *recordingSessionRuntime) Start(_ context.Context, role lifecycle.Role) error {
+func (r *recordingSessionRuntime) Start(ctx context.Context, role lifecycle.Role) error {
 	r.mu.Lock()
 	r.startCalls++
 	r.role = role
 	onStart := r.onStart
 	startErr := r.startErr
+	start := r.start
 	r.mu.Unlock()
 	if onStart != nil {
 		onStart()
+	}
+	if start != nil {
+		return start(ctx)
 	}
 	return startErr
 }

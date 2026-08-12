@@ -54,6 +54,7 @@ const (
 	EventPauseRequested                EventType = "pause_requested"
 	EventQuitRequested                 EventType = "quit_requested"
 	EventStopCompleted                 EventType = "stop_completed"
+	EventStopFailed                    EventType = "stop_failed"
 	EventTrustForgetStarted            EventType = "trust_forget_started"
 	EventTrustForgotten                EventType = "trust_forgotten"
 	EventTrustForgetCancelled          EventType = "trust_forget_cancelled"
@@ -116,6 +117,7 @@ type Machine struct {
 	snapshot                Snapshot
 	now                     func() time.Time
 	afterStop               State
+	stopFrom                State
 	forgetting              bool
 	connectionStarting      bool
 	connectionStartFrom     State
@@ -267,7 +269,7 @@ func (m *Machine) applyLocked(event Event) error {
 	if m.connectionStarting {
 		switch event.Type {
 		case EventConnectionStartCommitted, EventConnectionStartAbortRequested, EventConnectionCancelRequested, EventConnected,
-			EventHeartbeat, EventNetworkLost, EventNetworkRestored, EventStopCompleted:
+			EventHeartbeat, EventNetworkLost, EventNetworkRestored, EventStopCompleted, EventStopFailed:
 		default:
 			return m.transitionError(event, "trusted connection startup is in progress")
 		}
@@ -480,12 +482,24 @@ func (m *Machine) applyLocked(event Event) error {
 		}
 		snapshot.State = m.afterStop
 		m.afterStop = ""
+		m.stopFrom = ""
 		snapshot.ActionInProgress = false
 		snapshot.Recovery = nil
 		snapshot.Pairing = nil
 		snapshot.Latency = 0
 		snapshot.Docker = DockerStatus{State: ServiceStopped}
 		snapshot.Sync = SyncStatus{State: ServiceStopped}
+		m.connectionStarting = false
+		m.connectionStartFrom = ""
+	case EventStopFailed:
+		if snapshot.State != StateStopping || m.afterStop == "" ||
+			(m.stopFrom != StatePairing && m.stopFrom != StateConnecting) {
+			return m.transitionError(event, "no cancellable connection stop is active")
+		}
+		snapshot.State = m.stopFrom
+		m.afterStop = ""
+		m.stopFrom = ""
+		snapshot.ActionInProgress = false
 		m.connectionStarting = false
 		m.connectionStartFrom = ""
 	case EventTrustForgetStarted:
@@ -581,6 +595,7 @@ func (m *Machine) enterNeedsAction() {
 }
 
 func (m *Machine) beginStop(disconnect *Disconnect, target State) {
+	m.stopFrom = m.snapshot.State
 	m.afterStop = target
 	m.snapshot.State = StateStopping
 	m.snapshot.ActionInProgress = true

@@ -45,11 +45,22 @@ type Supervisor struct {
 	stopTimeout     time.Duration
 	watchdogFactory WatchdogFactory
 
-	mu       sync.Mutex
-	running  bool
-	stopping bool
-	terminal bool
-	watchdog CrashWatchdog
+	mu        sync.Mutex
+	running   bool
+	stopping  bool
+	terminal  bool
+	watchdog  CrashWatchdog
+	startup   *supervisorStartup
+	nextStart uint64
+}
+
+type supervisorStartup struct {
+	generation     uint64
+	cancel         context.CancelFunc
+	done           chan struct{}
+	cancelled      bool
+	runtimeInvoked bool
+	watchdog       CrashWatchdog
 }
 
 func NewSupervisor(machine *lifecycle.Machine, runtime SessionRuntime, options ...SupervisorOption) (*Supervisor, error) {
@@ -74,18 +85,24 @@ func (s *Supervisor) Start(ctx context.Context) error {
 	if s == nil {
 		return errors.New("desktop supervisor is unavailable")
 	}
-	reservedStart := false
 	s.mu.Lock()
 	if s.terminal {
 		s.mu.Unlock()
 		return errors.New("desktop supervisor is shutting down")
 	}
-	if s.running {
+	if s.running || s.startup != nil {
 		s.mu.Unlock()
 		return nil
 	}
 	snapshot := s.machine.Snapshot()
-	reservedStart = snapshot.State == lifecycle.StateConnecting && snapshot.ActionInProgress
+	reservedStart := snapshot.State == lifecycle.StateConnecting && snapshot.ActionInProgress
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	startCtx, cancelStart := context.WithCancel(ctx)
+	s.nextStart++
+	startup := &supervisorStartup{generation: s.nextStart, cancel: cancelStart, done: make(chan struct{})}
+	s.startup = startup
 	s.mu.Unlock()
 
 	var sessionWatchdog CrashWatchdog
@@ -96,35 +113,88 @@ func (s *Supervisor) Start(ctx context.Context) error {
 			if !reservedStart {
 				s.publishRuntimeProblem("watchdog_start_failed")
 			}
+			cancelStart()
+			s.finishStartup(startup)
 			return err
+		}
+		s.mu.Lock()
+		startup.watchdog = sessionWatchdog
+		cancelled := startup.cancelled
+		s.mu.Unlock()
+		if cancelled {
+			cancelStart()
+			s.finishStartup(startup)
+			return context.Canceled
 		}
 	}
 	role := s.machine.Snapshot().Role
-	if err := s.runtime.Start(ctx, role); err != nil {
+	s.mu.Lock()
+	if startup.cancelled {
+		s.mu.Unlock()
+		cancelStart()
+		s.finishStartup(startup)
+		return context.Canceled
+	}
+	startup.runtimeInvoked = true
+	s.mu.Unlock()
+	startErr := s.runtime.Start(startCtx, role)
+	s.mu.Lock()
+	cancelled := startup.cancelled
+	s.mu.Unlock()
+	if startErr != nil {
+		if cancelled {
+			s.finishStartup(startup)
+			return startErr
+		}
+		cancelStart()
 		if sessionWatchdog != nil {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), s.stopTimeout)
 			_ = sessionWatchdog.CleanStop(cleanupCtx)
 			cancel()
 		}
 		if !reservedStart {
-			s.publishRuntimeStartProblem(err)
+			s.publishRuntimeStartProblem(startErr)
 		}
-		return err
+		s.finishStartup(startup)
+		return startErr
+	}
+	if cancelled {
+		cancelStart()
+		s.finishStartup(startup)
+		return context.Canceled
 	}
 	if !reservedStart {
 		if _, err := s.machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled}); err != nil {
 			stopCtx, cancel := context.WithTimeout(context.Background(), s.stopTimeout)
 			_ = s.runtime.Stop(stopCtx, lifecycle.StopFailure)
 			cancel()
+			cancelStart()
+			s.finishStartup(startup)
 			return err
 		}
 	}
 	s.mu.Lock()
+	if startup.cancelled {
+		s.mu.Unlock()
+		cancelStart()
+		s.finishStartup(startup)
+		return context.Canceled
+	}
 	s.running = true
 	s.watchdog = sessionWatchdog
 	s.mu.Unlock()
+	s.finishStartup(startup)
 	go s.observeRuntime(s.runtime.Done())
 	return nil
+}
+
+func (s *Supervisor) finishStartup(startup *supervisorStartup) {
+	s.mu.Lock()
+	if s.startup == startup && s.startup.generation == startup.generation {
+		s.startup = nil
+	}
+	close(startup.done)
+	s.mu.Unlock()
 }
 
 type lifecycleProblemProvider interface {
@@ -223,8 +293,23 @@ func (s *Supervisor) CancelConnection(ctx context.Context) error {
 		return err
 	}
 	s.stopping = true
+	startup := s.startup
+	if startup != nil {
+		startup.cancelled = true
+		startup.cancel()
+	}
 	s.mu.Unlock()
-	return s.stop(ctx, lifecycle.StopCancelConnection)
+	if startup != nil {
+		<-startup.done
+		s.mu.Lock()
+		forceRuntime := startup.runtimeInvoked
+		if s.watchdog == nil {
+			s.watchdog = startup.watchdog
+		}
+		s.mu.Unlock()
+		return s.stopConnection(ctx, forceRuntime)
+	}
+	return s.stopConnection(ctx, false)
 }
 
 func (s *Supervisor) Shutdown(ctx context.Context) error {
@@ -245,9 +330,17 @@ func (s *Supervisor) Shutdown(ctx context.Context) error {
 }
 
 func (s *Supervisor) stop(parent context.Context, reason lifecycle.StopReason) error {
+	return s.stopOwned(parent, reason, false, false)
+}
+
+func (s *Supervisor) stopConnection(parent context.Context, forceRuntime bool) error {
+	return s.stopOwned(parent, lifecycle.StopCancelConnection, forceRuntime, true)
+}
+
+func (s *Supervisor) stopOwned(parent context.Context, reason lifecycle.StopReason, forceRuntime, retryConnection bool) error {
 	s.mu.Lock()
 	s.stopping = true
-	running := s.running
+	running := s.running || forceRuntime
 	sessionWatchdog := s.watchdog
 	s.mu.Unlock()
 
@@ -267,15 +360,23 @@ func (s *Supervisor) stop(parent context.Context, reason lifecycle.StopReason) e
 		cancel()
 	}
 
+	combinedErr := errors.Join(stopErr, watchdogErr)
 	s.mu.Lock()
-	s.running = false
+	if stopErr == nil {
+		s.running = false
+	}
+	if watchdogErr == nil {
+		s.watchdog = nil
+	}
 	s.stopping = false
-	s.watchdog = nil
 	s.mu.Unlock()
-	stopErr = errors.Join(stopErr, watchdogErr)
-	if stopErr != nil {
+	if combinedErr != nil {
+		if retryConnection {
+			_, applyErr := s.machine.Apply(lifecycle.Event{Type: lifecycle.EventStopFailed})
+			return errors.Join(combinedErr, applyErr)
+		}
 		s.publishRuntimeProblem("runtime_stop_failed")
-		return stopErr
+		return combinedErr
 	}
 	_, err := s.machine.Apply(lifecycle.Event{Type: lifecycle.EventStopCompleted})
 	return err

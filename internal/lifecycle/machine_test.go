@@ -459,6 +459,30 @@ func TestCancelConnectionStopsConnectingWithoutDiscardingCommittedTrust(t *testi
 	}
 }
 
+func TestStopFailureRestoresCancellablePairingWithoutClearingComparisonCode(t *testing.T) {
+	machine := mustMachine(t, RoleMacClient)
+	mustApply(t, machine, Event{Type: EventEnabled})
+	mustApply(t, machine, Event{Type: EventSearchStarted})
+	pairing := Pairing{
+		SessionID: "session-retry", Peer: Peer{ID: "windows", Name: "Windows"}, Code: "123456",
+	}
+	mustApply(t, machine, Event{Type: EventPairingStarted, Pairing: &pairing})
+	mustApply(t, machine, Event{Type: EventConnectionCancelRequested})
+
+	retryable := mustApply(t, machine, Event{Type: EventStopFailed})
+	if retryable.State != StatePairing || retryable.ActionInProgress || retryable.Pairing == nil ||
+		retryable.Pairing.SessionID != pairing.SessionID || retryable.Pairing.Code != pairing.Code ||
+		!machine.Allowed(CommandCancelConnection) {
+		t.Fatalf("retryable pairing snapshot = %#v", retryable)
+	}
+
+	mustApply(t, machine, Event{Type: EventConnectionCancelRequested})
+	idle := mustApply(t, machine, Event{Type: EventStopCompleted})
+	if idle.State != StateClientReady || idle.Pairing != nil || idle.ActionInProgress {
+		t.Fatalf("retried stop snapshot = %#v", idle)
+	}
+}
+
 func TestTrustRevokedRequiresExactWindowsPeerAndPairingSession(t *testing.T) {
 	machine := mustMachine(t, RoleWindowsHost)
 	mustApply(t, machine, Event{Type: EventEnabled})
