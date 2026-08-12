@@ -25,6 +25,7 @@ const (
 	OperationApprovePair    = "approve-pair"
 	OperationRejectPair     = "reject-pair"
 	OperationCancelPair     = "cancel-pair"
+	OperationStopConnection = "stop-connection"
 	OperationPause          = "pause"
 	OperationDisconnect     = "disconnect"
 	OperationForgetDevice   = "forget-device"
@@ -205,11 +206,7 @@ func buildConnection(status localapi.StatusResult, now time.Time) (Connection, [
 			connection.PeerName = status.Pairing.Peer.Name
 			connection.PairCode = formatPairCode(status.Pairing.Code)
 		}
-		if status.Role == "windows_host" {
-			operations = append(operations, operation(OperationApprovePair, true), operation(OperationRejectPair, true))
-		} else {
-			operations = append(operations, operation(OperationCancelPair, true))
-		}
+		operations = append(operations, operation(OperationCancelPair, true))
 	case "pairing_cancellation_pending":
 		connection.Status = "Отмена нового подключения"
 		connection.Tone = "yellow"
@@ -220,6 +217,7 @@ func buildConnection(status localapi.StatusResult, now time.Time) (Connection, [
 		connection.Status = "Подключение"
 		connection.Headline = "Настраиваем защищённое соединение"
 		connection.Detail = "Подготавливаем защищённый туннель, Docker и синхронизацию."
+		operations = append(operations, operation(OperationStopConnection, true))
 	case "connected":
 		connection.Status = "Соединено"
 		connection.Tone = "green"
@@ -584,6 +582,8 @@ func operationText(id string) (string, string, bool) {
 		return "Отклонить", "Отклоняем…", true
 	case OperationCancelPair:
 		return "Отменить подключение", "Отменяем…", true
+	case OperationStopConnection:
+		return "Остановить подключение", "Останавливаем подключение…", true
 	case OperationPause:
 		return "Поставить на паузу", "Останавливаем…", false
 	case OperationDisconnect:

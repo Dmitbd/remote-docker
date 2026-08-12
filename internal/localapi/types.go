@@ -14,40 +14,41 @@ const CurrentSchemaVersion = 4
 type Method string
 
 const (
-	MethodStatus          Method = "Status"
-	MethodShowWindow      Method = "ShowWindow"
-	MethodEnable          Method = "Enable"
-	MethodPause           Method = "Pause"
-	MethodSearchStart     Method = "SearchStart"
-	MethodSearchStop      Method = "SearchStop"
-	MethodListDevices     Method = "ListDevices"
-	MethodPairCandidates  Method = "PairCandidates"
-	MethodPairStart       Method = "PairStart"
-	MethodReplaceDevice   Method = "ReplaceDevice"
-	MethodConnect         Method = "Connect"
-	MethodPairStatus      Method = "PairStatus"
-	MethodPairApprove     Method = "PairApprove"
-	MethodPairReject      Method = "PairReject"
-	MethodPairCancel      Method = "PairCancel"
-	MethodDisconnect      Method = "Disconnect"
-	MethodForgetDevice    Method = "ForgetDevice"
-	MethodUnpair          Method = "Unpair"
-	MethodWorkspaceAdd    Method = "WorkspaceAdd"
-	MethodWorkspaceList   Method = "WorkspaceList"
-	MethodWorkspaceRemove Method = "WorkspaceRemove"
-	MethodSyncStatus      Method = "SyncStatus"
-	MethodPrepareDocker   Method = "PrepareDocker"
-	MethodDoctor          Method = "Doctor"
-	MethodRecover         Method = "Recover"
-	MethodShutdown        Method = "Shutdown"
-	MethodResourceStatus  Method = "ResourceStatus"
+	MethodStatus           Method = "Status"
+	MethodShowWindow       Method = "ShowWindow"
+	MethodEnable           Method = "Enable"
+	MethodPause            Method = "Pause"
+	MethodSearchStart      Method = "SearchStart"
+	MethodSearchStop       Method = "SearchStop"
+	MethodListDevices      Method = "ListDevices"
+	MethodPairCandidates   Method = "PairCandidates"
+	MethodPairStart        Method = "PairStart"
+	MethodReplaceDevice    Method = "ReplaceDevice"
+	MethodConnect          Method = "Connect"
+	MethodPairStatus       Method = "PairStatus"
+	MethodPairApprove      Method = "PairApprove"
+	MethodPairReject       Method = "PairReject"
+	MethodPairCancel       Method = "PairCancel"
+	MethodConnectionCancel Method = "ConnectionCancel"
+	MethodDisconnect       Method = "Disconnect"
+	MethodForgetDevice     Method = "ForgetDevice"
+	MethodUnpair           Method = "Unpair"
+	MethodWorkspaceAdd     Method = "WorkspaceAdd"
+	MethodWorkspaceList    Method = "WorkspaceList"
+	MethodWorkspaceRemove  Method = "WorkspaceRemove"
+	MethodSyncStatus       Method = "SyncStatus"
+	MethodPrepareDocker    Method = "PrepareDocker"
+	MethodDoctor           Method = "Doctor"
+	MethodRecover          Method = "Recover"
+	MethodShutdown         Method = "Shutdown"
+	MethodResourceStatus   Method = "ResourceStatus"
 )
 
 func (m Method) valid() bool {
 	switch m {
 	case MethodStatus, MethodShowWindow, MethodEnable, MethodPause, MethodSearchStart, MethodSearchStop,
 		MethodListDevices, MethodPairCandidates, MethodPairStart, MethodReplaceDevice, MethodConnect, MethodPairStatus,
-		MethodPairApprove, MethodPairReject, MethodPairCancel,
+		MethodPairApprove, MethodPairReject, MethodPairCancel, MethodConnectionCancel,
 		MethodDisconnect, MethodForgetDevice,
 		MethodWorkspaceAdd, MethodWorkspaceList,
 		MethodWorkspaceRemove, MethodSyncStatus, MethodPrepareDocker, MethodDoctor, MethodRecover,

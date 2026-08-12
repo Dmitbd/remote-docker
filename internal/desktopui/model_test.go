@@ -20,14 +20,15 @@ func TestBuildStateMapsEveryLifecycleStateForFixedRoles(t *testing.T) {
 		{"mac searching", "mac_client", "searching", "Mac · отправляет Docker-команды", OperationStopSearch},
 		{"mac pairing", "mac_client", "pairing", "Mac · отправляет Docker-команды", OperationCancelPair},
 		{"mac cancellation", "mac_client", "pairing_cancellation_pending", "Mac · отправляет Docker-команды", OperationCancelPair},
-		{"mac connecting", "mac_client", "connecting", "Mac · отправляет Docker-команды", OperationQuit},
+		{"mac connecting", "mac_client", "connecting", "Mac · отправляет Docker-команды", OperationStopConnection},
 		{"mac connected", "mac_client", "connected", "Mac · отправляет Docker-команды", OperationDisconnect},
 		{"mac reconnecting", "mac_client", "reconnecting", "Mac · отправляет Docker-команды", OperationDisconnect},
 		{"mac stopping", "mac_client", "stopping", "Mac · отправляет Docker-команды", ""},
 		{"mac attention", "mac_client", "needs_action", "Mac · отправляет Docker-команды", OperationDiagnostics},
 		{"windows paused", "windows_host", "paused", "Windows · запускает Docker", OperationEnableHost},
 		{"windows waiting", "windows_host", "host_waiting", "Windows · запускает Docker", OperationPause},
-		{"windows pairing", "windows_host", "pairing", "Windows · запускает Docker", OperationApprovePair},
+		{"windows pairing", "windows_host", "pairing", "Windows · запускает Docker", OperationCancelPair},
+		{"windows connecting", "windows_host", "connecting", "Windows · запускает Docker", OperationStopConnection},
 		{"windows connected", "windows_host", "connected", "Windows · запускает Docker", OperationDisconnect},
 	}
 	for _, test := range tests {
@@ -91,6 +92,40 @@ func TestBuildStateCarriesDisplayedPairingSessionID(t *testing.T) {
 	}}, "darwin", time.Unix(0, 0))
 	if state.PairSessionID != "session-1" {
 		t.Fatalf("pair session ID = %q", state.PairSessionID)
+	}
+}
+
+func TestBuildStateShowsConnectionCancellationForBothRoles(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		role       string
+		lifecycle  string
+		operation  string
+		label      string
+		noPairVote bool
+	}{
+		{"mac pairing", "mac_client", "pairing", OperationCancelPair, "Отменить подключение", true},
+		{"windows pairing", "windows_host", "pairing", OperationCancelPair, "Отменить подключение", true},
+		{"mac connecting", "mac_client", "connecting", OperationStopConnection, "Остановить подключение", false},
+		{"windows connecting", "windows_host", "connecting", OperationStopConnection, "Остановить подключение", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := BuildState(SnapshotInput{Status: localapi.StatusResult{
+				Role: test.role, State: test.lifecycle,
+				Pairing: &localapi.PairingStatusResult{SessionID: "session-1"},
+			}}, "darwin", time.Unix(0, 0))
+
+			operation := operationByID(t, state.Operations, test.operation)
+			if !operation.Enabled || operation.Label != test.label {
+				t.Fatalf("connection operation = %#v", operation)
+			}
+			if test.noPairVote && (hasOperation(state.Operations, OperationApprovePair) || hasOperation(state.Operations, OperationRejectPair)) {
+				t.Fatalf("pairing operations expose a technical vote: %#v", state.Operations)
+			}
+			if test.lifecycle == "connecting" && hasOperation(state.Operations, OperationDisconnect) {
+				t.Fatalf("connecting operations reuse disconnect: %#v", state.Operations)
+			}
+		})
 	}
 }
 

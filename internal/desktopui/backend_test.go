@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,7 +82,7 @@ func TestBackendRejectsWorkspaceSelectionOutsideMacAndManualPublicAddress(t *tes
 	}
 }
 
-func TestBackendPairingActionsUseDisplayedSessionWithoutStatusRead(t *testing.T) {
+func TestBackendPairingCancellationUsesDisplayedSessionWithoutStatusRead(t *testing.T) {
 	calls := 0
 	handler := &desktopUIHandler{
 		responses: map[localapi.Method]any{
@@ -98,11 +99,42 @@ func TestBackendPairingActionsUseDisplayedSessionWithoutStatusRead(t *testing.T)
 		t.Fatalf("resolve(cancel-pair) error = %v", err)
 	}
 	params, ok := rawParams.(localapi.PairSessionParams)
-	if method != localapi.MethodPairCancel || !ok || params.SessionID != "displayed-session" {
+	if method != localapi.MethodConnectionCancel || !ok || params.SessionID != "displayed-session" {
 		t.Fatalf("resolved cancel = method %q params %#v", method, rawParams)
 	}
 	if calls != 0 {
 		t.Fatalf("resolve(cancel-pair) made %d status calls, want none", calls)
+	}
+}
+
+func TestBackendStopConnectionCallsLocalAPIWithBoundedContext(t *testing.T) {
+	called := false
+	deadlineSet := false
+	handler := &desktopUIHandler{
+		responses: map[localapi.Method]any{
+			localapi.MethodStatus:         localapi.StatusResult{Role: "windows_host", State: "connecting"},
+			localapi.MethodWorkspaceList:  localapi.WorkspaceListResult{},
+			localapi.MethodSyncStatus:     localapi.SyncStatusResult{},
+			localapi.MethodResourceStatus: localapi.ResourceStatusResult{},
+			localapi.MethodDoctor:         localapi.DoctorResult{},
+		},
+		callWithContext: func(ctx context.Context, method localapi.Method) error {
+			if method == localapi.MethodConnectionCancel {
+				called = true
+				_, deadlineSet = ctx.Deadline()
+			}
+			return nil
+		},
+	}
+
+	if _, err := NewBackend(localClientForTest(handler), "windows").Perform(context.Background(), OperationStopConnection, ""); err != nil {
+		t.Fatalf("Perform(stop-connection) error = %v", err)
+	}
+	if !called || !deadlineSet {
+		t.Fatalf("ConnectionCancel called = %t, bounded context = %t", called, deadlineSet)
+	}
+	if timeout := operationTimeout(OperationStopConnection); timeout != 90*time.Second {
+		t.Fatalf("stop connection timeout = %s, want 90s", timeout)
 	}
 }
 
@@ -111,6 +143,7 @@ func TestEveryMutatingDesktopOperationHasAnExplicitTimeout(t *testing.T) {
 		OperationConnect, OperationConnectTrusted, OperationManualAddress,
 		OperationDisconnect, OperationForgetDevice,
 		OperationApprovePair, OperationRejectPair, OperationCancelPair,
+		OperationStopConnection,
 		OperationPause, OperationAddProject, OperationQuit,
 	} {
 		if timeout := operationTimeout(id); timeout <= 0 || timeout > 2*time.Minute {
@@ -196,15 +229,22 @@ func TestBackendSnapshotRunsDiscoveryOnlyWhileSearching(t *testing.T) {
 func TestBackendPerformPublishesPendingStateAndClearsItAfterFailure(t *testing.T) {
 	started := make(chan struct{})
 	unblock := make(chan struct{})
+	defer func() {
+		select {
+		case <-unblock:
+		default:
+			close(unblock)
+		}
+	}()
 	handler := &desktopUIHandler{
 		responses: map[localapi.Method]any{
-			localapi.MethodStatus: localapi.StatusResult{Revision: 3, Role: "mac_client", State: "searching"},
-			localapi.MethodPairCandidates: localapi.PairCandidatesResult{Candidates: []localapi.PairingCandidate{
-				{ID: "windows", Name: "Windows", Available: true},
-			}},
+			localapi.MethodStatus: localapi.StatusResult{
+				Revision: 3, Role: "mac_client", State: "pairing",
+				Pairing: &localapi.PairingStatusResult{SessionID: "session-1"},
+			},
 		},
 		call: func(method localapi.Method) error {
-			if method == localapi.MethodPairStart {
+			if method == localapi.MethodConnectionCancel || method == localapi.MethodPairCancel {
 				close(started)
 				<-unblock
 				return &localapi.PublicError{Code: localapi.ErrorUnavailable, Message: "Windows недоступен"}
@@ -215,7 +255,7 @@ func TestBackendPerformPublishesPendingStateAndClearsItAfterFailure(t *testing.T
 	backend := NewBackend(localClientForTest(handler), "darwin")
 	done := make(chan error, 1)
 	go func() {
-		_, err := backend.Perform(context.Background(), OperationConnect, "windows")
+		_, err := backend.Perform(context.Background(), OperationCancelPair, "session-1")
 		done <- err
 	}()
 	<-started
@@ -223,23 +263,23 @@ func TestBackendPerformPublishesPendingStateAndClearsItAfterFailure(t *testing.T
 	if err != nil {
 		t.Fatalf("pending Snapshot() error = %v", err)
 	}
-	pending := operationByID(t, state.Devices[0].Operations, OperationConnect)
-	if !pending.Pending || pending.Enabled || pending.PendingLabel != "Подключаемся…" {
-		t.Fatalf("pending connect = %#v", pending)
+	pending := operationByID(t, state.Operations, OperationCancelPair)
+	if !pending.Pending || pending.Enabled || pending.PendingLabel != "Отменяем…" {
+		t.Fatalf("pending connection cancellation = %#v", pending)
 	}
 	if _, err := backend.Perform(context.Background(), OperationPause, ""); !errors.Is(err, ErrOperationConflict) {
 		t.Fatalf("conflicting Perform() error = %v", err)
 	}
 	close(unblock)
-	if err := <-done; err == nil {
-		t.Fatal("Perform(connect) succeeded, want failure")
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "отменить подключение") {
+		t.Fatalf("Perform(cancel-pair) error = %v, want public cancellation error", err)
 	}
 	state, err = backend.Snapshot(context.Background())
 	if err != nil {
 		t.Fatalf("terminal Snapshot() error = %v", err)
 	}
-	if operationByID(t, state.Devices[0].Operations, OperationConnect).Pending {
-		t.Fatal("failed operation retained pending state")
+	if operationByID(t, state.Operations, OperationCancelPair).Pending {
+		t.Fatal("failed cancellation retained pending state")
 	}
 }
 
@@ -255,12 +295,18 @@ func operationByID(t *testing.T, operations []Operation, id string) Operation {
 }
 
 type desktopUIHandler struct {
-	responses map[localapi.Method]any
-	call      func(localapi.Method) error
-	rawCall   func(localapi.Method, json.RawMessage) error
+	responses       map[localapi.Method]any
+	call            func(localapi.Method) error
+	callWithContext func(context.Context, localapi.Method) error
+	rawCall         func(localapi.Method, json.RawMessage) error
 }
 
-func (h *desktopUIHandler) Handle(_ context.Context, method localapi.Method, raw json.RawMessage) (any, error) {
+func (h *desktopUIHandler) Handle(ctx context.Context, method localapi.Method, raw json.RawMessage) (any, error) {
+	if h.callWithContext != nil {
+		if err := h.callWithContext(ctx, method); err != nil {
+			return nil, err
+		}
+	}
 	if h.call != nil {
 		if err := h.call(method); err != nil {
 			return nil, err

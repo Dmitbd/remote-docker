@@ -2,6 +2,12 @@ package localapi
 
 import "testing"
 
+func TestMethodConnectionCancelIsAllowed(t *testing.T) {
+	if !MethodConnectionCancel.valid() {
+		t.Fatal("ConnectionCancel is not allowed by the local API")
+	}
+}
+
 func TestPairStartTargetAllowsOnlyDiscoveredIDOrPrivateLiteral(t *testing.T) {
 	for _, test := range []struct {
 		params PairStartParams

@@ -184,7 +184,7 @@ func operationTimeout(id string) time.Duration {
 	switch id {
 	case OperationConnect, OperationConnectTrusted, OperationManualAddress:
 		return 90 * time.Second
-	case OperationApprovePair, OperationRejectPair, OperationCancelPair:
+	case OperationApprovePair, OperationRejectPair, OperationCancelPair, OperationStopConnection:
 		return 90 * time.Second
 	case OperationAddProject:
 		return 2 * time.Minute
@@ -222,17 +222,22 @@ func (b *Backend) resolve(_ context.Context, id, value string) (localapi.Method,
 			return "", nil, errors.New("выберите сохранённое устройство")
 		}
 		return localapi.MethodConnect, nil, nil
-	case OperationApprovePair, OperationRejectPair, OperationCancelPair:
+	case OperationApprovePair, OperationRejectPair:
 		if value == "" {
 			return "", nil, errors.New("запрос на подключение уже завершён")
 		}
 		method := localapi.MethodPairApprove
 		if id == OperationRejectPair {
 			method = localapi.MethodPairReject
-		} else if id == OperationCancelPair {
-			method = localapi.MethodPairCancel
 		}
 		return method, localapi.PairSessionParams{SessionID: value}, nil
+	case OperationCancelPair:
+		if value == "" {
+			return "", nil, errors.New("запрос на подключение уже завершён")
+		}
+		return localapi.MethodConnectionCancel, localapi.PairSessionParams{SessionID: value}, nil
+	case OperationStopConnection:
+		return localapi.MethodConnectionCancel, nil, nil
 	case OperationPause:
 		return localapi.MethodPause, nil, nil
 	case OperationDisconnect:
@@ -314,6 +319,10 @@ func operationFailureLabel(id string) string {
 	switch id {
 	case OperationConnect, OperationConnectTrusted, OperationManualAddress:
 		return "подключиться к Windows"
+	case OperationCancelPair:
+		return "отменить подключение"
+	case OperationStopConnection:
+		return "остановить подключение"
 	case OperationForgetDevice:
 		return "забыть устройство"
 	case OperationAddProject:
