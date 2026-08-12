@@ -67,6 +67,10 @@ type localSyncLifecycle interface {
 	Run(context.Context, time.Duration) error
 }
 
+type localSyncPreparer interface {
+	Prepare(context.Context) (localSyncPreparation, error)
+}
+
 // AgentRuntime owns the concrete controller, health observer, pairing host,
 // SSH child, Docker event reconciler, and relay state for one background agent.
 type AgentRuntime struct {
@@ -454,6 +458,14 @@ func (r *AgentRuntime) Start(parent context.Context, role lifecycle.Role) error 
 	if r.sessionRunning {
 		r.sessionMu.Unlock()
 		return nil
+	}
+	if role == lifecycle.RoleMacClient {
+		if preparer, ok := r.localSync.(localSyncPreparer); ok {
+			if _, err := preparer.Prepare(parent); err != nil {
+				r.sessionMu.Unlock()
+				return err
+			}
+		}
 	}
 	sessionCtx, cancel := context.WithCancel(parent)
 	wait := make(chan struct{})

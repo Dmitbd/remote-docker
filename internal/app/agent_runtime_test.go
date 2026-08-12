@@ -28,6 +28,7 @@ import (
 	"github.com/Dmitbd/remote-docker/internal/pairing"
 	"github.com/Dmitbd/remote-docker/internal/portrelay"
 	"github.com/Dmitbd/remote-docker/internal/sshtransport"
+	"github.com/Dmitbd/remote-docker/internal/syncer"
 	"github.com/Dmitbd/remote-docker/internal/tunnel"
 	"github.com/Dmitbd/remote-docker/internal/windowsbridge"
 	"golang.org/x/crypto/ssh"
@@ -511,6 +512,80 @@ func waitForLifecycleState(t *testing.T, machine *lifecycle.Machine, want lifecy
 	t.Fatalf("lifecycle state = %q, want %q", machine.Snapshot().State, want)
 }
 
+func TestAgentRuntimePreparesLocalSyncBeforePublishingRunning(t *testing.T) {
+	restorer := newInfrastructureRestorer(func(context.Context) (portrelay.Reconciler, error) {
+		return portrelay.Reconciler{}, nil
+	})
+	localSync := &recordingLocalSyncLifecycle{
+		started: make(chan struct{}), stopped: make(chan struct{}),
+		prepareStarted: make(chan struct{}), prepareRelease: make(chan struct{}),
+	}
+	runtimeAgent := &AgentRuntime{
+		agent: NewAgent(nil, restorer, nil), restorer: restorer, localSync: localSync,
+		startupRecover: func(context.Context) error { return nil },
+	}
+	startDone := make(chan error, 1)
+	go func() { startDone <- runtimeAgent.Start(context.Background(), lifecycle.RoleMacClient) }()
+
+	select {
+	case <-localSync.prepareStarted:
+	case <-time.After(time.Second):
+		t.Fatal("local sync preparation did not start")
+	}
+	select {
+	case err := <-startDone:
+		t.Fatalf("Start() returned before local sync preparation completed: %v", err)
+	default:
+	}
+	select {
+	case <-localSync.started:
+		t.Fatal("local sync child started before preparation completed")
+	default:
+	}
+
+	close(localSync.prepareRelease)
+	if err := <-startDone; err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	select {
+	case <-localSync.started:
+	case <-time.After(time.Second):
+		t.Fatal("local sync child did not start after preparation")
+	}
+	if err := runtimeAgent.Stop(context.Background(), lifecycle.StopPause); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+}
+
+func TestAgentRuntimePreparationFailureStartsNoSessionChildren(t *testing.T) {
+	restorer := newInfrastructureRestorer(func(context.Context) (portrelay.Reconciler, error) {
+		return portrelay.Reconciler{}, nil
+	})
+	wantErr := &localSyncIdentityBlockedError{cause: syncer.ErrIdentityCorrupt}
+	localSync := &recordingLocalSyncLifecycle{
+		started: make(chan struct{}), stopped: make(chan struct{}), prepareErr: wantErr,
+	}
+	recoveryCalls := 0
+	runtimeAgent := &AgentRuntime{
+		agent: NewAgent(nil, restorer, nil), restorer: restorer, localSync: localSync,
+		startupRecover: func(context.Context) error { recoveryCalls++; return nil },
+	}
+	if err := runtimeAgent.Start(context.Background(), lifecycle.RoleMacClient); !errors.Is(err, wantErr) {
+		t.Fatalf("Start() error = %v, want %v", err, wantErr)
+	}
+	runtimeAgent.sessionMu.Lock()
+	running := runtimeAgent.sessionRunning
+	runtimeAgent.sessionMu.Unlock()
+	if running || recoveryCalls != 0 {
+		t.Fatalf("failed preparation running=%t recoveryCalls=%d", running, recoveryCalls)
+	}
+	select {
+	case <-localSync.started:
+		t.Fatal("local sync child started after failed preparation")
+	default:
+	}
+}
+
 func TestAgentRuntimeStartAndStopOwnOneSessionLifecycle(t *testing.T) {
 	restorer := newInfrastructureRestorer(func(context.Context) (portrelay.Reconciler, error) {
 		return portrelay.Reconciler{}, nil
@@ -769,9 +844,26 @@ func TestAgentRuntimeRunsWindowsBridgeAlongsideRuntimeIdentityLifecycle(t *testi
 }
 
 type recordingLocalSyncLifecycle struct {
-	started chan struct{}
-	stopped chan struct{}
-	once    sync.Once
+	started        chan struct{}
+	stopped        chan struct{}
+	prepareStarted chan struct{}
+	prepareRelease chan struct{}
+	prepareErr     error
+	once           sync.Once
+}
+
+func (r *recordingLocalSyncLifecycle) Prepare(ctx context.Context) (localSyncPreparation, error) {
+	if r.prepareStarted != nil {
+		close(r.prepareStarted)
+	}
+	if r.prepareRelease != nil {
+		select {
+		case <-ctx.Done():
+			return localSyncPreparation{}, ctx.Err()
+		case <-r.prepareRelease:
+		}
+	}
+	return localSyncPreparation{}, r.prepareErr
 }
 
 func (r *recordingLocalSyncLifecycle) Run(ctx context.Context, _ time.Duration) error {
