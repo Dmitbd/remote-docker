@@ -542,6 +542,67 @@ func TestSupervisorCancelConnectionRetriesWatchdogJoinBeforePublishingIdle(t *te
 	}
 }
 
+func TestSupervisorLateExpectedRuntimeDoneRetainsFailedWatchdogCleanup(t *testing.T) {
+	machine := newLifecycleMachine(t, lifecycle.RoleMacClient)
+	runtime := newRecordingSessionRuntime()
+	stopFailure := errors.New("runtime stop reported incomplete cleanup")
+	runtime.stop = func(context.Context) error { return stopFailure }
+	firstWatchdogFailure := errors.New("first watchdog join failed")
+	lateDoneWatchdogFailure := errors.New("late-done watchdog join failed")
+	watchdog := newSignallingCrashWatchdog(firstWatchdogFailure, lateDoneWatchdogFailure, nil)
+	supervisor, err := NewSupervisor(machine, runtime, WithWatchdogFactory(func() (CrashWatchdog, error) {
+		return watchdog, nil
+	}))
+	if err != nil {
+		t.Fatalf("NewSupervisor() error = %v", err)
+	}
+	if err := supervisor.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventSearchStarted}); err != nil {
+		t.Fatalf("Apply(EventSearchStarted) error = %v", err)
+	}
+	pairing := lifecycle.Pairing{
+		SessionID: "session-late-done", Peer: lifecycle.Peer{ID: "windows", Name: "Windows"}, Code: "123456",
+	}
+	if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &pairing}); err != nil {
+		t.Fatalf("Apply(EventPairingStarted) error = %v", err)
+	}
+
+	firstErr := supervisor.CancelConnection(context.Background())
+	if !errors.Is(firstErr, stopFailure) || !errors.Is(firstErr, firstWatchdogFailure) {
+		t.Fatalf("first CancelConnection() error = %v, want both component failures", firstErr)
+	}
+	watchdog.waitForCall(t, 1)
+	assertRetryablePairing(t, supervisor.Snapshot(), pairing)
+
+	runtime.fail(context.Canceled)
+	watchdog.waitForCall(t, 2)
+	assertRetryablePairing(t, supervisor.Snapshot(), pairing)
+	if got := supervisor.Snapshot().Problem; got != nil {
+		t.Fatalf("expected late Done published runtime problem = %#v", got)
+	}
+
+	if err := supervisor.CancelConnection(context.Background()); err != nil {
+		t.Fatalf("final CancelConnection() error = %v", err)
+	}
+	watchdog.waitForCall(t, 3)
+	if calls, _ := runtime.stopSnapshot(); calls != 1 {
+		t.Fatalf("runtime Stop() calls = %d, want late Done to prove runtime terminal", calls)
+	}
+	if got := supervisor.Snapshot(); got.State != lifecycle.StateClientReady || got.Pairing != nil || got.ActionInProgress || got.Problem != nil {
+		t.Fatalf("final cancellation snapshot = %#v", got)
+	}
+}
+
+func assertRetryablePairing(t *testing.T, snapshot lifecycle.Snapshot, pairing lifecycle.Pairing) {
+	t.Helper()
+	if snapshot.State != lifecycle.StatePairing || snapshot.ActionInProgress || snapshot.Pairing == nil ||
+		snapshot.Pairing.SessionID != pairing.SessionID || snapshot.Pairing.Code != pairing.Code {
+		t.Fatalf("retryable pairing snapshot = %#v", snapshot)
+	}
+}
+
 func newLifecycleMachine(t *testing.T, role lifecycle.Role) *lifecycle.Machine {
 	t.Helper()
 	machine, err := lifecycle.NewMachine(role, "Device")
@@ -572,6 +633,13 @@ type retryingCrashWatchdog struct {
 	errors []error
 }
 
+type signallingCrashWatchdog struct {
+	mu     sync.Mutex
+	calls  int
+	errors []error
+	called chan int
+}
+
 func (w *recordingCrashWatchdog) CleanStop(context.Context) error {
 	w.cleanStops++
 	return nil
@@ -583,6 +651,35 @@ func (w *retryingCrashWatchdog) CleanStop(context.Context) error {
 		return w.errors[w.calls-1]
 	}
 	return nil
+}
+
+func newSignallingCrashWatchdog(failures ...error) *signallingCrashWatchdog {
+	return &signallingCrashWatchdog{errors: failures, called: make(chan int, len(failures)+1)}
+}
+
+func (w *signallingCrashWatchdog) CleanStop(context.Context) error {
+	w.mu.Lock()
+	w.calls++
+	call := w.calls
+	var err error
+	if call <= len(w.errors) {
+		err = w.errors[call-1]
+	}
+	w.mu.Unlock()
+	w.called <- call
+	return err
+}
+
+func (w *signallingCrashWatchdog) waitForCall(t *testing.T, want int) {
+	t.Helper()
+	select {
+	case got := <-w.called:
+		if got != want {
+			t.Fatalf("watchdog call = %d, want %d", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("watchdog call %d did not happen", want)
+	}
 }
 
 func newRecordingSessionRuntime() *recordingSessionRuntime {

@@ -45,13 +45,17 @@ type Supervisor struct {
 	stopTimeout     time.Duration
 	watchdogFactory WatchdogFactory
 
-	mu        sync.Mutex
-	running   bool
-	stopping  bool
-	terminal  bool
-	watchdog  CrashWatchdog
-	startup   *supervisorStartup
-	nextStart uint64
+	mu                 sync.Mutex
+	running            bool
+	stopping           bool
+	terminal           bool
+	watchdog           CrashWatchdog
+	startup            *supervisorStartup
+	nextStart          uint64
+	runtimeGeneration  uint64
+	watchdogGeneration uint64
+	expectedDone       map[uint64]struct{}
+	pendingDone        map[uint64]struct{}
 }
 
 type supervisorStartup struct {
@@ -67,7 +71,11 @@ func NewSupervisor(machine *lifecycle.Machine, runtime SessionRuntime, options .
 	if machine == nil || runtime == nil {
 		return nil, errors.New("desktop supervisor dependencies are incomplete")
 	}
-	supervisor := &Supervisor{machine: machine, runtime: runtime, stopTimeout: defaultSupervisorStopTimeout}
+	supervisor := &Supervisor{
+		machine: machine, runtime: runtime, stopTimeout: defaultSupervisorStopTimeout,
+		expectedDone: make(map[uint64]struct{}),
+		pendingDone:  make(map[uint64]struct{}),
+	}
 	for _, option := range options {
 		option(supervisor)
 	}
@@ -181,10 +189,14 @@ func (s *Supervisor) Start(ctx context.Context) error {
 		return context.Canceled
 	}
 	s.running = true
+	s.runtimeGeneration = startup.generation
 	s.watchdog = sessionWatchdog
+	if sessionWatchdog != nil {
+		s.watchdogGeneration = startup.generation
+	}
 	s.mu.Unlock()
 	s.finishStartup(startup)
-	go s.observeRuntime(s.runtime.Done())
+	go s.observeRuntime(s.runtime.Done(), startup.generation)
 	return nil
 }
 
@@ -305,9 +317,13 @@ func (s *Supervisor) CancelConnection(ctx context.Context) error {
 		forceRuntime := startup.runtimeInvoked
 		if forceRuntime {
 			s.running = true
+			s.runtimeGeneration = startup.generation
 		}
 		if s.watchdog == nil {
 			s.watchdog = startup.watchdog
+			if startup.watchdog != nil {
+				s.watchdogGeneration = startup.generation
+			}
 		}
 		s.mu.Unlock()
 		return s.stopConnection(ctx, forceRuntime)
@@ -344,7 +360,12 @@ func (s *Supervisor) stopOwned(parent context.Context, reason lifecycle.StopReas
 	s.mu.Lock()
 	s.stopping = true
 	running := s.running || forceRuntime
+	runtimeGeneration := s.runtimeGeneration
+	if running && runtimeGeneration != 0 {
+		s.expectedDone[runtimeGeneration] = struct{}{}
+	}
 	sessionWatchdog := s.watchdog
+	watchdogGeneration := s.watchdogGeneration
 	s.mu.Unlock()
 
 	var stopErr error
@@ -365,11 +386,17 @@ func (s *Supervisor) stopOwned(parent context.Context, reason lifecycle.StopReas
 
 	combinedErr := errors.Join(stopErr, watchdogErr)
 	s.mu.Lock()
-	if stopErr == nil {
-		s.running = false
+	_, runtimeDone := s.pendingDone[runtimeGeneration]
+	if runtimeDone {
+		delete(s.pendingDone, runtimeGeneration)
 	}
-	if watchdogErr == nil {
+	if (stopErr == nil || runtimeDone) && s.runtimeGeneration == runtimeGeneration {
+		s.running = false
+		s.runtimeGeneration = 0
+	}
+	if watchdogErr == nil && s.watchdogGeneration == watchdogGeneration {
 		s.watchdog = nil
+		s.watchdogGeneration = 0
 	}
 	s.stopping = false
 	s.mu.Unlock()
@@ -385,7 +412,7 @@ func (s *Supervisor) stopOwned(parent context.Context, reason lifecycle.StopReas
 	return err
 }
 
-func (s *Supervisor) observeRuntime(done <-chan error) {
+func (s *Supervisor) observeRuntime(done <-chan error, generation uint64) {
 	if done == nil {
 		return
 	}
@@ -394,8 +421,47 @@ func (s *Supervisor) observeRuntime(done <-chan error) {
 		err = nil
 	}
 	s.mu.Lock()
-	unexpected := s.running && !s.stopping
+	_, expected := s.expectedDone[generation]
+	if expected {
+		delete(s.expectedDone, generation)
+		if s.stopping {
+			s.pendingDone[generation] = struct{}{}
+			s.mu.Unlock()
+			return
+		}
+		if s.runtimeGeneration == generation {
+			s.running = false
+			s.runtimeGeneration = 0
+		}
+		sessionWatchdog := s.watchdog
+		watchdogGeneration := s.watchdogGeneration
+		if watchdogGeneration != generation {
+			sessionWatchdog = nil
+		}
+		if sessionWatchdog != nil {
+			s.stopping = true
+		}
+		s.mu.Unlock()
+		if sessionWatchdog != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), s.stopTimeout)
+			watchdogErr := sessionWatchdog.CleanStop(cleanupCtx)
+			cancel()
+			s.mu.Lock()
+			if watchdogErr == nil && s.watchdogGeneration == generation {
+				s.watchdog = nil
+				s.watchdogGeneration = 0
+			}
+			s.stopping = false
+			s.mu.Unlock()
+		}
+		return
+	}
+	unexpected := s.running && s.runtimeGeneration == generation && !s.stopping
 	sessionWatchdog := s.watchdog
+	watchdogGeneration := s.watchdogGeneration
+	if watchdogGeneration != generation {
+		sessionWatchdog = nil
+	}
 	if unexpected {
 		s.stopping = true
 	}
@@ -403,17 +469,24 @@ func (s *Supervisor) observeRuntime(done <-chan error) {
 	if unexpected {
 		_ = err
 		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), s.stopTimeout)
-		_ = s.runtime.Stop(cleanupCtx, lifecycle.StopFailure)
+		stopErr := s.runtime.Stop(cleanupCtx, lifecycle.StopFailure)
 		cancelCleanup()
+		var watchdogErr error
 		if sessionWatchdog != nil {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), s.stopTimeout)
-			_ = sessionWatchdog.CleanStop(cleanupCtx)
+			watchdogErr = sessionWatchdog.CleanStop(cleanupCtx)
 			cancel()
 		}
 		s.mu.Lock()
-		s.running = false
+		if stopErr == nil && s.runtimeGeneration == generation {
+			s.running = false
+			s.runtimeGeneration = 0
+		}
 		s.stopping = false
-		s.watchdog = nil
+		if watchdogErr == nil && sessionWatchdog != nil && s.watchdogGeneration == generation {
+			s.watchdog = nil
+			s.watchdogGeneration = 0
+		}
 		s.mu.Unlock()
 		s.publishRuntimeProblem("runtime_stopped")
 	}
