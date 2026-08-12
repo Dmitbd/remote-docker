@@ -303,6 +303,9 @@ func (s *Supervisor) CancelConnection(ctx context.Context) error {
 		<-startup.done
 		s.mu.Lock()
 		forceRuntime := startup.runtimeInvoked
+		if forceRuntime {
+			s.running = true
+		}
 		if s.watchdog == nil {
 			s.watchdog = startup.watchdog
 		}

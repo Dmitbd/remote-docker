@@ -333,6 +333,66 @@ func TestSupervisorCancelConnectionCancelsAndJoinsInflightStart(t *testing.T) {
 	}
 }
 
+func TestSupervisorCancelConnectionRetriesFailedForcedRuntimeStop(t *testing.T) {
+	trusted := lifecycle.Peer{ID: "windows", Name: "Windows"}
+	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(trusted))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventConnectionStartReserved}); err != nil {
+		t.Fatalf("Apply(EventConnectionStartReserved) error = %v", err)
+	}
+	runtime := newRecordingSessionRuntime()
+	startEntered := make(chan struct{})
+	stopFailure := errors.New("forced runtime stop failed")
+	runtime.start = func(ctx context.Context) error {
+		close(startEntered)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	runtime.stop = func(context.Context) error {
+		calls, _ := runtime.stopSnapshot()
+		if calls == 1 {
+			return stopFailure
+		}
+		return nil
+	}
+	supervisor, err := NewSupervisor(machine, runtime)
+	if err != nil {
+		t.Fatalf("NewSupervisor() error = %v", err)
+	}
+	startDone := make(chan error, 1)
+	go func() { startDone <- supervisor.Start(context.Background()) }()
+	select {
+	case <-startEntered:
+	case <-time.After(time.Second):
+		t.Fatal("runtime Start() did not begin")
+	}
+
+	if err := supervisor.CancelConnection(context.Background()); !errors.Is(err, stopFailure) {
+		t.Fatalf("first CancelConnection() error = %v, want stop failure", err)
+	}
+	if err := <-startDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start() error = %v, want context cancellation", err)
+	}
+	retryable := supervisor.Snapshot()
+	if retryable.State != lifecycle.StateConnecting || retryable.ActionInProgress || retryable.TrustedPeers != 1 ||
+		retryable.Peer == nil || retryable.Peer.ID != trusted.ID || !machine.Allowed(lifecycle.CommandCancelConnection) {
+		t.Fatalf("retryable forced-stop snapshot = %#v", retryable)
+	}
+
+	if err := supervisor.CancelConnection(context.Background()); err != nil {
+		t.Fatalf("second CancelConnection() error = %v", err)
+	}
+	if calls, reason := runtime.stopSnapshot(); calls != 2 || reason != lifecycle.StopCancelConnection {
+		t.Fatalf("runtime stop calls=%d reason=%q", calls, reason)
+	}
+	if got := supervisor.Snapshot(); got.State != lifecycle.StateClientReady || got.ActionInProgress ||
+		got.TrustedPeers != 1 || got.Peer == nil || got.Peer.ID != trusted.ID {
+		t.Fatalf("post-retry snapshot = %#v", got)
+	}
+}
+
 func TestSupervisorCancelConnectionDoesNotStartRuntimeAfterStartupLeaseIsCancelled(t *testing.T) {
 	trusted := lifecycle.Peer{ID: "windows", Name: "Windows"}
 	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(trusted))
@@ -437,6 +497,51 @@ func TestSupervisorCancelConnectionRetriesFailedPairingStop(t *testing.T) {
 	}
 }
 
+func TestSupervisorCancelConnectionRetriesWatchdogJoinBeforePublishingIdle(t *testing.T) {
+	machine := newLifecycleMachine(t, lifecycle.RoleMacClient)
+	runtime := newRecordingSessionRuntime()
+	joinFailure := errors.New("watchdog join timed out")
+	watchdog := &retryingCrashWatchdog{errors: []error{joinFailure, nil}}
+	supervisor, err := NewSupervisor(machine, runtime, WithWatchdogFactory(func() (CrashWatchdog, error) {
+		return watchdog, nil
+	}))
+	if err != nil {
+		t.Fatalf("NewSupervisor() error = %v", err)
+	}
+	if err := supervisor.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventSearchStarted}); err != nil {
+		t.Fatalf("Apply(EventSearchStarted) error = %v", err)
+	}
+	pairing := lifecycle.Pairing{
+		SessionID: "session-watchdog-retry", Peer: lifecycle.Peer{ID: "windows", Name: "Windows"}, Code: "123456",
+	}
+	if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &pairing}); err != nil {
+		t.Fatalf("Apply(EventPairingStarted) error = %v", err)
+	}
+
+	if err := supervisor.CancelConnection(context.Background()); !errors.Is(err, joinFailure) {
+		t.Fatalf("first CancelConnection() error = %v, want watchdog join failure", err)
+	}
+	if got := supervisor.Snapshot(); got.State != lifecycle.StatePairing || got.Pairing == nil ||
+		got.Pairing.SessionID != pairing.SessionID || got.Pairing.Code != pairing.Code || got.ActionInProgress {
+		t.Fatalf("retryable watchdog snapshot = %#v", got)
+	}
+	if err := supervisor.CancelConnection(context.Background()); err != nil {
+		t.Fatalf("second CancelConnection() error = %v", err)
+	}
+	if calls, _ := runtime.stopSnapshot(); calls != 1 {
+		t.Fatalf("runtime stop calls = %d, want successful runtime cleanup to remain one-shot", calls)
+	}
+	if watchdog.calls != 2 {
+		t.Fatalf("watchdog clean/join calls = %d, want 2", watchdog.calls)
+	}
+	if got := supervisor.Snapshot(); got.State != lifecycle.StateClientReady || got.Pairing != nil || got.ActionInProgress {
+		t.Fatalf("post-watchdog-retry snapshot = %#v", got)
+	}
+}
+
 func newLifecycleMachine(t *testing.T, role lifecycle.Role) *lifecycle.Machine {
 	t.Helper()
 	machine, err := lifecycle.NewMachine(role, "Device")
@@ -462,8 +567,21 @@ type recordingSessionRuntime struct {
 
 type recordingCrashWatchdog struct{ cleanStops int }
 
+type retryingCrashWatchdog struct {
+	calls  int
+	errors []error
+}
+
 func (w *recordingCrashWatchdog) CleanStop(context.Context) error {
 	w.cleanStops++
+	return nil
+}
+
+func (w *retryingCrashWatchdog) CleanStop(context.Context) error {
+	w.calls++
+	if w.calls <= len(w.errors) {
+		return w.errors[w.calls-1]
+	}
 	return nil
 }
 

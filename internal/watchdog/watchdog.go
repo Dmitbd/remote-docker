@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -33,8 +34,12 @@ type Controller struct {
 	token string
 	input io.WriteCloser
 	done  chan error
-	once  sync.Once
-	err   error
+
+	signalOnce sync.Once
+	signalErr  error
+	waitOnce   sync.Once
+	waitReady  chan struct{}
+	waitErr    error
 }
 
 func Start(executable string) (*Controller, error) {
@@ -84,25 +89,33 @@ func (c *Controller) CleanStop(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	c.once.Do(func() {
+	c.signalOnce.Do(func() {
 		if err := json.NewEncoder(c.input).Encode(protocolMessage{Kind: messageClean, Token: c.token}); err != nil {
-			c.err = errors.New("notify crash watchdog")
+			c.signalErr = errors.New("notify crash watchdog")
 		}
-		if err := c.input.Close(); err != nil && c.err == nil {
-			c.err = errors.New("close crash watchdog control pipe")
-		}
-		select {
-		case <-ctx.Done():
-			if c.err == nil {
-				c.err = ctx.Err()
-			}
-		case err := <-c.done:
-			if err != nil && c.err == nil {
-				c.err = errors.New("crash watchdog did not exit cleanly")
-			}
+		if err := c.input.Close(); err != nil && c.signalErr == nil {
+			c.signalErr = errors.New("close crash watchdog control pipe")
 		}
 	})
-	return c.err
+	c.waitOnce.Do(func() {
+		c.waitReady = make(chan struct{})
+		go func() {
+			err, ok := <-c.done
+			if ok {
+				c.waitErr = err
+			}
+			close(c.waitReady)
+		}()
+	})
+	select {
+	case <-ctx.Done():
+		return errors.Join(c.signalErr, ctx.Err())
+	case <-c.waitReady:
+		if c.waitErr != nil {
+			return errors.Join(c.signalErr, fmt.Errorf("crash watchdog did not exit cleanly: %w", c.waitErr))
+		}
+		return c.signalErr
+	}
 }
 
 // RunChild is called by the desktop main function before initializing the UI.
