@@ -14,6 +14,36 @@ import (
 	"github.com/Dmitbd/remote-docker/internal/credentials"
 )
 
+func TestValidateEncryptedIdentityClassifiesStoredIdentityCorruption(t *testing.T) {
+	validKey := bytes.Repeat([]byte{7}, 32)
+	wrongKey := bytes.Repeat([]byte{8}, 32)
+	validBlob, err := EncryptIdentity(Identity{
+		CertificatePEM: []byte("cert"),
+		PrivateKeyPEM:  []byte("key"),
+	}, validKey, bytes.NewReader(bytes.Repeat([]byte{1}, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateEncryptedIdentity(validBlob, validKey); err != nil {
+		t.Fatalf("valid identity error = %v", err)
+	}
+
+	for name, testCase := range map[string]struct {
+		blob []byte
+		key  []byte
+	}{
+		"wrong key": {blob: validBlob, key: wrongKey},
+		"bad magic": {blob: []byte("not-an-identity"), key: validKey},
+		"short key": {blob: validBlob, key: []byte("short")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateEncryptedIdentity(testCase.blob, testCase.key); !errors.Is(err, ErrIdentityCorrupt) {
+				t.Fatalf("ValidateEncryptedIdentity() error = %v, want ErrIdentityCorrupt", err)
+			}
+		})
+	}
+}
+
 func TestManagedProcessMaterializesAndCleansEncryptedIdentity(t *testing.T) {
 	root := t.TempDir()
 	configDir := filepath.Join(root, "persistent-config")

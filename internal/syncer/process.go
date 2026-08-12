@@ -25,6 +25,8 @@ const (
 	identityBlobMagic              = "RDSI1"
 )
 
+var ErrIdentityCorrupt = errors.New("stored Syncthing identity is unusable")
+
 // Identity is the Syncthing TLS device identity held only in encrypted form at rest.
 type Identity struct {
 	CertificatePEM []byte `json:"certificate_pem"`
@@ -90,6 +92,18 @@ func decryptIdentity(blob, key []byte) (Identity, error) {
 		return Identity{}, errors.New("decrypted Syncthing identity is incomplete")
 	}
 	return identity, nil
+}
+
+// ValidateEncryptedIdentity verifies that one stored blob and credential key
+// form a usable identity without exposing decryption details to callers.
+func ValidateEncryptedIdentity(blob, key []byte) error {
+	identity, err := decryptIdentity(blob, key)
+	if err != nil {
+		return ErrIdentityCorrupt
+	}
+	clear(identity.CertificatePEM)
+	clear(identity.PrivateKeyPEM)
+	return nil
 }
 
 // ChildProcess is the one concrete Syncthing process started by this agent.
