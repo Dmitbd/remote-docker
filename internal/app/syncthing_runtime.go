@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -48,6 +49,24 @@ type localSyncthingRuntime struct {
 	mu      sync.Mutex
 }
 
+type localSyncPreparation struct {
+	Recovered              bool
+	CredentialCleanupError error
+}
+
+type localSyncIdentityBlockedError struct{ cause error }
+
+func (e *localSyncIdentityBlockedError) Error() string {
+	return "local Syncthing identity cannot be rotated while device state exists"
+}
+
+func (e *localSyncIdentityBlockedError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
 func newLocalSyncthingRuntime(options localSyncthingOptions) *localSyncthingRuntime {
 	if options.HTTPClient == nil {
 		options.HTTPClient = &http.Client{Timeout: agentProbeTimeout}
@@ -56,6 +75,88 @@ func newLocalSyncthingRuntime(options localSyncthingOptions) *localSyncthingRunt
 		options.ConfigTransactions = newConfigTransactions(options.Store.Path)
 	}
 	return &localSyncthingRuntime{options: options}
+}
+
+// Prepare validates the stored local identity before any session-owned child
+// can start. An unpaired corrupt identity is reset using public config as the
+// durable boundary; paired or cleanup-dependent state remains fail-closed.
+func (r *localSyncthingRuntime) Prepare(ctx context.Context) (localSyncPreparation, error) {
+	if r == nil || r.options.Secrets == nil {
+		return localSyncPreparation{}, errors.New("local Syncthing runtime is incomplete")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	cfg, err := loadAgentConfig(r.options.Store)
+	if err != nil {
+		return localSyncPreparation{}, fmt.Errorf("read local Syncthing configuration: %w", err)
+	}
+	if cfg.LocalSyncthingDeviceID == "" && len(cfg.LocalSyncthingIdentity) == 0 {
+		return localSyncPreparation{}, nil
+	}
+
+	validationErr := error(nil)
+	if strings.TrimSpace(cfg.LocalSyncthingDeviceID) == "" || len(cfg.LocalSyncthingIdentity) == 0 {
+		validationErr = syncer.ErrIdentityCorrupt
+	} else {
+		key, keyErr := r.options.Secrets.Get(localSyncthingCredentialOwner, syncer.SyncthingIdentityKeyCredential)
+		validationErr = keyErr
+		if keyErr == nil {
+			validationErr = syncer.ValidateEncryptedIdentity(cfg.LocalSyncthingIdentity, key)
+			clear(key)
+		}
+	}
+	if validationErr == nil {
+		return localSyncPreparation{}, nil
+	}
+	if !errors.Is(validationErr, credentials.ErrNotFound) && !errors.Is(validationErr, syncer.ErrIdentityCorrupt) {
+		return localSyncPreparation{}, fmt.Errorf("validate local Syncthing identity: %w", validationErr)
+	}
+
+	reset := false
+	err = r.options.ConfigTransactions.RunContext(ctx, func() error {
+		current, loadErr := loadAgentConfig(r.options.Store)
+		if loadErr != nil {
+			return loadErr
+		}
+		if current.ActiveDevice != "" || len(current.Devices) != 0 || len(current.PendingRevocations) != 0 {
+			return &localSyncIdentityBlockedError{cause: validationErr}
+		}
+		if current.LocalSyncthingDeviceID != cfg.LocalSyncthingDeviceID ||
+			!bytes.Equal(current.LocalSyncthingIdentity, cfg.LocalSyncthingIdentity) {
+			return errors.New("local Syncthing identity changed during validation")
+		}
+		current.LocalSyncthingDeviceID = ""
+		current.LocalSyncthingIdentity = nil
+		if saveErr := r.options.Store.Save(current); saveErr != nil {
+			return fmt.Errorf("reset local Syncthing identity: %w", saveErr)
+		}
+		reset = true
+		return nil
+	})
+	if err != nil {
+		return localSyncPreparation{}, err
+	}
+	if !reset {
+		return localSyncPreparation{}, nil
+	}
+
+	cleanupErr := errors.Join(
+		deleteCredentialIfPresent(r.options.Secrets, localSyncthingCredentialOwner, syncer.SyncthingIdentityKeyCredential),
+		deleteCredentialIfPresent(r.options.Secrets, localSyncthingCredentialOwner, syncer.SyncthingAPIKeyCredential),
+	)
+	return localSyncPreparation{Recovered: true, CredentialCleanupError: cleanupErr}, nil
+}
+
+func deleteCredentialIfPresent(store credentials.Store, owner, name string) error {
+	err := store.Delete(owner, name)
+	if errors.Is(err, credentials.ErrNotFound) {
+		return nil
+	}
+	return err
 }
 
 // DeviceID returns the stable local Syncthing identity, bootstrapping it once
