@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1004,6 +1005,30 @@ func (c *macPairingCoordinator) cleanupPendingRevocation(ctx context.Context, de
 			remoteCtx, cancelRemote := context.WithTimeout(ctx, c.options.RemoteCleanupTimeout)
 			revokeErr = c.options.Transport.Revoke(remoteCtx, pending.Device, pending.Device.ClientDeviceID, pairingGeneration, proof)
 			cancelRemote()
+			if revokeErr == nil && pending.SessionID != "" {
+				fenceCtx, cancelFence := context.WithTimeout(ctx, c.options.RemoteCleanupTimeout)
+				quiesced, fenceErr := c.pairingConfirmationQuiesced(fenceCtx, pending)
+				cancelFence()
+				switch {
+				case fenceErr != nil:
+					revokeErr = fenceErr
+				case !quiesced:
+					revokeErr = errors.New("pairing confirmation has not quiesced")
+				default:
+					leaseCurrent, renewErr = c.renewPendingCleanup(ctx, deviceID, leaseToken)
+					if renewErr != nil || !leaseCurrent {
+						if renewErr != nil {
+							revokeErr = renewErr
+						} else {
+							revokeErr = errors.New("pairing cleanup lease changed before fenced revoke")
+						}
+						break
+					}
+					remoteCtx, cancelRemote = context.WithTimeout(ctx, c.options.RemoteCleanupTimeout)
+					revokeErr = c.options.Transport.Revoke(remoteCtx, pending.Device, pending.Device.ClientDeviceID, pairingGeneration, proof)
+					cancelRemote()
+				}
+			}
 			clearSecret(proof)
 		}
 		if err := c.completeRemoteCleanup(ctx, deviceID, leaseToken, revokeErr); err != nil {
@@ -1025,6 +1050,43 @@ func (c *macPairingCoordinator) cleanupPendingRevocation(ctx context.Context, de
 		}
 	}
 	return errors.Join(stageErrors...)
+}
+
+// pairingConfirmationQuiesced obtains a server-side ordering fence for a
+// pairing generation. A successful revocation is idempotent and therefore
+// cannot by itself distinguish "already absent" from a Confirm that is still
+// committing under the Windows pairing mutex.
+func (c *macPairingCoordinator) pairingConfirmationQuiesced(ctx context.Context, pending config.PendingRevocation) (bool, error) {
+	if pending.SessionID == "" {
+		return true, nil
+	}
+	serverPublicKey, err := tunnel.ParsePublicKey(pending.Device.TunnelPeerPublicKey)
+	if err != nil || strings.TrimSpace(pending.Device.Address) == "" {
+		return false, errors.New("pairing confirmation fence is unavailable")
+	}
+	status, err := c.options.Transport.Status(ctx, pairingTarget{
+		Address: pending.Device.Address, PairingPort: tunnel.TunnelPort,
+	}, pairing.SessionDescriptor{
+		ID: pending.SessionID, ServerPublicKey: serverPublicKey,
+	})
+	if err != nil {
+		var httpErr *pairing.HTTPError
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+			return true, nil
+		}
+		return false, err
+	}
+	if status.SessionID != pending.SessionID {
+		return false, errors.New("pairing confirmation fence changed session")
+	}
+	switch status.State {
+	case pairing.SessionCompleted, pairing.SessionCancelled, pairing.SessionRejected, pairing.SessionExpired:
+		return true, nil
+	case pairing.SessionPending, pairing.SessionApproved:
+		return false, nil
+	default:
+		return false, errors.New("pairing confirmation fence returned an unknown state")
+	}
 }
 
 func (c *macPairingCoordinator) reservePendingCleanup(

@@ -1120,7 +1120,11 @@ func TestMacPairingCompletionCancellationRollsBackConfirmedProductionArtifacts(t
 	store := config.Store{Path: filepath.Join(root, "config.json")}
 	secrets := credentials.NewMemoryStore()
 	requestCtx, cancelRequest := context.WithCancel(context.Background())
-	transport := &runtimePairingTransport{hostKey: testAuthorizedKey(t), afterConfirm: cancelRequest}
+	transport := &runtimePairingTransport{hostKey: testAuthorizedKey(t)}
+	transport.afterConfirm = func() {
+		transport.status = pairing.SessionCompleted
+		cancelRequest()
+	}
 	coordinator := newMacPairingCoordinator(macPairingOptions{
 		Store: store, Secrets: secrets, Transport: transport, Docker: contextCheckingDockerExecutor{},
 		DockerCLI: "docker-real", DockerContext: "remote-docker",
@@ -1148,8 +1152,8 @@ func TestMacPairingCompletionCancellationRollsBackConfirmedProductionArtifacts(t
 	if _, err := coordinator.Status(requestCtx, started.SessionID); err == nil {
 		t.Fatal("Status() error = nil after completion context cancellation")
 	}
-	if transport.revokeCalls != 1 {
-		t.Fatalf("remote revoke calls = %d, want one", transport.revokeCalls)
+	if transport.revokeCalls != 2 {
+		t.Fatalf("remote revoke calls = %d, want pre-fence and post-fence revoke", transport.revokeCalls)
 	}
 	cfg, err := store.Load()
 	if err != nil || cfg.ActiveDevice != "" || len(cfg.Devices) != 0 || len(cfg.PendingRevocations) != 0 {
@@ -1718,6 +1722,10 @@ func TestRestartedPairingCancelCleansOldGenerationWithoutDeletingNewTrust(t *tes
 	oldGeneration := "old-generation"
 	oldOwner := "pairing-generation-old"
 	newOwner := "pairing-generation-new"
+	serverPublicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate pairing server key: %v", err)
+	}
 	if err := store.Save(config.Config{
 		SchemaVersion: config.CurrentSchemaVersion, ActiveDevice: "windows-peer",
 		Devices: map[string]config.Device{"windows-peer": {
@@ -1733,6 +1741,7 @@ func TestRestartedPairingCancelCleansOldGenerationWithoutDeletingNewTrust(t *tes
 			Device: config.Device{
 				Name: "Windows", Address: "192.168.1.20", ClientDeviceID: "LOCAL-SYNC",
 				PairingGeneration: oldGeneration, RevocationCredentialOwner: oldOwner,
+				TunnelPeerPublicKey: tunnel.EncodePublicKey(serverPublicKey),
 			},
 			DockerContext: config.DockerContextChange{
 				Name: "remote-docker", CurrentHost: "ssh://remote-docker-device-windows-peer",
@@ -1753,7 +1762,7 @@ func TestRestartedPairingCancelCleansOldGenerationWithoutDeletingNewTrust(t *tes
 			t.Fatalf("seed new credential %q: %v", credential, err)
 		}
 	}
-	transport := &runtimePairingTransport{}
+	transport := &runtimePairingTransport{status: pairing.SessionCompleted}
 	restarted := newMacPairingCoordinator(macPairingOptions{
 		Store: store, Secrets: secrets, Transport: transport, Docker: docker,
 		DockerCLI: "docker-real", DockerContext: "remote-docker",
@@ -1985,6 +1994,10 @@ func TestExpiredDurableCompletionLeaseResumesCleanupAfterCrash(t *testing.T) {
 	now := time.Now().UTC()
 	generation := "generation-crashed"
 	owner := "owner-crashed"
+	serverPublicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate pairing server key: %v", err)
+	}
 	if err := store.Save(config.Config{
 		SchemaVersion: config.CurrentSchemaVersion,
 		PendingRevocations: map[string]config.PendingRevocation{generation: {
@@ -1993,7 +2006,9 @@ func TestExpiredDurableCompletionLeaseResumesCleanupAfterCrash(t *testing.T) {
 			CompletionLeaseExpiresAt: now.Add(-time.Second).Format(time.RFC3339Nano),
 			DockerRestored:           true, LocalCleaned: true,
 			Device: config.Device{
-				ClientDeviceID: "LOCAL-SYNC", PairingGeneration: generation, RevocationCredentialOwner: owner,
+				Address: "192.168.1.20", ClientDeviceID: "LOCAL-SYNC",
+				TunnelPeerPublicKey: tunnel.EncodePublicKey(serverPublicKey),
+				PairingGeneration:   generation, RevocationCredentialOwner: owner,
 			},
 		}},
 	}); err != nil {
@@ -2002,7 +2017,7 @@ func TestExpiredDurableCompletionLeaseResumesCleanupAfterCrash(t *testing.T) {
 	if err := secrets.Put(owner, revocationProofCredential, bytes.Repeat([]byte{5}, pairing.RevocationProofSize)); err != nil {
 		t.Fatalf("seed proof: %v", err)
 	}
-	transport := &runtimePairingTransport{}
+	transport := &runtimePairingTransport{status: pairing.SessionExpired}
 	restarted := newMacPairingCoordinator(macPairingOptions{
 		Store: store, ConfigTransactions: newConfigTransactions(store.Path), Secrets: secrets, Transport: transport,
 		Now: func() time.Time { return now },
@@ -2010,8 +2025,8 @@ func TestExpiredDurableCompletionLeaseResumesCleanupAfterCrash(t *testing.T) {
 	if err := restarted.ReconcilePendingRevocations(context.Background()); err != nil {
 		t.Fatalf("recover expired completion lease: %v", err)
 	}
-	if transport.revokeCalls != 1 {
-		t.Fatalf("remote revoke calls after crash = %d, want 1", transport.revokeCalls)
+	if transport.revokeCalls != 2 {
+		t.Fatalf("remote revoke calls after crash = %d, want pre-fence and post-fence revoke", transport.revokeCalls)
 	}
 	cfg, err := store.Load()
 	if err != nil || len(cfg.PendingRevocations) != 0 {
@@ -2894,6 +2909,74 @@ func TestMacPairingCancelCurrentWinsAgainstInflightRemoteConfirm(t *testing.T) {
 	}
 }
 
+func TestMacPairingCancelRetainsRevokeAuthorityUntilDelayedConfirmQuiesces(t *testing.T) {
+	root := t.TempDir()
+	store := config.Store{Path: filepath.Join(root, "config.json")}
+	secrets := credentials.NewMemoryStore()
+	transport := &delayedConfirmAfterNoopRevokeTransport{
+		runtimePairingTransport: &runtimePairingTransport{hostKey: testAuthorizedKey(t)},
+		confirmStarted:          make(chan struct{}), releaseConfirm: make(chan struct{}), confirmDone: make(chan struct{}),
+	}
+	coordinator := newMacPairingCoordinator(macPairingOptions{
+		Store: store, Secrets: secrets, Transport: transport, Docker: &runtimeDockerExecutor{},
+		DockerCLI: "docker-real", DockerContext: "remote-docker",
+		ClientDeviceID:     func(context.Context) (string, error) { return "LOCAL-SYNC", nil },
+		CleanupTaskTimeout: 30 * time.Millisecond, RemoteCleanupTimeout: 10 * time.Millisecond,
+	})
+	started, err := coordinator.Start(context.Background(), "windows-peer")
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	before, err := store.Load()
+	if err != nil || len(before.PendingRevocations) != 1 {
+		t.Fatalf("initial rollback journal = %#v error=%v", before.PendingRevocations, err)
+	}
+	proofOwner := ""
+	generation := ""
+	for id, pending := range before.PendingRevocations {
+		generation = id
+		proofOwner = pending.Device.RevocationCredentialOwner
+	}
+
+	completeDone := make(chan error, 1)
+	go func() {
+		_, completeErr := coordinator.Status(context.Background(), started.SessionID)
+		completeDone <- completeErr
+	}()
+	waitForTestSignal(t, transport.confirmStarted, "delayed Windows confirm")
+	cancelCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	begin := time.Now()
+	result, cancelErr := coordinator.CancelCurrent(cancelCtx, started.SessionID)
+	elapsed := time.Since(begin)
+	cancel()
+	if cancelErr != nil || result.Status != string(pairing.SessionCancelled) {
+		t.Fatalf("CancelCurrent() = %#v error=%v", result, cancelErr)
+	}
+	afterCancel, loadErr := store.Load()
+	journalRetained := loadErr == nil && len(afterCancel.PendingRevocations) == 1
+	_, proofErr := secrets.Get(proofOwner, revocationProofCredential)
+
+	close(transport.releaseConfirm)
+	_ = waitForTestError(t, completeDone, "delayed Windows confirm")
+	if err := coordinator.ReconcilePendingRevocations(context.Background()); err != nil {
+		t.Fatalf("ReconcilePendingRevocations() error = %v", err)
+	}
+	afterRetry, retryErr := store.Load()
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("local cancellation took %s", elapsed)
+	}
+	if !journalRetained || proofErr != nil {
+		t.Fatalf("cancel lost revoke authority before Confirm quiesced: journal=%#v proof=%v load=%v", afterCancel.PendingRevocations, proofErr, loadErr)
+	}
+	if transport.Trusted() || transport.RevokeCalls() < 2 || transport.LastRevokeGeneration() != generation {
+		t.Fatalf("late Windows trust survived exact-generation retry: trusted=%t revokes=%d generation=%q want=%q",
+			transport.Trusted(), transport.RevokeCalls(), transport.LastRevokeGeneration(), generation)
+	}
+	if retryErr != nil || len(afterRetry.PendingRevocations) != 0 {
+		t.Fatalf("retry cleanup journal = %#v error=%v", afterRetry.PendingRevocations, retryErr)
+	}
+}
+
 func TestMacPairingCancelCurrentPreservesFullyCommittedTrust(t *testing.T) {
 	root := t.TempDir()
 	store := config.Store{Path: filepath.Join(root, "config.json")}
@@ -3088,11 +3171,12 @@ func TestMacPairingCoordinatorPersistsCancelRetryAfterRemoteFailure(t *testing.T
 		t.Fatalf("durable retry journal = %#v error=%v", cfg.PendingRevocations, err)
 	}
 	transport.revokeErr = nil
+	transport.status = pairing.SessionCancelled
 	if err := coordinator.ReconcilePendingRevocations(context.Background()); err != nil {
 		t.Fatalf("durable cancel retry error = %v", err)
 	}
 	cfg, err = store.Load()
-	if err != nil || len(cfg.PendingRevocations) != 0 || transport.cancelCalls != 1 || transport.revokeCalls != 2 {
+	if err != nil || len(cfg.PendingRevocations) != 0 || transport.cancelCalls != 1 || transport.revokeCalls != 3 {
 		t.Fatalf("retry result journals=%#v cancel=%d revoke=%d error=%v", cfg.PendingRevocations, transport.cancelCalls, transport.revokeCalls, err)
 	}
 }
@@ -3783,6 +3867,19 @@ type cancelWinsConfirmPairingTransport struct {
 	cancelled      atomic.Bool
 }
 
+type delayedConfirmAfterNoopRevokeTransport struct {
+	*runtimePairingTransport
+	confirmStarted   chan struct{}
+	releaseConfirm   chan struct{}
+	confirmDone      chan struct{}
+	startOnce        sync.Once
+	doneOnce         sync.Once
+	mu               sync.Mutex
+	trusted          bool
+	revokeCalls      int
+	revokeGeneration string
+}
+
 type offlineCancellationPairingTransport struct {
 	*runtimePairingTransport
 }
@@ -3867,6 +3964,75 @@ func (t *cancelWinsConfirmPairingTransport) Cancel(
 ) error {
 	t.cancelled.Store(true)
 	return t.runtimePairingTransport.Cancel(ctx, target, descriptor)
+}
+
+func (t *delayedConfirmAfterNoopRevokeTransport) Confirm(
+	ctx context.Context,
+	target pairingTarget,
+	descriptor pairing.SessionDescriptor,
+	clientDeviceID, generation, authorizedKey, code string,
+	revocationProof []byte,
+) (pairing.DeviceRecord, error) {
+	t.startOnce.Do(func() { close(t.confirmStarted) })
+	<-t.releaseConfirm
+	record, err := t.runtimePairingTransport.Confirm(
+		ctx, target, descriptor, clientDeviceID, generation, authorizedKey, code, revocationProof,
+	)
+	if err == nil {
+		t.mu.Lock()
+		t.trusted = true
+		t.mu.Unlock()
+	}
+	t.doneOnce.Do(func() { close(t.confirmDone) })
+	return record, err
+}
+
+func (t *delayedConfirmAfterNoopRevokeTransport) Cancel(ctx context.Context, _ pairingTarget, _ pairing.SessionDescriptor) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (t *delayedConfirmAfterNoopRevokeTransport) Status(ctx context.Context, _ pairingTarget, descriptor pairing.SessionDescriptor) (pairing.SessionStatus, error) {
+	select {
+	case <-t.confirmStarted:
+		select {
+		case <-t.confirmDone:
+			return pairing.SessionStatus{SessionID: descriptor.ID, State: pairing.SessionCompleted, ExpiresAt: descriptor.ExpiresAt}, nil
+		case <-ctx.Done():
+			return pairing.SessionStatus{}, ctx.Err()
+		}
+	default:
+		return pairing.SessionStatus{SessionID: descriptor.ID, State: pairing.SessionApproved, ExpiresAt: descriptor.ExpiresAt}, nil
+	}
+}
+
+func (t *delayedConfirmAfterNoopRevokeTransport) Revoke(_ context.Context, _ config.Device, _, generation string, _ []byte) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.revokeCalls++
+	t.revokeGeneration = generation
+	if t.trusted {
+		t.trusted = false
+	}
+	return nil
+}
+
+func (t *delayedConfirmAfterNoopRevokeTransport) Trusted() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.trusted
+}
+
+func (t *delayedConfirmAfterNoopRevokeTransport) RevokeCalls() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.revokeCalls
+}
+
+func (t *delayedConfirmAfterNoopRevokeTransport) LastRevokeGeneration() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.revokeGeneration
 }
 
 func (t *blockingBootstrapPairingTransport) Bootstrap(ctx context.Context, selector string, key ed25519.PublicKey) (pairingTarget, pairing.SessionDescriptor, error) {
