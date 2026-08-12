@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Dmitbd/remote-docker/internal/desktopui"
 )
@@ -39,6 +40,12 @@ func TestUIBridgeExportsOnlyApprovedMethods(t *testing.T) {
 	want := []string{"Perform", "PickWorkspace", "Quit", "Snapshot"}
 	if !reflect.DeepEqual(methods, want) {
 		t.Fatalf("exported bridge methods = %v, want %v", methods, want)
+	}
+}
+
+func TestOperationTimeoutKeepsConnectionStopBoundedToNinetySeconds(t *testing.T) {
+	if timeout := operationTimeout(desktopui.OperationStopConnection); timeout != 90*time.Second {
+		t.Fatalf("operationTimeout(stop-connection) = %s, want 90s", timeout)
 	}
 }
 

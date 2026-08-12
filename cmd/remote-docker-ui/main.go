@@ -158,7 +158,7 @@ func operationTimeout(id string) time.Duration {
 	switch id {
 	case desktopui.OperationConnect, desktopui.OperationConnectTrusted, desktopui.OperationManualAddress:
 		return 90 * time.Second
-	case desktopui.OperationApprovePair, desktopui.OperationRejectPair, desktopui.OperationCancelPair:
+	case desktopui.OperationApprovePair, desktopui.OperationRejectPair, desktopui.OperationCancelPair, desktopui.OperationStopConnection:
 		return 90 * time.Second
 	case desktopui.OperationAddProject:
 		return 2 * time.Minute

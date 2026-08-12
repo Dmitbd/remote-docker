@@ -206,6 +206,9 @@ func buildConnection(status localapi.StatusResult, now time.Time) (Connection, [
 			connection.PeerName = status.Pairing.Peer.Name
 			connection.PairCode = formatPairCode(status.Pairing.Code)
 		}
+		if status.Role == "windows_host" {
+			operations = append(operations, operation(OperationApprovePair, true))
+		}
 		operations = append(operations, operation(OperationCancelPair, true))
 	case "pairing_cancellation_pending":
 		connection.Status = "Отмена нового подключения"

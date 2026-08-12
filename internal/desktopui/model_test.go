@@ -97,17 +97,18 @@ func TestBuildStateCarriesDisplayedPairingSessionID(t *testing.T) {
 
 func TestBuildStateShowsConnectionCancellationForBothRoles(t *testing.T) {
 	for _, test := range []struct {
-		name       string
-		role       string
-		lifecycle  string
-		operation  string
-		label      string
-		noPairVote bool
+		name      string
+		role      string
+		lifecycle string
+		operation string
+		label     string
+		approve   bool
+		pairing   bool
 	}{
-		{"mac pairing", "mac_client", "pairing", OperationCancelPair, "Отменить подключение", true},
-		{"windows pairing", "windows_host", "pairing", OperationCancelPair, "Отменить подключение", true},
-		{"mac connecting", "mac_client", "connecting", OperationStopConnection, "Остановить подключение", false},
-		{"windows connecting", "windows_host", "connecting", OperationStopConnection, "Остановить подключение", false},
+		{"mac pairing", "mac_client", "pairing", OperationCancelPair, "Отменить подключение", false, true},
+		{"windows pairing", "windows_host", "pairing", OperationCancelPair, "Отменить подключение", true, true},
+		{"mac connecting", "mac_client", "connecting", OperationStopConnection, "Остановить подключение", false, false},
+		{"windows connecting", "windows_host", "connecting", OperationStopConnection, "Остановить подключение", false, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			state := BuildState(SnapshotInput{Status: localapi.StatusResult{
@@ -119,8 +120,11 @@ func TestBuildStateShowsConnectionCancellationForBothRoles(t *testing.T) {
 			if !operation.Enabled || operation.Label != test.label {
 				t.Fatalf("connection operation = %#v", operation)
 			}
-			if test.noPairVote && (hasOperation(state.Operations, OperationApprovePair) || hasOperation(state.Operations, OperationRejectPair)) {
-				t.Fatalf("pairing operations expose a technical vote: %#v", state.Operations)
+			if test.pairing && hasOperation(state.Operations, OperationRejectPair) {
+				t.Fatalf("pairing operations expose a technical reject: %#v", state.Operations)
+			}
+			if test.approve != hasOperation(state.Operations, OperationApprovePair) {
+				t.Fatalf("pairing approval = %t, want %t in %#v", hasOperation(state.Operations, OperationApprovePair), test.approve, state.Operations)
 			}
 			if test.lifecycle == "connecting" && hasOperation(state.Operations, OperationDisconnect) {
 				t.Fatalf("connecting operations reuse disconnect: %#v", state.Operations)
