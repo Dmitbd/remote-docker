@@ -62,9 +62,9 @@ Backlog содержит только незавершённую работу. �
 - **Приоритет:** P1
 - **Доказательство:** Требует устройства
 - **Влияние:** Bind mounts могут получить устаревший source, а опубликованный сервис — быть недоступным с Mac.
-- **Известно:** В коде есть Syncthing readiness и SSH port supervisor; полного физического результата для release artifact нет.
-- **Критерий завершения:** Изменения Mac source достигают WSL до Docker execution; conflict/error виден; поддерживаемый TCP port доступен на том же свободном Mac localhost port; чужой local listener не завершается.
-- **Проверка:** Малые и крупные файлы, rename/delete, rapid edits, Compose bind mount, port conflict и removal container publication.
+- **Известно:** В коде есть Syncthing readiness и SSH port supervisor; полного физического результата для release artifact нет. В активной ветке добавлено безопасное восстановление несовместимой локальной Syncthing identity для непривязанного Mac; автоматические проверки не доказывают работу с реальным Keychain и двумя ОС.
+- **Критерий завершения:** Изменения Mac source достигают WSL до Docker execution; conflict/error виден; поддерживаемый TCP port доступен на том же свободном Mac localhost port; чужой local listener не завершается. Кандидат поверх воспроизведённой повреждённой identity восстанавливается без потери workspaces и завершает pairing/sync.
+- **Проверка:** Малые и крупные файлы, rename/delete, rapid edits, Compose bind mount, port conflict и removal container publication; отдельно — update Mac-кандидата поверх повреждённой identity, повторное pairing и базовая Docker-команда.
 - **Связано:** [workspace flow](ARCHITECTURE.md#поток-синхронизации-workspace), [TCP flow](ARCHITECTURE.md#поток-опубликованного-tcp-порта).
 
 ### RD-B004: Проверить чистую установку, update, reboot и uninstall Windows

@@ -29,6 +29,14 @@
 
 Конкретный PR запускает только относящиеся к изменению packages и contracts согласно `AGENTS.md`.
 
+### В активной ветке: восстановление Mac Syncthing identity
+
+- `internal/syncer` классифицирует валидную identity, неверный key, повреждённый blob и некорректный key без вывода secret details.
+- `internal/app` проверяет автоматический reset только для непривязанного Mac, сохранение workspaces, порядок config-before-credentials, идемпотентность после частичной очистки и fail-closed поведение при trusted/pending state или ошибке credential store.
+- `AgentRuntime` не публикует running и не запускает session children до завершения preflight.
+- `Supervisor` и `DesktopController` публикуют `local_sync_identity_corrupt` без внутренней причины, если безопасная автоматическая ротация запрещена.
+- Сфокусированный race-набор `internal/lifecycle`, `internal/syncer`, `internal/app` пройден локально. Это не является физической проверкой macOS Keychain, Windows Syncthing или pairing.
+
 ### Интеграционная проверка 2026-08-11
 
 - Focused race tests пройдены для pairing/runtime/config/Docker ownership/file lock/lifecycle/local API/desktop UI и затронутых commands.
@@ -70,6 +78,8 @@
 | Docker basic operations | Engine на Windows, команды с Mac успешны | Не проверено |
 | Compose project | Build, binds, volumes, networks и exec работают | Не проверено |
 | Workspace changes | WSL copy становится ready до Docker command | Не проверено |
+| Recovery повреждённой Mac Syncthing identity | Unpaired Mac сохраняет workspaces, создаёт новую identity и завершает pairing/sync | Не проверено |
+| Повреждённая identity при сохранённом device state | Ничего не ротируется; UI показывает безопасное действие | Не проверено |
 | Published TCP port | Тот же Mac localhost port доступен | Не проверено |
 | Foreign local port conflict | Понятная ошибка; чужой process остаётся | Не проверено |
 | Pause | Runtime останавливается, приложение остаётся открытым | Не проверено |

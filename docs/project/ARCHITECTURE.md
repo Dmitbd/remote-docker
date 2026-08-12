@@ -149,6 +149,14 @@ Endpoint overrides, которые обходят managed identity, запрещ
 - Preflight ждёт готовность обеих сторон перед Docker-командой с bind mount.
 - Named volumes и Docker data не являются workspace и не синхронизируются.
 
+### В активной ветке
+
+Перед запуском session-owned процессов Mac проверяет согласованность зашифрованной локальной Syncthing identity и owner-scoped ключа из credential store. Низкоуровневый sync-компонент только классифицирует непригодную пару и не меняет config или credentials.
+
+Если Mac ещё не хранит trusted/active device и pending cleanup, application coordinator атомарно очищает только public identity fields, а затем удаляет только принадлежащие приложению Syncthing credentials. Пустые public identity fields являются durable crash boundary: следующий bootstrap создаёт новую согласованную identity, сохраняя workspaces и исходные файлы. Повторный запуск после частичной очистки идемпотентен.
+
+При наличии device state автоматическая ротация запрещена. Runtime не запускает дочерние процессы и публикует `local_sync_identity_corrupt` без private key, Keychain data и внутренних путей. Согласованная замена identity на обеих машинах остаётся отдельным recovery-сценарием.
+
 ## Поток опубликованного TCP-порта
 
 ### Текущее

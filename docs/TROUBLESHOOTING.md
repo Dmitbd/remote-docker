@@ -91,6 +91,16 @@ Check the Workspaces screen or run `remote-docker sync status`. Confirm that:
 
 Do not place databases, named-volume contents, image layers, or build cache inside a synchronized workspace.
 
+## The Mac reports that its local synchronization identity is damaged
+
+Remote Docker validates its encrypted local Syncthing identity before starting connection-owned processes.
+
+If this Mac has no saved or pending device state, the application clears only its unusable local identity and owner-scoped Syncthing credentials. Registered workspaces and source files remain unchanged. Start the Mac client and search again; the next safe bootstrap creates a new identity automatically.
+
+If a trusted device or pending cleanup still exists, automatic rotation is intentionally blocked because changing the device identity on only one computer would break synchronization trust. The application shows `local_sync_identity_corrupt` and does not start partial background work. Do not delete Keychain entries, config files, Windows trust, or WSL data manually; first use the normal device recovery or removal flow on both computers.
+
+Permission, timeout, and credential-store access errors are not treated as identity corruption and do not trigger deletion.
+
 ## A published port is unavailable
 
 Remote Docker mirrors supported TCP ports to the same `localhost` port on the Mac. Stop the local process using that port or change the Docker publication. Remote Docker reports conflicts and does not terminate unrelated processes.
