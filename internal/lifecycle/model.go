@@ -75,10 +75,11 @@ const (
 type StopReason string
 
 const (
-	StopPause      StopReason = "pause"
-	StopDisconnect StopReason = "disconnect"
-	StopQuit       StopReason = "quit"
-	StopFailure    StopReason = "failure"
+	StopPause            StopReason = "pause"
+	StopDisconnect       StopReason = "disconnect"
+	StopCancelConnection StopReason = "cancel_connection"
+	StopQuit             StopReason = "quit"
+	StopFailure          StopReason = "failure"
 )
 
 type Peer struct {

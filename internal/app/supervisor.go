@@ -209,6 +209,24 @@ func (s *Supervisor) Disconnect(ctx context.Context, disconnect lifecycle.Discon
 	return s.stop(ctx, lifecycle.StopDisconnect)
 }
 
+func (s *Supervisor) CancelConnection(ctx context.Context) error {
+	if s == nil {
+		return errors.New("desktop supervisor is unavailable")
+	}
+	s.mu.Lock()
+	if s.stopping || s.machine.Snapshot().State == lifecycle.StateStopping {
+		s.mu.Unlock()
+		return nil
+	}
+	if _, err := s.machine.Apply(lifecycle.Event{Type: lifecycle.EventConnectionCancelRequested}); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	s.stopping = true
+	s.mu.Unlock()
+	return s.stop(ctx, lifecycle.StopCancelConnection)
+}
+
 func (s *Supervisor) Shutdown(ctx context.Context) error {
 	if s == nil {
 		return errors.New("desktop supervisor is unavailable")

@@ -191,6 +191,67 @@ func TestSupervisorShutdownIsTerminalAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestSupervisorCancelConnectionStopsOwnedRuntimeOnce(t *testing.T) {
+	trusted := lifecycle.Peer{ID: "windows", Name: "Windows"}
+	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "Mac", lifecycle.WithTrustedPeer(trusted))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	runtime := newRecordingSessionRuntime()
+	stopStarted := make(chan struct{})
+	releaseStop := make(chan struct{})
+	runtime.onStop = func() {
+		if got := machine.Snapshot().State; got != lifecycle.StateStopping {
+			t.Errorf("state during runtime Stop() = %q, want %q", got, lifecycle.StateStopping)
+		}
+		close(stopStarted)
+		<-releaseStop
+	}
+	supervisor, err := NewSupervisor(machine, runtime)
+	if err != nil {
+		t.Fatalf("NewSupervisor() error = %v", err)
+	}
+	if err := supervisor.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventConnectionStarted}); err != nil {
+		t.Fatalf("Apply(EventConnectionStarted) error = %v", err)
+	}
+
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- supervisor.CancelConnection(context.Background()) }()
+	select {
+	case <-stopStarted:
+	case <-time.After(time.Second):
+		t.Fatal("runtime Stop() did not start")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- supervisor.CancelConnection(context.Background()) }()
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatalf("second CancelConnection() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		close(releaseStop)
+		t.Fatal("second CancelConnection() blocked while stop was already active")
+	}
+	if calls, reason := runtime.stopSnapshot(); calls != 1 || reason != lifecycle.StopCancelConnection {
+		close(releaseStop)
+		t.Fatalf("runtime stop calls=%d reason=%q", calls, reason)
+	}
+
+	close(releaseStop)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first CancelConnection() error = %v", err)
+	}
+	if got := supervisor.Snapshot(); got.State != lifecycle.StateClientReady || got.ActionInProgress ||
+		got.TrustedPeers != 1 || got.Peer == nil || got.Peer.ID != trusted.ID {
+		t.Fatalf("stopped connection snapshot = %#v", got)
+	}
+}
+
 func newLifecycleMachine(t *testing.T, role lifecycle.Role) *lifecycle.Machine {
 	t.Helper()
 	machine, err := lifecycle.NewMachine(role, "Device")
@@ -256,3 +317,9 @@ func (r *recordingSessionRuntime) Stop(ctx context.Context, reason lifecycle.Sto
 func (r *recordingSessionRuntime) Done() <-chan error { return r.done }
 
 func (r *recordingSessionRuntime) fail(err error) { r.done <- err }
+
+func (r *recordingSessionRuntime) stopSnapshot() (int, lifecycle.StopReason) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.stopCalls, r.reason
+}

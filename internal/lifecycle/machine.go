@@ -13,17 +13,18 @@ const recoveryWindow = 60 * time.Second
 type Command string
 
 const (
-	CommandEnable      Command = "enable"
-	CommandStartSearch Command = "start_search"
-	CommandStopSearch  Command = "stop_search"
-	CommandConnect     Command = "connect"
-	CommandApprove     Command = "approve"
-	CommandReject      Command = "reject"
-	CommandCancel      Command = "cancel"
-	CommandDisconnect  Command = "disconnect"
-	CommandPause       Command = "pause"
-	CommandForget      Command = "forget"
-	CommandQuit        Command = "quit"
+	CommandEnable           Command = "enable"
+	CommandStartSearch      Command = "start_search"
+	CommandStopSearch       Command = "stop_search"
+	CommandConnect          Command = "connect"
+	CommandApprove          Command = "approve"
+	CommandReject           Command = "reject"
+	CommandCancel           Command = "cancel"
+	CommandCancelConnection Command = "cancel_connection"
+	CommandDisconnect       Command = "disconnect"
+	CommandPause            Command = "pause"
+	CommandForget           Command = "forget"
+	CommandQuit             Command = "quit"
 )
 
 type EventType string
@@ -45,6 +46,7 @@ const (
 	EventConnectionStartAbortRequested EventType = "connection_start_abort_requested"
 	EventConnected                     EventType = "connected"
 	EventHeartbeat                     EventType = "heartbeat"
+	EventConnectionCancelRequested     EventType = "connection_cancel_requested"
 	EventDisconnectRequested           EventType = "disconnect_requested"
 	EventNetworkLost                   EventType = "network_lost"
 	EventNetworkRestored               EventType = "network_restored"
@@ -55,6 +57,7 @@ const (
 	EventTrustForgetStarted            EventType = "trust_forget_started"
 	EventTrustForgotten                EventType = "trust_forgotten"
 	EventTrustForgetCancelled          EventType = "trust_forget_cancelled"
+	EventTrustRevoked                  EventType = "trust_revoked"
 	EventProblemDetected               EventType = "problem_detected"
 	EventProblemCleared                EventType = "problem_cleared"
 )
@@ -65,6 +68,7 @@ type Event struct {
 	Peer       *Peer
 	Disconnect *Disconnect
 	Problem    *Problem
+	SessionID  string
 	Latency    time.Duration
 }
 
@@ -117,6 +121,7 @@ type Machine struct {
 	connectionStartFrom     State
 	problemFrom             State
 	pairingCancellationFrom State
+	trustedPairingSessionID string
 	subscribers             map[uint64]chan Snapshot
 	nextID                  uint64
 }
@@ -158,7 +163,7 @@ func (m *Machine) Allowed(command Command) bool {
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if m.forgetting || m.connectionStarting {
+	if m.forgetting || m.connectionStarting && command != CommandCancelConnection {
 		return false
 	}
 	return allowed(m.snapshot, command)
@@ -187,6 +192,8 @@ func allowed(snapshot Snapshot, command Command) bool {
 			snapshot.Pairing != nil && snapshot.Pairing.Status == PairingPending
 	case CommandCancel:
 		return snapshot.Role == RoleMacClient && snapshot.State == StatePairing
+	case CommandCancelConnection:
+		return snapshot.State == StatePairing || snapshot.State == StateConnecting
 	case CommandDisconnect:
 		return snapshot.State == StateConnected || snapshot.State == StateReconnecting
 	case CommandPause:
@@ -259,7 +266,7 @@ func (m *Machine) applyLocked(event Event) error {
 	}
 	if m.connectionStarting {
 		switch event.Type {
-		case EventConnectionStartCommitted, EventConnectionStartAbortRequested, EventConnected,
+		case EventConnectionStartCommitted, EventConnectionStartAbortRequested, EventConnectionCancelRequested, EventConnected,
 			EventHeartbeat, EventNetworkLost, EventNetworkRestored, EventStopCompleted:
 		default:
 			return m.transitionError(event, "trusted connection startup is in progress")
@@ -358,6 +365,7 @@ func (m *Machine) applyLocked(event Event) error {
 		if snapshot.State != StateConnecting || snapshot.Pairing == nil || snapshot.Pairing.Status != PairingApproved || event.Peer == nil || event.Peer.ID == "" {
 			return m.transitionError(event, "approved pairing metadata is unavailable")
 		}
+		m.trustedPairingSessionID = snapshot.Pairing.SessionID
 		peer := *event.Peer
 		snapshot.Peer = &peer
 		snapshot.TrustedPeers = 1
@@ -427,6 +435,11 @@ func (m *Machine) applyLocked(event Event) error {
 			return m.transitionError(event, "connection is not active")
 		}
 		snapshot.Latency = event.Latency
+	case EventConnectionCancelRequested:
+		if snapshot.State != StatePairing && snapshot.State != StateConnecting {
+			return m.transitionError(event, "connection attempt is not active")
+		}
+		m.beginStop(nil, m.idleState())
 	case EventDisconnectRequested:
 		if snapshot.State != StateConnected && snapshot.State != StateReconnecting {
 			return m.transitionError(event, "connection is not active")
@@ -493,6 +506,7 @@ func (m *Machine) applyLocked(event Event) error {
 		snapshot.LastDisconnect = nil
 		snapshot.ActionInProgress = false
 		m.forgetting = false
+		m.trustedPairingSessionID = ""
 		if snapshot.Problem != nil {
 			m.enterNeedsAction()
 		}
@@ -505,6 +519,28 @@ func (m *Machine) applyLocked(event Event) error {
 		if snapshot.Problem != nil {
 			m.enterNeedsAction()
 		}
+	case EventTrustRevoked:
+		peerID := ""
+		if event.Peer != nil {
+			peerID = strings.TrimSpace(event.Peer.ID)
+		}
+		validState := snapshot.State == StateConnecting || snapshot.State == StateHostWaiting
+		if snapshot.Role != RoleWindowsHost || !validState || snapshot.Peer == nil ||
+			peerID == "" || peerID != snapshot.Peer.ID || strings.TrimSpace(event.SessionID) == "" ||
+			event.SessionID != m.trustedPairingSessionID {
+			return m.transitionError(event, "revoked trust does not own the current peer and pairing session")
+		}
+		snapshot.State = StateHostWaiting
+		snapshot.Peer = nil
+		snapshot.TrustedPeers = 0
+		snapshot.Pairing = nil
+		snapshot.ActionInProgress = false
+		snapshot.Recovery = nil
+		snapshot.Latency = 0
+		snapshot.Docker = DockerStatus{State: ServiceStopped}
+		snapshot.Sync = SyncStatus{State: ServiceStopped}
+		snapshot.LastDisconnect = nil
+		m.trustedPairingSessionID = ""
 	case EventProblemDetected:
 		if event.Problem == nil || event.Problem.Code == "" {
 			return m.transitionError(event, "problem metadata is incomplete")

@@ -385,6 +385,114 @@ func TestTrustedPeerCanReconnectWithoutRepeatingPairing(t *testing.T) {
 	}
 }
 
+func TestCancelConnectionStopsPairingBeforeClearingComparisonCode(t *testing.T) {
+	tests := []struct {
+		name string
+		role Role
+		want State
+	}{
+		{name: "Mac", role: RoleMacClient, want: StateClientReady},
+		{name: "Windows", role: RoleWindowsHost, want: StateHostWaiting},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			machine := mustMachine(t, tt.role)
+			mustApply(t, machine, Event{Type: EventEnabled})
+			if tt.role == RoleMacClient {
+				mustApply(t, machine, Event{Type: EventSearchStarted})
+			}
+			pairing := Pairing{
+				SessionID: "session-1", Peer: Peer{ID: "peer-1", Name: "Peer"}, Code: "123456",
+			}
+			mustApply(t, machine, Event{Type: EventPairingStarted, Pairing: &pairing})
+			if !machine.Allowed(CommandCancelConnection) {
+				t.Fatal("CancelConnection must be allowed while pairing")
+			}
+
+			stopping := mustApply(t, machine, Event{Type: EventConnectionCancelRequested})
+			if stopping.State != StateStopping || !stopping.ActionInProgress || stopping.Pairing == nil ||
+				stopping.Pairing.SessionID != pairing.SessionID || stopping.Pairing.Code != pairing.Code {
+				t.Fatalf("stopping pairing snapshot = %#v", stopping)
+			}
+			if machine.Allowed(CommandCancelConnection) {
+				t.Fatal("CancelConnection remained allowed while stopping")
+			}
+
+			idle := mustApply(t, machine, Event{Type: EventStopCompleted})
+			if idle.State != tt.want || idle.ActionInProgress || idle.Pairing != nil {
+				t.Fatalf("cancelled pairing snapshot = %#v, want idle %q without pairing", idle, tt.want)
+			}
+		})
+	}
+}
+
+func TestCancelConnectionStopsConnectingWithoutDiscardingCommittedTrust(t *testing.T) {
+	tests := []struct {
+		name string
+		role Role
+		want State
+	}{
+		{name: "Mac", role: RoleMacClient, want: StateClientReady},
+		{name: "Windows", role: RoleWindowsHost, want: StateHostWaiting},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			trusted := Peer{ID: "trusted-peer", Name: "Trusted Peer"}
+			machine, err := NewMachine(tt.role, tt.name, WithTrustedPeer(trusted))
+			if err != nil {
+				t.Fatalf("NewMachine() error = %v", err)
+			}
+			mustApply(t, machine, Event{Type: EventEnabled})
+			connecting := mustApply(t, machine, Event{Type: EventConnectionStarted})
+			if connecting.Pairing != nil || !machine.Allowed(CommandCancelConnection) {
+				t.Fatalf("trusted connecting snapshot = %#v", connecting)
+			}
+
+			mustApply(t, machine, Event{Type: EventConnectionCancelRequested})
+			idle := mustApply(t, machine, Event{Type: EventStopCompleted})
+			if idle.State != tt.want || idle.Pairing != nil || idle.TrustedPeers != 1 || idle.Peer == nil || idle.Peer.ID != trusted.ID {
+				t.Fatalf("stopped trusted connection = %#v", idle)
+			}
+		})
+	}
+}
+
+func TestTrustRevokedRequiresExactWindowsPeerAndPairingSession(t *testing.T) {
+	machine := mustMachine(t, RoleWindowsHost)
+	mustApply(t, machine, Event{Type: EventEnabled})
+	pairing := Pairing{
+		SessionID: "session-current", Peer: Peer{ID: "mac-current", Name: "Mac"}, Code: "123456",
+	}
+	mustApply(t, machine, Event{Type: EventPairingStarted, Pairing: &pairing})
+	mustApply(t, machine, Event{Type: EventPairingApproved})
+	connecting := mustApply(t, machine, Event{Type: EventPairingCompleted, Peer: &pairing.Peer})
+	if connecting.State != StateConnecting || connecting.TrustedPeers != 1 || connecting.Peer == nil {
+		t.Fatalf("pre-revoke snapshot = %#v", connecting)
+	}
+
+	for _, event := range []Event{
+		{Type: EventTrustRevoked, Peer: &Peer{ID: pairing.Peer.ID}, SessionID: "session-old"},
+		{Type: EventTrustRevoked, Peer: &Peer{ID: "mac-old"}, SessionID: pairing.SessionID},
+	} {
+		before := machine.Snapshot()
+		if _, err := machine.Apply(event); !errors.As(err, new(*TransitionError)) {
+			t.Fatalf("Apply(%#v) error = %v, want TransitionError", event, err)
+		}
+		if after := machine.Snapshot(); after.Revision != before.Revision || after.TrustedPeers != 1 || after.Peer == nil {
+			t.Fatalf("mismatched revoke changed trust: before=%#v after=%#v", before, after)
+		}
+	}
+
+	revoked := mustApply(t, machine, Event{
+		Type: EventTrustRevoked, Peer: &Peer{ID: pairing.Peer.ID}, SessionID: pairing.SessionID,
+	})
+	if revoked.State != StateHostWaiting || revoked.TrustedPeers != 0 || revoked.Peer != nil || revoked.Pairing != nil {
+		t.Fatalf("revoked snapshot = %#v", revoked)
+	}
+}
+
 func TestNetworkRecoveryUsesSixtySecondDeadline(t *testing.T) {
 	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
 	machine, err := NewMachine(RoleWindowsHost, "Render PC", WithClock(fixedClock(now)))
