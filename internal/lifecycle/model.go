@@ -6,6 +6,7 @@ import "time"
 
 const (
 	ProblemTransportUpgradeRequired = "transport_upgrade_required"
+	ProblemLocalSyncIdentityCorrupt = "local_sync_identity_corrupt"
 	TransportUpgradeMessage         = "Сохранённое подключение использует старый транспорт. Забудьте устройство на Mac и Windows, затем выполните сопряжение ещё раз."
 	TransportUpgradeAction          = "Забудьте старое доверие на обоих устройствах и один раз выполните безопасное сопряжение."
 )

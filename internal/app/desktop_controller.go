@@ -332,7 +332,9 @@ func (c *DesktopController) startTrustedConnection(ctx context.Context, foregrou
 		return nil, cause
 	}
 	if err := c.supervisor.Start(ctx); err != nil {
-		return abort(unavailable("Remote Docker could not be enabled"))
+		result, abortErr := abort(unavailable("Remote Docker could not be enabled"))
+		c.supervisor.publishTypedRuntimeStartProblem(err)
+		return result, abortErr
 	}
 	var result any
 	if foreground != nil {

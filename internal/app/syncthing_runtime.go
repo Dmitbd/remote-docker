@@ -12,6 +12,7 @@ import (
 
 	"github.com/Dmitbd/remote-docker/internal/config"
 	"github.com/Dmitbd/remote-docker/internal/credentials"
+	"github.com/Dmitbd/remote-docker/internal/lifecycle"
 	"github.com/Dmitbd/remote-docker/internal/syncer"
 )
 
@@ -65,6 +66,15 @@ func (e *localSyncIdentityBlockedError) Unwrap() error {
 		return nil
 	}
 	return e.cause
+}
+
+func (e *localSyncIdentityBlockedError) LifecycleProblem() lifecycle.Problem {
+	return lifecycle.Problem{
+		Code:    lifecycle.ProblemLocalSyncIdentityCorrupt,
+		Device:  lifecycle.InitiatorLocal,
+		Message: "Локальная настройка синхронизации повреждена и не может быть заменена, пока сохранено устройство.",
+		Action:  "Откройте диагностику и безопасно переподключите устройство.",
+	}
 }
 
 func newLocalSyncthingRuntime(options localSyncthingOptions) *localSyncthingRuntime {

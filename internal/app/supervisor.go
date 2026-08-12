@@ -107,7 +107,7 @@ func (s *Supervisor) Start(ctx context.Context) error {
 			cancel()
 		}
 		if !reservedStart {
-			s.publishRuntimeProblem("runtime_start_failed")
+			s.publishRuntimeStartProblem(err)
 		}
 		return err
 	}
@@ -125,6 +125,27 @@ func (s *Supervisor) Start(ctx context.Context) error {
 	s.mu.Unlock()
 	go s.observeRuntime(s.runtime.Done())
 	return nil
+}
+
+type lifecycleProblemProvider interface {
+	LifecycleProblem() lifecycle.Problem
+}
+
+func (s *Supervisor) publishRuntimeStartProblem(err error) {
+	if s.publishTypedRuntimeStartProblem(err) {
+		return
+	}
+	s.publishRuntimeProblem("runtime_start_failed")
+}
+
+func (s *Supervisor) publishTypedRuntimeStartProblem(err error) bool {
+	var provider lifecycleProblemProvider
+	if !errors.As(err, &provider) {
+		return false
+	}
+	problem := provider.LifecycleProblem()
+	_, applyErr := s.machine.Apply(lifecycle.Event{Type: lifecycle.EventProblemDetected, Problem: &problem})
+	return applyErr == nil
 }
 
 // AbortConnectionStart keeps the lifecycle non-forgettable until every owned

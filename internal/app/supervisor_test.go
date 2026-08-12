@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -141,6 +142,31 @@ func TestSupervisorPropagatesUnexpectedRuntimeFailure(t *testing.T) {
 	problem := supervisor.Snapshot().Problem
 	if problem == nil || problem.Code != "runtime_stopped" || problem.Message == "private child output must not be shown" {
 		t.Fatalf("runtime problem = %#v", problem)
+	}
+}
+
+func TestSupervisorPublishesTypedLocalSyncIdentityProblem(t *testing.T) {
+	machine := newLifecycleMachine(t, lifecycle.RoleMacClient)
+	runtime := newRecordingSessionRuntime()
+	runtime.startErr = &localSyncIdentityBlockedError{
+		cause: errors.New("keychain=/private/account token=secret"),
+	}
+	supervisor, err := NewSupervisor(machine, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.Start(context.Background()); err == nil {
+		t.Fatal("Start() succeeded for blocked identity recovery")
+	}
+	problem := supervisor.Snapshot().Problem
+	if problem == nil || problem.Code != "local_sync_identity_corrupt" {
+		t.Fatalf("problem = %#v, want local_sync_identity_corrupt", problem)
+	}
+	publicText := problem.Message + " " + problem.Action
+	for _, forbidden := range []string{"private", "secret", "keychain", "token"} {
+		if strings.Contains(strings.ToLower(publicText), forbidden) {
+			t.Fatalf("problem leaked %q: %#v", forbidden, problem)
+		}
 	}
 }
 

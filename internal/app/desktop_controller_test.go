@@ -86,6 +86,29 @@ func TestDesktopControllerSeparatesEnableSearchAndPause(t *testing.T) {
 	}
 }
 
+func TestDesktopControllerPublishesTypedIdentityProblemAfterTrustedStartAbort(t *testing.T) {
+	machine, err := lifecycle.NewMachine(
+		lifecycle.RoleMacClient,
+		"Mac",
+		lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "windows", Name: "Windows"}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := newRecordingSessionRuntime()
+	runtime.startErr = &localSyncIdentityBlockedError{cause: errors.New("private identity detail")}
+	supervisor, _ := NewSupervisor(machine, runtime)
+	controller, _ := NewDesktopController(supervisor, nil)
+
+	if _, err := controller.Handle(context.Background(), localapi.MethodEnable, nil); err == nil {
+		t.Fatal("Enable() succeeded for blocked trusted identity")
+	}
+	problem := supervisor.Snapshot().Problem
+	if problem == nil || problem.Code != "local_sync_identity_corrupt" || supervisor.Snapshot().State != lifecycle.StateNeedsAction {
+		t.Fatalf("trusted startup snapshot = %#v", supervisor.Snapshot())
+	}
+}
+
 func TestDesktopControllerRejectsDockerWhilePausedWithoutAutoStarting(t *testing.T) {
 	machine := newLifecycleMachine(t, lifecycle.RoleMacClient)
 	runtime := newRecordingSessionRuntime()
