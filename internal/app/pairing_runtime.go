@@ -39,6 +39,8 @@ const revocationProofCredential = "pairing-revocation-proof"
 
 const minimumRemoteCleanupLease = time.Minute
 
+const cancellationLeasePrefix = "cancel-"
+
 type pairingTarget struct {
 	InstanceID           string
 	Name                 string
@@ -102,11 +104,18 @@ type pendingCancellation struct {
 	descriptor pairing.SessionDescriptor
 }
 
+type completedPairing struct {
+	sessionID  string
+	generation string
+	deviceID   string
+}
+
 type macPairingCoordinator struct {
 	options       macPairingOptions
 	mu            sync.Mutex
 	artifactsMu   sync.Mutex
 	pending       *pendingPairing
+	completed     *completedPairing
 	cancellation  *pendingCancellation
 	starting      bool
 	cleanupCursor string
@@ -522,6 +531,7 @@ func (c *macPairingCoordinator) complete(ctx context.Context, sessionID string, 
 		clearPendingSecrets(c.pending)
 	}
 	c.pending = nil
+	c.completed = &completedPairing{sessionID: sessionID, generation: pending.cleanupID, deviceID: remoteDeviceID}
 	c.mu.Unlock()
 	return localapi.Device{ID: remoteDeviceID, Name: device.Name, Address: device.Address}, nil
 }
@@ -630,27 +640,200 @@ func (c *macPairingCoordinator) Reject(context.Context, string) (localapi.Pairin
 }
 
 func (c *macPairingCoordinator) Cancel(ctx context.Context, sessionID string) (localapi.PairingStatusResult, error) {
-	c.mu.Lock()
-	if c.pending == nil || c.pending.descriptor.ID != sessionID {
-		c.mu.Unlock()
+	return c.CancelCurrent(ctx, sessionID)
+}
+
+// CancelCurrent resolves cancellation against the exact durable pairing
+// generation. The artifacts mutex and shared state lock form the same
+// linearization boundary used by pairing completion and cleanup.
+func (c *macPairingCoordinator) CancelCurrent(ctx context.Context, sessionID string) (localapi.PairingStatusResult, error) {
+	if c == nil {
+		return localapi.PairingStatusResult{}, unavailable("pairing infrastructure is unavailable")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
 		return localapi.PairingStatusResult{}, needsAction("pairing session is not active")
 	}
-	if c.pending.completing {
-		c.mu.Unlock()
-		return localapi.PairingStatusResult{}, needsAction("pairing approval is being completed")
+	cancellationID, err := randomDeviceID()
+	if err != nil {
+		return localapi.PairingStatusResult{}, unavailable("cannot reserve pairing cancellation")
 	}
-	pending := *c.pending
-	pending.privateKeyPEM = append([]byte(nil), c.pending.privateKeyPEM...)
-	pending.tunnelIdentity = append([]byte(nil), c.pending.tunnelIdentity...)
-	pending.revocationProof = append([]byte(nil), c.pending.revocationProof...)
+	cancellationToken := cancellationLeasePrefix + cancellationID
+	c.artifactsMu.Lock()
+	c.mu.Lock()
+	var pending *pendingPairing
+	if c.pending != nil && c.pending.descriptor.ID == sessionID {
+		copy := *c.pending
+		copy.privateKeyPEM = append([]byte(nil), c.pending.privateKeyPEM...)
+		copy.tunnelIdentity = append([]byte(nil), c.pending.tunnelIdentity...)
+		copy.revocationProof = append([]byte(nil), c.pending.revocationProof...)
+		if c.pending.record != nil {
+			record := *c.pending.record
+			record.AuthorizedKeys = append([]string(nil), c.pending.record.AuthorizedKeys...)
+			record.TunnelPublicKey = append(ed25519.PublicKey(nil), c.pending.record.TunnelPublicKey...)
+			copy.record = &record
+		}
+		pending = &copy
+	}
+	var completed *completedPairing
+	if c.completed != nil && c.completed.sessionID == sessionID {
+		copy := *c.completed
+		completed = &copy
+	}
 	c.mu.Unlock()
-	cancelErr := c.options.Transport.Cancel(ctx, pending.target, pending.descriptor)
-	clearPendingSecrets(&pending)
-	if cancelErr != nil {
-		return localapi.PairingStatusResult{}, unavailable("cannot cancel the pairing request")
+
+	cleanupGeneration := ""
+	committedDeviceID := ""
+	var committedDevice config.Device
+	reservedCancellation := false
+	cleanupReady := false
+	err = c.options.ConfigTransactions.RunContext(ctx, func() error {
+		cfg, err := loadAgentConfig(c.options.Store)
+		if err != nil {
+			return unavailable("cannot resolve pairing cancellation")
+		}
+		generation := ""
+		if pending != nil {
+			generation = pending.cleanupID
+		} else if completed != nil {
+			generation = completed.generation
+		}
+		if generation == "" {
+			for id, journal := range cfg.PendingRevocations {
+				if journal.SessionID != sessionID {
+					continue
+				}
+				if generation != "" && generation != id {
+					return needsAction("pairing cancellation ownership is ambiguous")
+				}
+				generation = id
+			}
+		}
+		if generation == "" {
+			return needsAction("pairing session is not active")
+		}
+		if cfg.ActiveDevice != "" {
+			if device, exists := cfg.Devices[cfg.ActiveDevice]; exists && device.PairingGeneration == generation {
+				if completed == nil || completed.deviceID == "" || completed.deviceID == cfg.ActiveDevice {
+					committedDeviceID = cfg.ActiveDevice
+					committedDevice = device
+					return nil
+				}
+			}
+		}
+		journal, exists := cfg.PendingRevocations[generation]
+		if !exists {
+			return nil
+		}
+		if journal.Generation == "" {
+			journal.Generation = generation
+		}
+		if journal.Generation != generation || journal.SessionID != sessionID {
+			return needsAction("pairing cancellation ownership changed")
+		}
+		cleanupGeneration = generation
+		if journal.CleanupRequested {
+			cleanupReady = true
+			return nil
+		}
+		if strings.HasPrefix(journal.CompletionLeaseToken, cancellationLeasePrefix) {
+			expiresAt, parseErr := time.Parse(time.RFC3339Nano, journal.CompletionLeaseExpiresAt)
+			if parseErr == nil && c.options.Now().UTC().Before(expiresAt) {
+				return nil
+			}
+		}
+		journal.CompletionLeaseToken = cancellationToken
+		journal.CompletionLeaseExpiresAt = c.options.Now().UTC().Add(c.options.RemoteCleanupLease).Format(time.RFC3339Nano)
+		cfg.PendingRevocations[generation] = journal
+		if err := c.options.SaveConfig(cfg); err != nil {
+			return unavailable("cannot reserve pairing cancellation")
+		}
+		reservedCancellation = true
+		return nil
+	})
+	c.artifactsMu.Unlock()
+	if pending != nil {
+		defer clearPendingSecrets(pending)
 	}
-	c.clearPending(sessionID)
-	return pairingStatusResult(pending, pairing.SessionStatus{
+	if err != nil {
+		return localapi.PairingStatusResult{}, err
+	}
+	if committedDeviceID != "" {
+		return localapi.PairingStatusResult{
+			SessionID: sessionID, Status: string(pairing.SessionCompleted),
+			Device: &localapi.Device{ID: committedDeviceID, Name: committedDevice.Name, Address: committedDevice.Address},
+		}, nil
+	}
+	var cancelErr error
+	cancelAttempted := false
+	if reservedCancellation && pending != nil && c.options.Transport != nil {
+		cancelAttempted = true
+		cancelCtx, cancel := context.WithTimeout(ctx, pairingRollbackTimeout)
+		cancelErr = c.options.Transport.Cancel(cancelCtx, pending.target, pending.descriptor)
+		cancel()
+	}
+	if reservedCancellation {
+		c.artifactsMu.Lock()
+		finalizeCtx, cancelFinalize := context.WithTimeout(context.Background(), c.options.CleanupTaskTimeout)
+		err = c.options.ConfigTransactions.RunContext(finalizeCtx, func() error {
+			cfg, err := loadAgentConfig(c.options.Store)
+			if err != nil {
+				return unavailable("cannot finalize pairing cancellation")
+			}
+			journal, exists := cfg.PendingRevocations[cleanupGeneration]
+			if !exists {
+				return nil
+			}
+			if journal.Generation != cleanupGeneration || journal.SessionID != sessionID {
+				return needsAction("pairing cancellation ownership changed")
+			}
+			if journal.CleanupRequested {
+				return nil
+			}
+			if journal.CompletionLeaseToken != cancellationToken {
+				return needsAction("pairing cancellation ownership changed")
+			}
+			journal.CleanupRequested = true
+			journal.CompletionLeaseToken = ""
+			journal.CompletionLeaseExpiresAt = ""
+			if cancelAttempted && cancelErr == nil {
+				journal.RemoteRevoked = true
+			}
+			if journal.LocalDeviceID == "" && journal.DockerContext.Name == "" {
+				journal.DockerRestored = true
+				journal.LocalCleaned = true
+			}
+			cfg.PendingRevocations[cleanupGeneration] = journal
+			if err := c.options.SaveConfig(cfg); err != nil {
+				return unavailable("cannot finalize pairing cancellation")
+			}
+			return nil
+		})
+		cancelFinalize()
+		c.artifactsMu.Unlock()
+		if err != nil {
+			return localapi.PairingStatusResult{}, err
+		}
+		cleanupReady = true
+	}
+	c.mu.Lock()
+	if c.pending != nil && c.pending.descriptor.ID == sessionID && c.pending.cleanupID == cleanupGeneration {
+		clearPendingSecrets(c.pending)
+		c.pending = nil
+	}
+	c.mu.Unlock()
+	if cleanupGeneration != "" && cleanupReady {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), c.options.CleanupTaskTimeout)
+		_ = c.cleanupPendingRevocation(cleanupCtx, cleanupGeneration, false, dockercli.ContextChange{})
+		cancel()
+	}
+	if pending == nil {
+		return localapi.PairingStatusResult{SessionID: sessionID, Status: string(pairing.SessionCancelled)}, nil
+	}
+	return pairingStatusResult(*pending, pairing.SessionStatus{
 		SessionID: sessionID, State: pairing.SessionCancelled, ExpiresAt: pending.descriptor.ExpiresAt,
 	}), nil
 }

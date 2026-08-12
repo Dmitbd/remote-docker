@@ -90,6 +90,7 @@ type AgentRuntime struct {
 	pairingComplete func(context.Context, string) (localapi.PairingStatusResult, error)
 	pairingRollback func(context.Context, string) error
 	pairingCleanup  func(context.Context) error
+	pairingCancel   func(context.Context, string) (localapi.PairingStatusResult, error)
 	pairingAbandon  func(string)
 	pairingAfter    func()
 	pairingRuntime  *pairingLifecycleReconciler
@@ -351,6 +352,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 		pairingComplete: controller.completePairing,
 		pairingRollback: controller.rollbackCompletedPairing,
 		pairingCleanup:  controller.reconcilePendingRevocations,
+		pairingCancel:   controller.cancelCurrentPairing,
 		pairingAbandon:  controller.abandonPairing,
 		pairingAfter:    controller.notifyPairingCompleted,
 		windowsStopper: func() managedWindowsRuntimeStopper {
@@ -395,8 +397,8 @@ func (r *AgentRuntime) BindLifecycle(machine *lifecycle.Machine, appVersion stri
 		r.pairingRuntime = &pairingLifecycleReconciler{
 			machine: machine, handler: r.pairingHandler,
 			complete: r.pairingComplete, rollback: r.pairingRollback,
-			cleanup: r.pairingCleanup,
-			abandon: r.pairingAbandon, afterComplete: r.pairingAfter,
+			cleanup:       r.pairingCleanup,
+			cancelCurrent: r.pairingCancel, abandon: r.pairingAbandon, afterComplete: r.pairingAfter,
 		}
 	}
 	if snapshot.Role == lifecycle.RoleWindowsHost {
@@ -514,8 +516,9 @@ func (r *AgentRuntime) Stop(ctx context.Context, reason lifecycle.StopReason) er
 		presenceErr = connection.Stop(ctx, reason)
 	}
 	cancel()
+	var pairingErr error
 	if r.pairingRuntime != nil {
-		r.pairingRuntime.abandonCurrent()
+		pairingErr = r.pairingRuntime.cancelForStop(ctx)
 	}
 	select {
 	case <-ctx.Done():
@@ -533,7 +536,7 @@ func (r *AgentRuntime) Stop(ctx context.Context, reason lifecycle.StopReason) er
 		if r.windowsStopper != nil {
 			_, managedErr = r.windowsStopper.StopManagedRuntime(ctx)
 		}
-		return errors.Join(presenceErr, runtimeErr, managedErr)
+		return errors.Join(presenceErr, pairingErr, runtimeErr, managedErr)
 	}
 }
 
@@ -668,6 +671,7 @@ type pairingLifecycleReconciler struct {
 	complete      func(context.Context, string) (localapi.PairingStatusResult, error)
 	rollback      func(context.Context, string) error
 	cleanup       func(context.Context) error
+	cancelCurrent func(context.Context, string) (localapi.PairingStatusResult, error)
 	abandon       func(string)
 	afterComplete func()
 	now           func() time.Time
@@ -877,12 +881,22 @@ func (r *pairingLifecycleReconciler) completeApproved(ctx context.Context, snaps
 		Type: lifecycle.EventPairingCompleted, Peer: &peer,
 	})
 	if applyErr != nil || !applied {
-		return errors.Join(applyErr, r.rollbackCompleted(status.Device.ID))
+		return errors.Join(applyErr, r.resolveStaleCompletion(snapshot.Pairing.SessionID, status.Device.ID))
 	}
 	if r.afterComplete != nil {
 		r.afterComplete()
 	}
 	return nil
+}
+
+func (r *pairingLifecycleReconciler) resolveStaleCompletion(sessionID, deviceID string) error {
+	if r.cancelCurrent != nil {
+		cancelCtx, cancel := context.WithTimeout(context.Background(), pairingRollbackTimeout)
+		defer cancel()
+		_, err := r.cancelCurrent(cancelCtx, sessionID)
+		return err
+	}
+	return r.rollbackCompleted(deviceID)
 }
 
 func (r *pairingLifecycleReconciler) rollbackCompleted(deviceID string) error {
@@ -916,6 +930,24 @@ func (r *pairingLifecycleReconciler) abandonCurrent() {
 	if snapshot := r.machine.Snapshot(); snapshot.Pairing != nil {
 		r.abandon(snapshot.Pairing.SessionID)
 	}
+}
+
+func (r *pairingLifecycleReconciler) cancelForStop(ctx context.Context) error {
+	if r == nil || r.machine == nil {
+		return nil
+	}
+	snapshot := r.machine.Snapshot()
+	if snapshot.Pairing == nil {
+		return nil
+	}
+	if snapshot.Role == lifecycle.RoleMacClient && r.cancelCurrent != nil {
+		_, err := r.cancelCurrent(ctx, snapshot.Pairing.SessionID)
+		return err
+	}
+	if r.abandon != nil {
+		r.abandon(snapshot.Pairing.SessionID)
+	}
+	return nil
 }
 
 func (r *pairingLifecycleReconciler) currentTime() time.Time {
@@ -1101,6 +1133,18 @@ func (c *productionAgentController) completePairing(ctx context.Context, session
 		return localapi.PairingStatusResult{}, unavailable("pairing infrastructure is unavailable")
 	}
 	return c.pairing.Status(ctx, sessionID)
+}
+
+func (c *productionAgentController) cancelCurrentPairing(ctx context.Context, sessionID string) (localapi.PairingStatusResult, error) {
+	if c == nil || c.pairing == nil {
+		return localapi.PairingStatusResult{}, unavailable("pairing cancellation is unavailable")
+	}
+	if coordinator, ok := c.pairing.(interface {
+		CancelCurrent(context.Context, string) (localapi.PairingStatusResult, error)
+	}); ok {
+		return coordinator.CancelCurrent(ctx, sessionID)
+	}
+	return c.pairing.Cancel(ctx, sessionID)
 }
 
 func (c *productionAgentController) rollbackCompletedPairing(ctx context.Context, deviceID string) error {
