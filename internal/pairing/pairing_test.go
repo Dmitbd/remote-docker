@@ -551,6 +551,110 @@ func TestPairingSessionRejectCancelAndExpiryAreObservable(t *testing.T) {
 	})
 }
 
+func TestPairingServerCancelsExactPendingAndApprovedLocalSession(t *testing.T) {
+	for _, state := range []SessionState{SessionPending, SessionApproved} {
+		t.Run(string(state), func(t *testing.T) {
+			server, err := NewServer(newServerIdentity(t))
+			if err != nil {
+				t.Fatalf("NewServer() error = %v", err)
+			}
+			clientPublicKey, _, _ := ed25519.GenerateKey(nil)
+			descriptor, err := server.StartSession(clientPublicKey, MaxSessionTTL)
+			if err != nil {
+				t.Fatalf("StartSession() error = %v", err)
+			}
+			if state == SessionApproved {
+				if err := server.Approve(descriptor.ID); err != nil {
+					t.Fatalf("Approve() error = %v", err)
+				}
+			}
+
+			cancelled, err := server.CancelSession(descriptor.ID)
+			if err != nil {
+				t.Fatalf("CancelSession() error = %v", err)
+			}
+			if cancelled.SessionID != descriptor.ID || cancelled.State != SessionCancelled {
+				t.Fatalf("CancelSession() status = %#v", cancelled)
+			}
+			if _, _, active := server.ActiveSession(); active {
+				t.Fatal("cancelled session remained active")
+			}
+			status, ok := server.SessionStatus(descriptor.ID)
+			if !ok || status.State != SessionCancelled {
+				t.Fatalf("cancelled status = %#v ok=%t", status, ok)
+			}
+		})
+	}
+}
+
+func TestPairingServerDoesNotCancelCompletedSession(t *testing.T) {
+	fixture := newPairingFixture(t)
+	if err := fixture.server.Approve(fixture.descriptor.ID); err != nil {
+		t.Fatalf("Approve() error = %v", err)
+	}
+	code, _ := fixture.client.Code()
+	if _, _, err := fixture.client.Confirm(context.Background(), code); err != nil {
+		t.Fatalf("Confirm() error = %v", err)
+	}
+
+	completed, err := fixture.server.CancelSession(fixture.descriptor.ID)
+	if !errors.Is(err, ErrSessionState) {
+		t.Fatalf("CancelSession() error = %v, want ErrSessionState", err)
+	}
+	if completed.SessionID != fixture.descriptor.ID || completed.State != SessionCompleted || completed.DeviceID != "mac-studio" {
+		t.Fatalf("CancelSession() completed status = %#v", completed)
+	}
+	status, ok := fixture.server.SessionStatus(fixture.descriptor.ID)
+	if !ok || status.State != SessionCompleted || status.DeviceID != "mac-studio" {
+		t.Fatalf("completed status changed = %#v ok=%t", status, ok)
+	}
+}
+
+func TestPairingServerPublishesOnlyExactCompletedTrustRevocationOutsideLock(t *testing.T) {
+	fixture := newPairingFixture(t)
+	if err := fixture.server.Approve(fixture.descriptor.ID); err != nil {
+		t.Fatalf("Approve() error = %v", err)
+	}
+	code, _ := fixture.client.Code()
+	if _, _, err := fixture.client.Confirm(context.Background(), code); err != nil {
+		t.Fatalf("Confirm() error = %v", err)
+	}
+
+	var calls int
+	fixture.server.BindTrustRevokedObserver(func(_ context.Context, deviceID, sessionID string) error {
+		calls++
+		if deviceID != "mac-studio" || sessionID != fixture.descriptor.ID {
+			t.Fatalf("observer device=%q session=%q", deviceID, sessionID)
+		}
+		if _, _, active := fixture.server.ActiveSession(); active {
+			t.Fatal("observer saw an active completed session")
+		}
+		return nil
+	})
+	fixture.clock.Advance(3 * MaxSessionTTL)
+	if err := fixture.server.PublishTrustRevoked(context.Background(), "mac-studio", "generation-old"); err != nil {
+		t.Fatalf("stale PublishTrustRevoked() error = %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("stale generation observer calls = %d", calls)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- fixture.server.PublishTrustRevoked(context.Background(), "mac-studio", "generation-one")
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("PublishTrustRevoked() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("trust-revoked observer ran while server lock was held")
+	}
+	if calls != 1 {
+		t.Fatalf("exact observer calls = %d, want one", calls)
+	}
+}
+
 func TestPairingSessionControlRejectsUnknownOrWrongClient(t *testing.T) {
 	fixture := newPairingFixture(t)
 	unknown := fixture.client.Session

@@ -86,6 +86,202 @@ func TestDesktopControllerSeparatesEnableSearchAndPause(t *testing.T) {
 	}
 }
 
+func TestDesktopControllerConnectionCancelRoutesCurrentPairingThroughExactSession(t *testing.T) {
+	for _, role := range []lifecycle.Role{lifecycle.RoleMacClient, lifecycle.RoleWindowsHost} {
+		t.Run(string(role), func(t *testing.T) {
+			machine := newLifecycleMachine(t, role)
+			runtime := newRecordingSessionRuntime()
+			supervisor, _ := NewSupervisor(machine, runtime)
+			expires := time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano)
+			fallback := &recordingLocalHandler{results: map[localapi.Method]any{
+				localapi.MethodPairStart: localapi.PairStartResult{
+					SessionID: "session-1", Code: "123456", ExpiresAt: expires,
+					Peer: localapi.LifecyclePeer{ID: "peer", Name: "Peer"},
+				},
+				localapi.MethodPairStatus: localapi.PairingStatusResult{
+					SessionID: "session-1", Code: "123456", Status: string(pairing.SessionPending), ExpiresAt: expires,
+					Peer: localapi.LifecyclePeer{ID: "peer", Name: "Peer"},
+				},
+				localapi.MethodPairCancel: localapi.PairingStatusResult{
+					SessionID: "session-1", Status: string(pairing.SessionCancelled), ExpiresAt: expires,
+				},
+			}}
+			controller, _ := NewDesktopController(supervisor, fallback)
+			if _, err := controller.Handle(context.Background(), localapi.MethodEnable, nil); err != nil {
+				t.Fatalf("Enable() error = %v", err)
+			}
+			if role == lifecycle.RoleMacClient {
+				_, _ = controller.Handle(context.Background(), localapi.MethodSearchStart, nil)
+				_, _ = controller.Handle(context.Background(), localapi.MethodPairStart, json.RawMessage(`{"device":"peer"}`))
+			} else {
+				_, _ = controller.Handle(context.Background(), localapi.MethodPairStatus, json.RawMessage(`{"session_id":"session-1"}`))
+			}
+
+			result, err := controller.Handle(context.Background(), localapi.MethodConnectionCancel, json.RawMessage(`{"session_id":"session-1"}`))
+			if err != nil {
+				t.Fatalf("ConnectionCancel() error = %v", err)
+			}
+			if _, ok := result.(localapi.LifecycleActionResult); !ok {
+				t.Fatalf("ConnectionCancel() result = %#v", result)
+			}
+			if got := fallback.methods[len(fallback.methods)-1]; got != localapi.MethodPairCancel {
+				t.Fatalf("last delegated method = %q, want PairCancel", got)
+			}
+			var params localapi.PairSessionParams
+			if err := json.Unmarshal(fallback.raws[len(fallback.raws)-1], &params); err != nil || params.SessionID != "session-1" {
+				t.Fatalf("PairCancel params = %#v error=%v", params, err)
+			}
+			got := supervisor.Snapshot()
+			wantState := lifecycle.StateClientReady
+			if role == lifecycle.RoleWindowsHost {
+				wantState = lifecycle.StateHostWaiting
+			}
+			if got.State != wantState || got.Pairing != nil || got.TrustedPeers != 0 || runtime.reason != lifecycle.StopCancelConnection {
+				t.Fatalf("cancelled snapshot = %#v stop reason=%q", got, runtime.reason)
+			}
+		})
+	}
+}
+
+func TestDesktopControllerConnectionCancelPreservesDurableCompletionThatWon(t *testing.T) {
+	for _, role := range []lifecycle.Role{lifecycle.RoleMacClient, lifecycle.RoleWindowsHost} {
+		t.Run(string(role), func(t *testing.T) {
+			machine := newLifecycleMachine(t, role)
+			runtime := newRecordingSessionRuntime()
+			supervisor, _ := NewSupervisor(machine, runtime)
+			expires := time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano)
+			completed := localapi.PairingStatusResult{
+				SessionID: "session-1", Status: string(pairing.SessionCompleted), ExpiresAt: expires,
+				Peer:   localapi.LifecyclePeer{ID: "temporary-peer", Name: "Peer"},
+				Device: &localapi.Device{ID: "trusted-peer", Name: "Peer"},
+			}
+			fallback := &recordingLocalHandler{results: map[localapi.Method]any{
+				localapi.MethodPairStart: localapi.PairStartResult{
+					SessionID: "session-1", Code: "123456", ExpiresAt: expires,
+					Peer: localapi.LifecyclePeer{ID: "temporary-peer", Name: "Peer"},
+				},
+				localapi.MethodPairApprove: localapi.PairingStatusResult{
+					SessionID: "session-1", Code: "123456", Status: string(pairing.SessionApproved), ExpiresAt: expires,
+					Peer: localapi.LifecyclePeer{ID: "temporary-peer", Name: "Peer"},
+				},
+				localapi.MethodPairCancel: completed,
+			}}
+			controller, _ := NewDesktopController(supervisor, fallback)
+			_, _ = controller.Handle(context.Background(), localapi.MethodEnable, nil)
+			if role == lifecycle.RoleMacClient {
+				_, _ = controller.Handle(context.Background(), localapi.MethodSearchStart, nil)
+				_, _ = controller.Handle(context.Background(), localapi.MethodPairStart, json.RawMessage(`{"device":"temporary-peer"}`))
+				_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingApproved})
+			} else {
+				fallback.results[localapi.MethodPairStatus] = localapi.PairingStatusResult{
+					SessionID: "session-1", Code: "123456", Status: string(pairing.SessionPending), ExpiresAt: expires,
+					Peer: localapi.LifecyclePeer{ID: "temporary-peer", Name: "Peer"},
+				}
+				_, _ = controller.Handle(context.Background(), localapi.MethodPairStatus, json.RawMessage(`{"session_id":"session-1"}`))
+				_, _ = controller.Handle(context.Background(), localapi.MethodPairApprove, json.RawMessage(`{"session_id":"session-1"}`))
+			}
+
+			if _, err := controller.Handle(context.Background(), localapi.MethodConnectionCancel, json.RawMessage(`{"session_id":"session-1"}`)); err != nil {
+				t.Fatalf("ConnectionCancel() error = %v", err)
+			}
+			got := supervisor.Snapshot()
+			wantState := lifecycle.StateClientReady
+			if role == lifecycle.RoleWindowsHost {
+				wantState = lifecycle.StateHostWaiting
+			}
+			if got.State != wantState || got.Pairing != nil || got.TrustedPeers != 1 || got.Peer == nil ||
+				got.Peer.ID != "trusted-peer" || runtime.reason != lifecycle.StopCancelConnection {
+				t.Fatalf("completed cancel snapshot = %#v stop reason=%q", got, runtime.reason)
+			}
+		})
+	}
+}
+
+func TestDesktopControllerConnectionCancelStopsTrustedStartupWithoutPairingMutation(t *testing.T) {
+	machine, err := lifecycle.NewMachine(
+		lifecycle.RoleMacClient,
+		"Mac",
+		lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "saved", Name: "Saved Windows"}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := newRecordingSessionRuntime()
+	supervisor, _ := NewSupervisor(machine, runtime)
+	fallback := &recordingLocalHandler{}
+	controller, _ := NewDesktopController(supervisor, fallback)
+	if _, err := controller.Handle(context.Background(), localapi.MethodEnable, nil); err != nil {
+		t.Fatalf("Enable() error = %v", err)
+	}
+
+	if _, err := controller.Handle(context.Background(), localapi.MethodConnectionCancel, nil); err != nil {
+		t.Fatalf("ConnectionCancel() error = %v", err)
+	}
+	got := supervisor.Snapshot()
+	if got.State != lifecycle.StateClientReady || got.TrustedPeers != 1 || got.Peer == nil || got.Peer.ID != "saved" ||
+		runtime.reason != lifecycle.StopCancelConnection || len(fallback.methods) != 0 {
+		t.Fatalf("trusted startup cancel = %#v reason=%q methods=%v", got, runtime.reason, fallback.methods)
+	}
+}
+
+func TestDesktopControllerBindsExactTrustRevokedLifecycleObserver(t *testing.T) {
+	machine := newLifecycleMachine(t, lifecycle.RoleWindowsHost)
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled})
+	pairingState := lifecycle.Pairing{
+		SessionID: "session-1", Peer: lifecycle.Peer{ID: "temporary-mac", Name: "Mac"},
+		Code: "123456", ExpiresAt: time.Now().Add(time.Minute),
+	}
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &pairingState})
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingApproved})
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCompleted, Peer: &lifecycle.Peer{ID: "mac-one", Name: "Mac"}})
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := &trustRevokedBindingController{}
+	if _, err := NewDesktopController(supervisor, fallback); err != nil {
+		t.Fatalf("NewDesktopController() error = %v", err)
+	}
+	if fallback.observer == nil {
+		t.Fatal("trust-revoked lifecycle observer was not bound")
+	}
+
+	if err := fallback.observer(context.Background(), "mac-one", "session-1"); err != nil {
+		t.Fatalf("trust-revoked observer error = %v", err)
+	}
+	got := machine.Snapshot()
+	if got.State != lifecycle.StateHostWaiting || got.TrustedPeers != 0 || got.Peer != nil || got.Pairing != nil {
+		t.Fatalf("revoked lifecycle snapshot = %#v", got)
+	}
+}
+
+func TestDesktopControllerTrustRevokedObserverReconcilesDurableCompletionBeforeRevoke(t *testing.T) {
+	for _, pairingStatus := range []lifecycle.PairingStatus{lifecycle.PairingPending, lifecycle.PairingApproved} {
+		t.Run(string(pairingStatus), func(t *testing.T) {
+			machine := newLifecycleMachine(t, lifecycle.RoleWindowsHost)
+			_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled})
+			pairingState := lifecycle.Pairing{
+				SessionID: "session-1", Peer: lifecycle.Peer{ID: "temporary-mac", Name: "Mac"},
+				Code: "123456", ExpiresAt: time.Now().Add(time.Minute),
+			}
+			_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &pairingState})
+			if pairingStatus == lifecycle.PairingApproved {
+				_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingApproved})
+			}
+			supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+			fallback := &trustRevokedBindingController{}
+			if _, err := NewDesktopController(supervisor, fallback); err != nil {
+				t.Fatalf("NewDesktopController() error = %v", err)
+			}
+
+			if err := fallback.observer(context.Background(), "mac-one", "session-1"); err != nil {
+				t.Fatalf("trust-revoked observer error = %v", err)
+			}
+			got := machine.Snapshot()
+			if got.State != lifecycle.StateHostWaiting || got.TrustedPeers != 0 || got.Peer != nil || got.Pairing != nil {
+				t.Fatalf("reconciled revoked lifecycle snapshot = %#v", got)
+			}
+		})
+	}
+}
+
 func TestDesktopControllerPublishesTypedIdentityProblemAfterTrustedStartAbort(t *testing.T) {
 	machine, err := lifecycle.NewMachine(
 		lifecycle.RoleMacClient,

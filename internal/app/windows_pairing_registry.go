@@ -18,6 +18,7 @@ import (
 type windowsPairingRegistry struct {
 	store              config.Store
 	configTransactions *configTransactions
+	saveConfig         func(config.Config) error
 }
 
 func (r windowsPairingRegistry) Allow(context.Context) error {
@@ -59,15 +60,22 @@ func (r windowsPairingRegistry) Commit(_ context.Context, peer pairing.TrustedPe
 				PairingGeneration:   generation,
 			},
 		}
-		return r.store.Save(cfg)
+		return r.save(cfg)
 	})
 }
 
-func (r windowsPairingRegistry) RevokeWithProof(ctx context.Context, installer pairing.Installer, deviceID, generation string, proof []byte) error {
+func (r windowsPairingRegistry) RevokeWithProof(
+	ctx context.Context,
+	installer pairing.Installer,
+	deviceID, generation string,
+	proof []byte,
+	afterSave ...func(context.Context, string, string) error,
+) error {
 	if installer == nil || len(proof) != pairing.RevocationProofSize {
 		return errors.New("pairing revocation proof is invalid")
 	}
-	return r.runConfigTransaction(func() error {
+	revoked := false
+	err := r.runConfigTransaction(func() error {
 		cfg, err := loadAgentConfig(r.store)
 		if err != nil {
 			return err
@@ -79,7 +87,7 @@ func (r windowsPairingRegistry) RevokeWithProof(ctx context.Context, installer p
 		if !ok {
 			return nil
 		}
-		if device.PairingGeneration != "" && generation != "" && device.PairingGeneration != generation {
+		if device.PairingGeneration == "" || generation == "" || device.PairingGeneration != generation {
 			return nil
 		}
 		want, err := hex.DecodeString(device.RevocationProofHash)
@@ -92,8 +100,19 @@ func (r windowsPairingRegistry) RevokeWithProof(ctx context.Context, installer p
 		}
 		cfg.ActiveDevice = ""
 		cfg.Devices = nil
-		return r.store.Save(cfg)
+		if err := r.save(cfg); err != nil {
+			return err
+		}
+		revoked = true
+		return nil
 	})
+	if err != nil {
+		return err
+	}
+	if revoked && len(afterSave) > 0 && afterSave[0] != nil {
+		_ = afterSave[0](ctx, deviceID, generation)
+	}
+	return nil
 }
 
 func encodeRevocationProofHash(hash [32]byte) string {
@@ -118,8 +137,33 @@ func (r windowsPairingRegistry) Forget(deviceID string) error {
 		}
 		cfg.ActiveDevice = ""
 		cfg.Devices = nil
-		return r.store.Save(cfg)
+		return r.save(cfg)
 	})
+}
+
+func (r windowsPairingRegistry) save(cfg config.Config) error {
+	if r.saveConfig != nil {
+		return r.saveConfig(cfg)
+	}
+	return r.store.Save(cfg)
+}
+
+func (r windowsPairingRegistry) exactTrust(deviceID, generation string) (config.Device, bool, error) {
+	var device config.Device
+	found := false
+	err := r.runConfigTransaction(func() error {
+		cfg, err := loadAgentConfig(r.store)
+		if err != nil {
+			return err
+		}
+		candidate, ok := cfg.Devices[deviceID]
+		if cfg.ActiveDevice == deviceID && ok && candidate.PairingGeneration == generation {
+			device = candidate
+			found = true
+		}
+		return nil
+	})
+	return device, found, err
 }
 
 func (r windowsPairingRegistry) runConfigTransaction(operation func() error) error {

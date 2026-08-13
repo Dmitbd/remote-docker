@@ -27,7 +27,43 @@ func NewDesktopController(supervisor *Supervisor, fallback localapi.Handler) (*D
 	if supervisor == nil {
 		return nil, errors.New("desktop lifecycle supervisor is required")
 	}
+	if binder, ok := fallback.(trustRevokedObserverBinder); ok {
+		binder.bindTrustRevokedObserver(func(_ context.Context, deviceID, sessionID string) error {
+			return reconcileWindowsTrustRevoked(supervisor.machine, deviceID, sessionID)
+		})
+	}
 	return &DesktopController{supervisor: supervisor, fallback: fallback}, nil
+}
+
+func reconcileWindowsTrustRevoked(machine *lifecycle.Machine, deviceID, sessionID string) error {
+	for attempts := 0; attempts < 6; attempts++ {
+		snapshot := machine.Snapshot()
+		if snapshot.Role == lifecycle.RoleWindowsHost && snapshot.TrustedPeers == 0 && snapshot.Pairing != nil &&
+			snapshot.Pairing.SessionID == sessionID {
+			switch snapshot.Pairing.Status {
+			case lifecycle.PairingPending:
+				if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingApproved}); err != nil {
+					continue
+				}
+				continue
+			case lifecycle.PairingApproved:
+				if _, err := machine.Apply(lifecycle.Event{
+					Type: lifecycle.EventPairingCompleted, Peer: &lifecycle.Peer{ID: deviceID},
+				}); err != nil {
+					continue
+				}
+				continue
+			}
+		}
+		_, err := machine.Apply(lifecycle.Event{
+			Type: lifecycle.EventTrustRevoked, Peer: &lifecycle.Peer{ID: deviceID}, SessionID: sessionID,
+		})
+		return err
+	}
+	_, err := machine.Apply(lifecycle.Event{
+		Type: lifecycle.EventTrustRevoked, Peer: &lifecycle.Peer{ID: deviceID}, SessionID: sessionID,
+	})
+	return err
 }
 
 func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, raw json.RawMessage) (any, error) {
@@ -151,6 +187,12 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 			return nil, err
 		}
 		return status, nil
+	case localapi.MethodConnectionCancel:
+		if !c.operations.TryLock() {
+			return nil, needsAction("wait for the active lifecycle operation to finish")
+		}
+		defer c.operations.Unlock()
+		return c.cancelConnectionLocked(ctx, raw)
 	case localapi.MethodDisconnect:
 		if !c.operations.TryLock() {
 			return nil, needsAction("wait for the active lifecycle operation to finish")
@@ -217,6 +259,47 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 	default:
 		return c.delegate(ctx, method, raw)
 	}
+}
+
+func (c *DesktopController) cancelConnectionLocked(ctx context.Context, raw json.RawMessage) (any, error) {
+	snapshot := c.supervisor.Snapshot()
+	if snapshot.State != lifecycle.StatePairing && snapshot.State != lifecycle.StateConnecting {
+		return nil, needsAction("connection attempt is not active")
+	}
+	if snapshot.Pairing != nil {
+		params := localapi.PairSessionParams{}
+		if err := decodeOptionalControlParams(raw, &params); err != nil {
+			return nil, err
+		}
+		if params.SessionID == "" {
+			params.SessionID = snapshot.Pairing.SessionID
+		}
+		if params.SessionID != snapshot.Pairing.SessionID {
+			return nil, needsAction("a different pairing request is active")
+		}
+		cancelRaw, _ := json.Marshal(params)
+		result, err := c.delegate(ctx, localapi.MethodPairCancel, cancelRaw)
+		if err != nil {
+			return nil, err
+		}
+		status, ok := result.(localapi.PairingStatusResult)
+		if !ok || status.SessionID != params.SessionID {
+			return nil, unavailable("pairing cancellation returned an invalid response")
+		}
+		switch status.Status {
+		case string(pairing.SessionCompleted):
+			if err := c.reconcilePairing(status); err != nil {
+				return nil, err
+			}
+		case string(pairing.SessionCancelled), string(pairing.SessionRejected), string(pairing.SessionExpired):
+		default:
+			return nil, unavailable("pairing cancellation did not reach a terminal state")
+		}
+	}
+	if err := c.supervisor.CancelConnection(ctx); err != nil {
+		return nil, unavailable("Remote Docker connection attempt could not be stopped safely")
+	}
+	return c.actionResult(), nil
 }
 
 func connectionLimitOccupied(snapshot lifecycle.Snapshot) bool {

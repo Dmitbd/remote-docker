@@ -5,10 +5,12 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -4460,7 +4462,7 @@ func (s *runtimeRelaySink) Calls() int {
 }
 
 func TestWindowsPairingHostRetriesAndPublishesOnFirewallApprovedLANPort(t *testing.T) {
-	host, err := newWindowsPairingHost(runtimePairingInstaller{})
+	host, err := newWindowsPairingHost(&runtimePairingInstaller{})
 	if err != nil {
 		t.Fatalf("newWindowsPairingHost() error = %v", err)
 	}
@@ -4538,6 +4540,169 @@ func TestWindowsPairingStatusTreatsNoActiveSessionAsIdle(t *testing.T) {
 	}
 }
 
+func TestWindowsPairingCoordinatorCancelsPendingAndApprovedExactSession(t *testing.T) {
+	for _, state := range []pairing.SessionState{pairing.SessionPending, pairing.SessionApproved} {
+		t.Run(string(state), func(t *testing.T) {
+			_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			server, err := pairing.NewServer(pairing.ServerIdentity{PrivateKey: privateKey})
+			if err != nil {
+				t.Fatal(err)
+			}
+			clientPublicKey, _, _ := ed25519.GenerateKey(rand.Reader)
+			descriptor, err := server.StartSession(clientPublicKey, pairing.MaxSessionTTL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state == pairing.SessionApproved {
+				if err := server.Approve(descriptor.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			result, err := (windowsPairingCoordinator{server: server}).Cancel(context.Background(), descriptor.ID)
+			if err != nil || result.SessionID != descriptor.ID || result.Status != string(pairing.SessionCancelled) {
+				t.Fatalf("Cancel() = %#v error=%v", result, err)
+			}
+			if _, _, active := server.ActiveSession(); active {
+				t.Fatal("cancelled Windows pairing still exposes comparison code")
+			}
+		})
+	}
+}
+
+func TestProductionAgentControllerBindsTrustRevokedObserverToPairingCoordinator(t *testing.T) {
+	coordinator := &trustRevokedBindingCoordinator{}
+	controller := &productionAgentController{pairing: coordinator}
+	want := trustRevokedObserver(func(context.Context, string, string) error { return nil })
+
+	controller.bindTrustRevokedObserver(want)
+
+	if coordinator.observer == nil {
+		t.Fatal("trust-revoked observer was not forwarded to pairing coordinator")
+	}
+}
+
+func TestProductionAgentControllerCachesTerminalCancellationForExactSession(t *testing.T) {
+	coordinator := &countingPairingCancelCoordinator{}
+	controller := &productionAgentController{pairing: coordinator}
+	raw, _ := json.Marshal(localapi.PairSessionParams{SessionID: "session-one"})
+
+	first, err := controller.Handle(context.Background(), localapi.MethodPairCancel, raw)
+	if err != nil {
+		t.Fatalf("PairCancel error = %v", err)
+	}
+	second, err := controller.cancelCurrentPairing(context.Background(), "session-one")
+	if err != nil {
+		t.Fatalf("cancelCurrentPairing error = %v", err)
+	}
+	if coordinator.calls != 1 {
+		t.Fatalf("coordinator Cancel calls = %d, want 1", coordinator.calls)
+	}
+	if first != second {
+		t.Fatalf("cached cancellation = %#v, want %#v", second, first)
+	}
+
+	if _, err := controller.cancelCurrentPairing(context.Background(), "session-two"); err != nil {
+		t.Fatalf("different-session cancelCurrentPairing error = %v", err)
+	}
+	if coordinator.calls != 2 {
+		t.Fatalf("coordinator Cancel calls after different session = %d, want 2", coordinator.calls)
+	}
+}
+
+func TestWindowsProofRevokeClearsExactLifecycleTrustAfterDurableSave(t *testing.T) {
+	store := config.Store{Path: filepath.Join(t.TempDir(), "config.json")}
+	registry := windowsPairingRegistry{store: store}
+	installer := &runtimePairingInstaller{device: pairing.DeviceInfo{
+		SSHHostPublicKey: "ssh-ed25519 WINDOWS-HOST", SyncthingDeviceID: "WINDOWS-SYNC",
+		SSHPort: 49222, SyncthingPort: 49220,
+	}}
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := tunnel.Identity{PrivateKey: privateKey, PublicKey: publicKey}
+	host, err := newWindowsPairingHostWithRegistryAndIdentity(installer, registry, identity)
+	if err != nil {
+		t.Fatalf("newWindowsPairingHostWithRegistryAndIdentity() error = %v", err)
+	}
+	coordinator := &windowsPairingCoordinator{server: host.server, installer: installer, registry: &registry}
+	agent := NewAgent(nil, nil, &productionAgentController{pairing: coordinator})
+	machine := newLifecycleMachine(t, lifecycle.RoleWindowsHost)
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	if _, err := NewDesktopController(supervisor, agent); err != nil {
+		t.Fatalf("NewDesktopController() error = %v", err)
+	}
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled})
+
+	clientPublicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := host.server.StartSession(clientPublicKey, pairing.MaxSessionTTL)
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+	code, _ := pairing.Code(descriptor)
+	pairingState := lifecycle.Pairing{
+		SessionID: descriptor.ID, Peer: lifecycle.Peer{ID: pairing.InstanceIDFromPublicKey(clientPublicKey), Name: "Mac"},
+		Code: code, ExpiresAt: descriptor.ExpiresAt,
+	}
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &pairingState})
+	if err := host.server.Approve(descriptor.ID); err != nil {
+		t.Fatalf("Approve() error = %v", err)
+	}
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingApproved})
+
+	tlsConfig, err := host.server.TLSConfig()
+	if err != nil {
+		t.Fatalf("TLSConfig() error = %v", err)
+	}
+	certificate, err := tlsConfig.GetCertificate(&tls.ClientHelloInfo{})
+	if err != nil {
+		t.Fatalf("GetCertificate() error = %v", err)
+	}
+	tlsConfig = tlsConfig.Clone()
+	tlsConfig.GetCertificate = nil
+	tlsConfig.Certificates = []tls.Certificate{*certificate}
+	httpServer := httptest.NewUnstartedServer(host.server)
+	httpServer.TLS = tlsConfig
+	httpServer.StartTLS()
+	defer httpServer.Close()
+	proof := bytes.Repeat([]byte{7}, pairing.RevocationProofSize)
+	client := pairing.Client{
+		BaseURL: httpServer.URL, Session: descriptor, HTTPClient: pairing.NewPinnedHTTPClient(identity.PublicKey, nil),
+		DeviceID: "mac-one", Generation: "generation-one", AuthorizedKey: "ssh-ed25519 MAC-KEY", RevocationProof: proof,
+	}
+	if _, _, err := client.Confirm(context.Background(), code); err != nil {
+		t.Fatalf("Confirm() error = %v", err)
+	}
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCompleted, Peer: &lifecycle.Peer{ID: "mac-one", Name: "Mac"}})
+	completed, err := coordinator.Cancel(context.Background(), descriptor.ID)
+	if err != nil || completed.Status != string(pairing.SessionCompleted) || completed.Device == nil || completed.Device.ID != "mac-one" {
+		t.Fatalf("Cancel() after durable completion = %#v error=%v", completed, err)
+	}
+	committed, err := store.Load()
+	if err != nil || committed.ActiveDevice != "mac-one" || committed.Devices["mac-one"].PairingGeneration != "generation-one" || installer.revokes != 0 {
+		t.Fatalf("completed cancel changed durable trust = %#v revokes=%d error=%v", committed, installer.revokes, err)
+	}
+
+	if err := client.Revoke(context.Background(), "mac-one", "generation-one", proof); err != nil {
+		t.Fatalf("Revoke() error = %v", err)
+	}
+	cfg, err := store.Load()
+	if err != nil || cfg.ActiveDevice != "" || len(cfg.Devices) != 0 {
+		t.Fatalf("durable registry after revoke = %#v error=%v", cfg, err)
+	}
+	got := machine.Snapshot()
+	if got.State != lifecycle.StateHostWaiting || got.TrustedPeers != 0 || got.Peer != nil || got.Pairing != nil || installer.revokes != 1 {
+		t.Fatalf("lifecycle after durable revoke = %#v installer revokes=%d", got, installer.revokes)
+	}
+}
+
 func TestPrivatePeerListenerRejectsPublicPeerAtAcceptBoundary(t *testing.T) {
 	public := &addressedConn{remote: &net.TCPAddr{IP: net.ParseIP("203.0.113.10"), Port: 43119}}
 	private := &addressedConn{remote: &net.TCPAddr{IP: net.ParseIP("192.168.1.20"), Port: 43119}}
@@ -4603,13 +4768,38 @@ func TestManagedSSHRuntimeEnsureRestartsDeadAgentForReconnect(t *testing.T) {
 	}
 }
 
-type runtimePairingInstaller struct{}
-
-func (runtimePairingInstaller) Install(context.Context, string, string) (pairing.DeviceInfo, error) {
-	return pairing.DeviceInfo{}, nil
+type runtimePairingInstaller struct {
+	device  pairing.DeviceInfo
+	revokes int
 }
 
-func (runtimePairingInstaller) Revoke(context.Context, string) error { return nil }
+type trustRevokedBindingCoordinator struct {
+	runtimePairingCoordinator
+	observer trustRevokedObserver
+}
+
+func (c *trustRevokedBindingCoordinator) bindTrustRevokedObserver(observer trustRevokedObserver) {
+	c.observer = observer
+}
+
+type countingPairingCancelCoordinator struct {
+	runtimePairingCoordinator
+	calls int
+}
+
+func (c *countingPairingCancelCoordinator) Cancel(_ context.Context, sessionID string) (localapi.PairingStatusResult, error) {
+	c.calls++
+	return localapi.PairingStatusResult{SessionID: sessionID, Status: string(pairing.SessionCancelled)}, nil
+}
+
+func (i *runtimePairingInstaller) Install(context.Context, string, string) (pairing.DeviceInfo, error) {
+	return i.device, nil
+}
+
+func (i *runtimePairingInstaller) Revoke(context.Context, string) error {
+	i.revokes++
+	return nil
+}
 
 type retryingPairingPublisher struct {
 	calls     atomic.Int32

@@ -6,8 +6,10 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Dmitbd/remote-docker/internal/config"
 	"github.com/Dmitbd/remote-docker/internal/pairing"
@@ -113,6 +115,86 @@ func TestWindowsPairingRegistryTreatsOldGenerationAsSupersededAfterRepairing(t *
 	}
 	if installer.revokes != 0 {
 		t.Fatalf("old generation revoked current Windows trust: calls=%d", installer.revokes)
+	}
+}
+
+func TestWindowsPairingRegistryPublishesOnlyActualDurableRevokeOutsideTransaction(t *testing.T) {
+	store := config.Store{Path: filepath.Join(t.TempDir(), "config.json")}
+	registry := windowsPairingRegistry{store: store}
+	proof := bytes.Repeat([]byte{1}, pairing.RevocationProofSize)
+	peerKey := make(ed25519.PublicKey, ed25519.PublicKeySize)
+	if err := registry.Commit(context.Background(), pairing.TrustedPeer{
+		DeviceID: "mac-one", Generation: "generation-one", PublicKey: peerKey,
+		RevocationProofHash: sha256.Sum256(proof),
+	}); err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	installer := &registryRecordingInstaller{}
+	callbackCalls := 0
+	callback := func(context.Context, string, string) error {
+		callbackCalls++
+		cfg, err := store.Load()
+		if err != nil || cfg.ActiveDevice != "" {
+			t.Fatalf("callback ran before durable revoke: config=%#v error=%v", cfg, err)
+		}
+		return registry.runConfigTransaction(func() error { return errors.New("observer failure") })
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- registry.RevokeWithProof(context.Background(), installer, "mac-one", "generation-one", proof, callback)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("observer failure undid durable revoke: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("trust-revoked callback ran inside config transaction")
+	}
+	if callbackCalls != 1 || installer.revokes != 1 {
+		t.Fatalf("callback calls=%d installer revokes=%d", callbackCalls, installer.revokes)
+	}
+	if err := registry.RevokeWithProof(context.Background(), installer, "mac-one", "generation-one", proof, callback); err != nil {
+		t.Fatalf("idempotent RevokeWithProof() error = %v", err)
+	}
+	if callbackCalls != 1 || installer.revokes != 1 {
+		t.Fatalf("idempotent revoke republished: callback=%d installer=%d", callbackCalls, installer.revokes)
+	}
+}
+
+func TestWindowsPairingRegistryDoesNotPublishStaleOrFailedRevoke(t *testing.T) {
+	store := config.Store{Path: filepath.Join(t.TempDir(), "config.json")}
+	proof := bytes.Repeat([]byte{1}, pairing.RevocationProofSize)
+	peerKey := make(ed25519.PublicKey, ed25519.PublicKeySize)
+	registry := windowsPairingRegistry{store: store}
+	if err := registry.Commit(context.Background(), pairing.TrustedPeer{
+		DeviceID: "mac-one", Generation: "generation-new", PublicKey: peerKey,
+		RevocationProofHash: sha256.Sum256(proof),
+	}); err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	installer := &registryRecordingInstaller{}
+	callbackCalls := 0
+	callback := func(context.Context, string, string) error { callbackCalls++; return nil }
+	if err := registry.RevokeWithProof(context.Background(), installer, "mac-one", "generation-old", proof, callback); err != nil {
+		t.Fatalf("stale RevokeWithProof() error = %v", err)
+	}
+	if callbackCalls != 0 || installer.revokes != 0 {
+		t.Fatalf("stale revoke published: callback=%d installer=%d", callbackCalls, installer.revokes)
+	}
+
+	saveErr := errors.New("injected durable save failure")
+	registry.saveConfig = func(config.Config) error { return saveErr }
+	if err := registry.RevokeWithProof(context.Background(), installer, "mac-one", "generation-new", proof, callback); !errors.Is(err, saveErr) {
+		t.Fatalf("failed RevokeWithProof() error = %v, want save failure", err)
+	}
+	if callbackCalls != 0 {
+		t.Fatalf("failed durable revoke callback calls = %d", callbackCalls)
+	}
+	cfg, err := store.Load()
+	if err != nil || cfg.ActiveDevice != "mac-one" || cfg.Devices["mac-one"].PairingGeneration != "generation-new" {
+		t.Fatalf("failed durable revoke changed registry = %#v error=%v", cfg, err)
 	}
 }
 

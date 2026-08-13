@@ -1115,8 +1115,19 @@ type productionAgentController struct {
 	metrics                 *metrics.Collector
 	afterPair               func(context.Context)
 	mu                      sync.Mutex
+	lastCancelSession       string
+	lastCancelResult        localapi.PairingStatusResult
 	beforeConfigTransaction func()
 	beforeConfigSave        func()
+}
+
+func (c *productionAgentController) bindTrustRevokedObserver(observer trustRevokedObserver) {
+	if c == nil || c.pairing == nil {
+		return
+	}
+	if binder, ok := c.pairing.(trustRevokedObserverBinder); ok {
+		binder.bindTrustRevokedObserver(observer)
+	}
 }
 
 func (c *productionAgentController) abandonPairing(sessionID string) {
@@ -1139,12 +1150,28 @@ func (c *productionAgentController) cancelCurrentPairing(ctx context.Context, se
 	if c == nil || c.pairing == nil {
 		return localapi.PairingStatusResult{}, unavailable("pairing cancellation is unavailable")
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lastCancelSession == sessionID {
+		return c.lastCancelResult, nil
+	}
+	var result localapi.PairingStatusResult
+	var err error
 	if coordinator, ok := c.pairing.(interface {
 		CancelCurrent(context.Context, string) (localapi.PairingStatusResult, error)
 	}); ok {
-		return coordinator.CancelCurrent(ctx, sessionID)
+		result, err = coordinator.CancelCurrent(ctx, sessionID)
+	} else {
+		result, err = c.pairing.Cancel(ctx, sessionID)
 	}
-	return c.pairing.Cancel(ctx, sessionID)
+	if err == nil && result.SessionID == sessionID {
+		switch result.Status {
+		case string(pairing.SessionCancelled), string(pairing.SessionRejected), string(pairing.SessionExpired), string(pairing.SessionCompleted):
+			c.lastCancelSession = sessionID
+			c.lastCancelResult = result
+		}
+	}
+	return result, err
 }
 
 func (c *productionAgentController) rollbackCompletedPairing(ctx context.Context, deviceID string) error {
@@ -1271,7 +1298,7 @@ func (c *productionAgentController) Handle(ctx context.Context, method localapi.
 		case localapi.MethodPairReject:
 			return c.pairing.Reject(ctx, params.SessionID)
 		default:
-			return c.pairing.Cancel(ctx, params.SessionID)
+			return c.cancelCurrentPairing(ctx, params.SessionID)
 		}
 	case localapi.MethodUnpair:
 		var params localapi.UnpairParams
@@ -1896,6 +1923,7 @@ func newWindowsPairingHostWithRegistryAndIdentity(installer pairing.Installer, r
 	if err != nil || strings.TrimSpace(deviceName) == "" {
 		return nil, errors.New("find Windows device name")
 	}
+	var server *pairing.Server
 	options := []pairing.ServerOption{
 		pairing.WithInstaller(installer),
 		pairing.WithDisplayName(strings.TrimSpace(deviceName)),
@@ -1905,11 +1933,18 @@ func newWindowsPairingHostWithRegistryAndIdentity(installer pairing.Installer, r
 			pairing.WithSessionGuard(registry.Allow),
 			pairing.WithAfterInstall(registry.Commit),
 			pairing.WithRevocation(func(ctx context.Context, deviceID, generation string, proof []byte) error {
-				return registry.RevokeWithProof(ctx, installer, deviceID, generation, proof)
+				return registry.RevokeWithProof(ctx, installer, deviceID, generation, proof, func(
+					observerCtx context.Context, revokedDeviceID, revokedGeneration string,
+				) error {
+					if server == nil {
+						return nil
+					}
+					return server.PublishTrustRevoked(observerCtx, revokedDeviceID, revokedGeneration)
+				})
 			}),
 		)
 	}
-	server, err := pairing.NewServer(
+	server, err = pairing.NewServer(
 		pairing.ServerIdentity{PrivateKey: append(ed25519.PrivateKey(nil), identity.PrivateKey...)},
 		options...,
 	)
@@ -2131,6 +2166,12 @@ type windowsPairingCoordinator struct {
 	registry  *windowsPairingRegistry
 }
 
+func (c windowsPairingCoordinator) bindTrustRevokedObserver(observer trustRevokedObserver) {
+	if c.server != nil {
+		c.server.BindTrustRevokedObserver(observer)
+	}
+}
+
 func (windowsPairingCoordinator) Candidates(context.Context) (localapi.PairCandidatesResult, error) {
 	return localapi.PairCandidatesResult{Candidates: []localapi.PairingCandidate{}}, nil
 }
@@ -2199,8 +2240,47 @@ func (c windowsPairingCoordinator) Reject(ctx context.Context, sessionID string)
 	return result, err
 }
 
-func (windowsPairingCoordinator) Cancel(context.Context, string) (localapi.PairingStatusResult, error) {
-	return localapi.PairingStatusResult{}, needsAction("only the Mac client can cancel its pairing request")
+func (c windowsPairingCoordinator) Cancel(_ context.Context, sessionID string) (localapi.PairingStatusResult, error) {
+	if c.server == nil {
+		return localapi.PairingStatusResult{}, unavailable("pairing infrastructure is unavailable")
+	}
+	status, err := c.server.CancelSession(sessionID)
+	if err == nil {
+		return windowsPairingStatusResult(status), nil
+	}
+	switch status.State {
+	case pairing.SessionCancelled, pairing.SessionRejected, pairing.SessionExpired:
+		return windowsPairingStatusResult(status), nil
+	}
+	if result, completedErr := c.completedCancellationResult(sessionID); completedErr == nil {
+		return result, nil
+	}
+	return localapi.PairingStatusResult{}, needsAction("pairing request cannot be cancelled after completion")
+}
+
+func windowsPairingStatusResult(status pairing.SessionStatus) localapi.PairingStatusResult {
+	return localapi.PairingStatusResult{
+		SessionID: status.SessionID, Status: string(status.State), ExpiresAt: status.ExpiresAt.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func (c windowsPairingCoordinator) completedCancellationResult(sessionID string) (localapi.PairingStatusResult, error) {
+	deviceID, generation, completed := c.server.CompletedTrust(sessionID)
+	if !completed || c.registry == nil {
+		return localapi.PairingStatusResult{}, needsAction("pairing request cannot be cancelled after completion")
+	}
+	device, durable, err := c.registry.exactTrust(deviceID, generation)
+	if err != nil {
+		return localapi.PairingStatusResult{}, unavailable("cannot read trusted device metadata")
+	}
+	if !durable {
+		return localapi.PairingStatusResult{}, needsAction("pairing request cannot be cancelled after completion")
+	}
+	peer := localapi.LifecyclePeer{ID: deviceID, Name: device.Name, OS: "macos", Address: device.Address}
+	return localapi.PairingStatusResult{
+		SessionID: sessionID, Peer: peer, Status: string(pairing.SessionCompleted),
+		Device: &localapi.Device{ID: deviceID, Name: device.Name, Address: device.Address},
+	}, nil
 }
 
 func (c windowsPairingCoordinator) Unpair(ctx context.Context, deviceID string, localOnly bool) error {

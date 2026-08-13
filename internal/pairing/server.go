@@ -51,6 +51,12 @@ type terminalSession struct {
 	httpStatus int
 }
 
+type completedTrust struct {
+	sessionID  string
+	deviceID   string
+	generation string
+}
+
 // Server owns one short-lived pairing session.
 type Server struct {
 	mu           sync.Mutex
@@ -61,10 +67,12 @@ type Server struct {
 	sessionGuard func(context.Context) error
 	afterInstall func(context.Context, TrustedPeer) error
 	revoke       func(context.Context, string, string, []byte) error
+	trustRevoked func(context.Context, string, string) error
 	now          func() time.Time
 	random       io.Reader
 	active       *sessionState
 	terminal     map[string]terminalSession
+	completed    *completedTrust
 }
 
 // ServerOption changes a server dependency.
@@ -249,6 +257,72 @@ func (s *Server) Reject(sessionID string) error {
 	}
 	s.finishLocked(SessionRejected, http.StatusForbidden, "")
 	return nil
+}
+
+// CancelSession closes the exact local Windows pairing session while it is
+// pending or approved. Completed trust is never changed by this operation.
+func (s *Server) CancelSession(sessionID string) (SessionStatus, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireLocked()
+	if s.active == nil || s.active.descriptor.ID != sessionID {
+		if terminal, ok := s.terminal[sessionID]; ok {
+			return terminal.status, ErrSessionState
+		}
+		return SessionStatus{}, ErrInvalidSession
+	}
+	if s.active.state != SessionPending && s.active.state != SessionApproved {
+		return s.activeStatusLocked(), ErrSessionState
+	}
+	s.finishLocked(SessionCancelled, http.StatusConflict, "")
+	return s.terminal[sessionID].status, nil
+}
+
+// BindTrustRevokedObserver binds the Windows lifecycle observer. The observer
+// is copied under the server lock but is always invoked after the lock exits.
+func (s *Server) BindTrustRevokedObserver(observer func(context.Context, string, string) error) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.trustRevoked = observer
+	s.mu.Unlock()
+}
+
+// PublishTrustRevoked maps an exact durable device generation back to the
+// pairing session that committed it before publishing the lifecycle event.
+func (s *Server) PublishTrustRevoked(ctx context.Context, deviceID, generation string) error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	s.expireLocked()
+	observer := s.trustRevoked
+	sessionID := ""
+	if s.completed != nil && s.completed.deviceID == deviceID && s.completed.generation == generation {
+		sessionID = s.completed.sessionID
+		s.completed = nil
+	}
+	s.mu.Unlock()
+	if observer == nil || sessionID == "" {
+		return nil
+	}
+	return observer(ctx, deviceID, sessionID)
+}
+
+// CompletedTrust resolves the exact durable owner recorded by the completed
+// pairing session. It is internal orchestration data and is not exposed on the
+// pairing wire protocol.
+func (s *Server) CompletedTrust(sessionID string) (string, string, bool) {
+	if s == nil {
+		return "", "", false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.completed == nil || s.completed.sessionID != sessionID {
+		return "", "", false
+	}
+	return s.completed.deviceID, s.completed.generation, true
 }
 
 // ServeHTTP accepts the one confirmation request that completes pairing.
@@ -495,6 +569,9 @@ func (s *Server) confirm(ctx context.Context, request confirmRequest) (DeviceRec
 		TunnelPublicKey:   s.identity.PublicKey(),
 		TunnelPort:        tunnel.TunnelPort,
 		TransportVersion:  tunnel.CurrentTransportVersion,
+	}
+	s.completed = &completedTrust{
+		sessionID: session.descriptor.ID, deviceID: request.DeviceID, generation: request.Generation,
 	}
 	s.finishLocked(SessionCompleted, http.StatusConflict, request.DeviceID)
 	return record, http.StatusOK, ""

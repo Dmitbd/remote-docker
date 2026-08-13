@@ -54,6 +54,12 @@ type AgentController interface {
 	Handle(context.Context, localapi.Method, json.RawMessage) (any, error)
 }
 
+type trustRevokedObserver func(context.Context, string, string) error
+
+type trustRevokedObserverBinder interface {
+	bindTrustRevokedObserver(trustRevokedObserver)
+}
+
 type Agent struct {
 	observer   AgentObserver
 	restorer   InfrastructureRestorer
@@ -76,6 +82,15 @@ func (a *Agent) abandonPairing(sessionID string) {
 	}
 	if cleaner, ok := a.controller.(interface{ abandonPairing(string) }); ok {
 		cleaner.abandonPairing(sessionID)
+	}
+}
+
+func (a *Agent) bindTrustRevokedObserver(observer trustRevokedObserver) {
+	if a == nil || a.controller == nil {
+		return
+	}
+	if binder, ok := a.controller.(trustRevokedObserverBinder); ok {
+		binder.bindTrustRevokedObserver(observer)
 	}
 }
 

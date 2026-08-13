@@ -69,6 +69,18 @@ func TestAgentStatusHandlerPublishesExplicitPairedFlag(t *testing.T) {
 	}
 }
 
+func TestAgentForwardsTrustRevokedObserverBindingToController(t *testing.T) {
+	controller := &trustRevokedBindingController{}
+	agent := NewAgent(nil, nil, controller)
+	want := trustRevokedObserver(func(context.Context, string, string) error { return nil })
+
+	agent.bindTrustRevokedObserver(want)
+
+	if controller.observer == nil {
+		t.Fatal("trust-revoked observer was not forwarded")
+	}
+}
+
 func TestAgentReconnectRestoresInfrastructureWithoutDockerCommandReplay(t *testing.T) {
 	events := []string{}
 	agent := NewAgent(
@@ -279,6 +291,18 @@ type recordingController struct{ methods []localapi.Method }
 func (c *recordingController) Handle(_ context.Context, method localapi.Method, _ json.RawMessage) (any, error) {
 	c.methods = append(c.methods, method)
 	return map[string]bool{"ok": true}, nil
+}
+
+type trustRevokedBindingController struct {
+	observer trustRevokedObserver
+}
+
+func (*trustRevokedBindingController) Handle(context.Context, localapi.Method, json.RawMessage) (any, error) {
+	return nil, nil
+}
+
+func (c *trustRevokedBindingController) bindTrustRevokedObserver(observer trustRevokedObserver) {
+	c.observer = observer
 }
 
 type recordingControlClient struct {
