@@ -29,6 +29,13 @@
 
 Конкретный PR запускает только относящиеся к изменению packages и contracts согласно `AGENTS.md`.
 
+### В активной ветке: bootstrap paired Syncthing device
+
+- `internal/app/connection_runtime_test.go` подтверждает, что presence не запускается после ошибки bootstrap, операция повторяется, а после успеха не вызывается повторно в той же runtime session.
+- `internal/app/sync_runtime_test.go` подтверждает точный Windows device на Mac через `tcp://127.0.0.1:49220`, paired Mac device на Windows через существующий `sync.configure`, отсутствие dummy folder у свежей пары и сохранение отсортированного managed folder snapshot.
+- `internal/app/agent_runtime_test.go` подтверждает production wiring bootstrap callback только в Mac connection runtime.
+- Сфокусированный race-прогон `internal/app` прошёл для `codex/fix-syncthing-bootstrap` @ `9a76d76`. Это не является физической проверкой Syncthing между Mac и Windows.
+
 ### В `main`: восстановление Mac Syncthing identity
 
 - `internal/syncer` классифицирует валидную identity, неверный key, повреждённый blob и некорректный key без вывода secret details.
@@ -92,6 +99,12 @@
 
 ## Физическая Mac↔Windows матрица
 
+### Инцидент development artifact 0.2.9 от 2026-08-13
+
+На реальных Mac и Windows pairing завершился, tunnel identity/session, LAN, local relays и Docker channel были готовы, а WSL read-only diagnostics подтверждали active systemd target, Docker socket и Syncthing service. При этом Mac оставался в `connecting`: локальный Syncthing не содержал Windows device и `/rest/system/connections` оставался пустым. Причина подтверждена кодом: device records создавались только позднее в workspace preflight, тогда как connection readiness уже ожидал Syncthing connection.
+
+Исправление находится в активной ветке `codex/fix-syncthing-bootstrap` @ `9a76d76`. Новый artifact ещё не собран и физически не проверен.
+
 Начальный статус всех строк — **Не проверено** для development artifact `0.2.8`, созданного из `main` @ `09ba7ca`.
 
 | Сценарий | Ожидаемый результат | Статус |
@@ -99,6 +112,7 @@
 | Manual start обоих приложений | Оба открываются один раз и начинают в Paused | Не проверено |
 | Windows Start hosting + Mac Search | Ожидаемый host появляется без stale entries | Не проверено |
 | Pairing approve | Одинаковый code на двух UI; оба переходят в Connected | Не проверено |
+| Fresh pairing Syncthing bootstrap | Exact paired devices создаются без dummy folder; оба UI достигают Connected | 0.2.9: не пройдено; новый кандидат: не проверено |
 | Cancel pairing до approve | Оба UI завершают только точную текущую session; code исчезает после успешной остановки | Не проверено |
 | Pairing expiry | Просроченная session завершается на обоих UI и не создаёт доверие | Не проверено |
 | Cancel после approve во время connecting | Runtime останавливается; полностью committed trust сохраняется | Не проверено |

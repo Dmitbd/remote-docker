@@ -149,6 +149,14 @@ Endpoint overrides, которые обходят managed identity, запрещ
 - Preflight ждёт готовность обеих сторон перед Docker-командой с bind mount.
 - Named volumes и Docker data не являются workspace и не синхронизируются.
 
+### В активной ветке: bootstrap paired Syncthing device
+
+После запуска Mac connection runtime существующая paired identity настраивается на обеих сторонах до проверки `SyncthingConnected`. Mac применяет только точный Windows device с адресом фиксированного loopback relay `tcp://127.0.0.1:49220`; Windows через существующий typed RPC применяет только paired Mac device в пассивном режиме. Global/local discovery и внешние Syncthing relays остаются выключенными.
+
+Bootstrap передаёт полный текущий managed folder snapshot: у свежей пары он пуст, а после регистрации workspaces сохраняет принадлежащие приложению folders и ignores. Dummy folder не создаётся. Workspace scan и ожидание готовности обеих сторон по-прежнему выполняются только preflight перед Docker-командой с bind mount.
+
+Connection runtime повторяет неуспешный bootstrap ограниченными шагами, не запускает presence до его успеха и не ослабляет readiness: `connected` публикуется только после фактического Syncthing-соединения. Изменение не добавляет RPC method, protocol/schema version, tunnel stream, port, listener, service или discovery boundary. Автоматические доказательства относятся к активной ветке `codex/fix-syncthing-bootstrap` @ `9a76d76`; физическая проверка нового artifact ещё не выполнена.
+
 ### Текущее: восстановление Mac Syncthing identity
 
 Перед запуском session-owned процессов Mac проверяет согласованность зашифрованной локальной Syncthing identity и owner-scoped ключа из credential store. Низкоуровневый sync-компонент только классифицирует непригодную пару и не меняет config или credentials.
