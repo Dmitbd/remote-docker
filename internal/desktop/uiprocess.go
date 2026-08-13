@@ -38,6 +38,7 @@ type ProcessLauncher struct {
 	stopping   bool
 	closed     bool
 	show       *uiShowOperation
+	stop       *uiStopOperation
 	arguments  []string
 	command    func(string, ...string) *exec.Cmd
 	focus      func(context.Context) error
@@ -49,6 +50,12 @@ type ProcessLauncher struct {
 type uiShowOperation struct {
 	done chan struct{}
 	err  error
+}
+
+type uiStopOperation struct {
+	child uiChildSnapshot
+	done  chan struct{}
+	err   error
 }
 
 type uiChildSnapshot struct {
@@ -227,6 +234,7 @@ func (p *ProcessLauncher) recoverChild(ctx context.Context, child uiChildSnapsho
 		return errUIChildOwnershipChanged
 	}
 	p.stopping = true
+	operation := p.beginStopLocked(child)
 	signalProcess := p.signal
 	if signalProcess == nil {
 		signalProcess = func(process *os.Process, signal os.Signal) error { return process.Signal(signal) }
@@ -241,14 +249,22 @@ func (p *ProcessLauncher) recoverChild(ctx context.Context, child uiChildSnapsho
 		killErr := killProcess(child.process)
 		if killErr != nil {
 			if p.observeExactChildExit(ctx, child.done) == nil {
-				return p.finishRecovery(ctx, child)
+				return p.completeRecovery(ctx, child, operation)
 			}
 			p.releaseStopping(child)
-			return errors.Join(fmt.Errorf("signal desktop UI process: %w", signalErr), fmt.Errorf("kill desktop UI process: %w", killErr))
+			err := errors.Join(fmt.Errorf("signal desktop UI process: %w", signalErr), fmt.Errorf("kill desktop UI process: %w", killErr))
+			p.finishStop(operation, err)
+			return err
 		}
-		return p.finishRecovery(ctx, child)
+		return p.completeRecovery(ctx, child, operation)
 	}
-	return p.finishRecovery(ctx, child)
+	return p.completeRecovery(ctx, child, operation)
+}
+
+func (p *ProcessLauncher) completeRecovery(ctx context.Context, child uiChildSnapshot, operation *uiStopOperation) error {
+	err := p.finishRecovery(ctx, child)
+	p.finishStop(operation, err)
+	return err
 }
 
 func (p *ProcessLauncher) finishRecovery(ctx context.Context, child uiChildSnapshot) error {
@@ -299,6 +315,22 @@ func (p *ProcessLauncher) releaseStopping(child uiChildSnapshot) {
 	p.mu.Unlock()
 }
 
+func (p *ProcessLauncher) beginStopLocked(child uiChildSnapshot) *uiStopOperation {
+	operation := &uiStopOperation{child: child, done: make(chan struct{})}
+	p.stop = operation
+	return operation
+}
+
+func (p *ProcessLauncher) finishStop(operation *uiStopOperation, err error) {
+	p.mu.Lock()
+	operation.err = err
+	if p.stop == operation {
+		p.stop = nil
+	}
+	close(operation.done)
+	p.mu.Unlock()
+}
+
 func (p *ProcessLauncher) ownsChildLocked(child uiChildSnapshot) bool {
 	return p.sameChildLocked(child) && p.generation == child.generation
 }
@@ -325,6 +357,19 @@ func (p *ProcessLauncher) Stop(ctx context.Context) error {
 	}
 	p.mu.Lock()
 	p.closed = true
+	if p.stop != nil {
+		operation := p.stop
+		p.mu.Unlock()
+		select {
+		case <-operation.done:
+			if operation.err == nil {
+				return nil
+			}
+			return p.retryTerminalStop(ctx, operation)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	child := uiChildSnapshot{command: p.process, done: p.done, generation: p.generation}
 	if p.process != nil {
 		child.process = p.process.Process
@@ -341,11 +386,37 @@ func (p *ProcessLauncher) Stop(ctx context.Context) error {
 		p.generation++
 		p.stopping = true
 		child.generation = p.generation
+		operation := p.beginStopLocked(child)
+		p.mu.Unlock()
+		return p.runTerminalStop(ctx, child, operation)
 	}
 	p.mu.Unlock()
 	if child.command == nil || child.process == nil || child.done == nil {
 		return nil
 	}
+	return nil
+}
+
+func (p *ProcessLauncher) retryTerminalStop(ctx context.Context, previous *uiStopOperation) error {
+	p.mu.Lock()
+	if p.process == nil {
+		p.mu.Unlock()
+		return nil
+	}
+	child := uiChildSnapshot{command: p.process, process: p.process.Process, done: p.done, generation: p.generation}
+	if !p.sameChildLocked(previous.child) || p.done != previous.child.done {
+		p.mu.Unlock()
+		return errUIChildOwnershipChanged
+	}
+	p.generation++
+	child.generation = p.generation
+	p.stopping = true
+	operation := p.beginStopLocked(child)
+	p.mu.Unlock()
+	return p.runTerminalStop(ctx, child, operation)
+}
+
+func (p *ProcessLauncher) runTerminalStop(ctx context.Context, child uiChildSnapshot, operation *uiStopOperation) error {
 	signalProcess := p.signal
 	if signalProcess == nil {
 		signalProcess = func(process *os.Process, signal os.Signal) error { return process.Signal(signal) }
@@ -357,26 +428,35 @@ func (p *ProcessLauncher) Stop(ctx context.Context) error {
 	if err := signalProcess(child.process, os.Interrupt); err != nil {
 		if killErr := killProcess(child.process); killErr != nil {
 			if p.observeExactChildExit(ctx, child.done) == nil {
+				p.finishStop(operation, nil)
 				return nil
 			}
 			p.releaseStopping(child)
-			return errors.Join(fmt.Errorf("signal desktop UI process: %w", err), fmt.Errorf("kill desktop UI process: %w", killErr))
+			err := errors.Join(fmt.Errorf("signal desktop UI process: %w", err), fmt.Errorf("kill desktop UI process: %w", killErr))
+			p.finishStop(operation, err)
+			return err
 		}
 		select {
 		case <-child.done:
+			p.finishStop(operation, nil)
 			return nil
 		case <-ctx.Done():
+			p.finishStop(operation, ctx.Err())
 			return ctx.Err()
 		}
 	}
 	select {
 	case <-child.done:
+		p.finishStop(operation, nil)
 		return nil
 	case <-ctx.Done():
 		if err := killProcess(child.process); err != nil {
 			p.releaseStopping(child)
-			return errors.Join(ctx.Err(), fmt.Errorf("kill desktop UI process: %w", err))
+			result := errors.Join(ctx.Err(), fmt.Errorf("kill desktop UI process: %w", err))
+			p.finishStop(operation, result)
+			return result
 		}
+		p.finishStop(operation, ctx.Err())
 		return ctx.Err()
 	}
 }

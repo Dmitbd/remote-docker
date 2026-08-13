@@ -646,6 +646,123 @@ func TestProcessLauncherFailedStopStaysClosedAndAllowsStopRetry(t *testing.T) {
 	}
 }
 
+func TestProcessLauncherTerminalStopJoinsFailedRecoveryWithoutWaitingForChildExit(t *testing.T) {
+	recoverySignalErr := errors.New("recovery signal failed")
+	recoveryKillErr := errors.New("recovery kill failed")
+	var starts atomic.Int32
+	launcher := newUIProcessTestLauncher(&starts, nil)
+	focusEntered := make(chan struct{})
+	releaseFocus := make(chan struct{})
+	launcher.focus = func(context.Context) error {
+		close(focusEntered)
+		<-releaseFocus
+		return errors.New("focus failed")
+	}
+	recoverySignalEntered := make(chan struct{})
+	releaseRecoverySignal := make(chan struct{})
+	var signalCalls atomic.Int32
+	launcher.signal = func(process *os.Process, signal os.Signal) error {
+		switch signalCalls.Add(1) {
+		case 1:
+			close(recoverySignalEntered)
+			<-releaseRecoverySignal
+			return recoverySignalErr
+		default:
+			return process.Signal(signal)
+		}
+	}
+	var killCalls atomic.Int32
+	launcher.kill = func(process *os.Process) error {
+		if killCalls.Add(1) == 1 {
+			return recoveryKillErr
+		}
+		return process.Kill()
+	}
+	if err := launcher.Show(context.Background()); err != nil {
+		t.Fatalf("first Show() error = %v", err)
+	}
+	showResult := make(chan error, 1)
+	go func() { showResult <- launcher.Show(context.Background()) }()
+	<-focusEntered
+	close(releaseFocus)
+	<-recoverySignalEntered
+	stopResult := make(chan error, 1)
+	go func() { stopResult <- launcher.Stop(context.Background()) }()
+	close(releaseRecoverySignal)
+	showErr := <-showResult
+	if !errors.Is(showErr, recoverySignalErr) || !errors.Is(showErr, recoveryKillErr) {
+		t.Fatalf("recovery Show() error = %v, want injected stop failures", showErr)
+	}
+	select {
+	case err := <-stopResult:
+		if err != nil {
+			t.Fatalf("terminal Stop() error = %v, want one successful terminal attempt", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminal Stop() waited on live child instead of recovery operation")
+	}
+	if got := signalCalls.Load(); got != 2 {
+		t.Fatalf("signal calls = %d, want one recovery and one terminal attempt", got)
+	}
+	if got := killCalls.Load(); got != 1 {
+		t.Fatalf("kill calls = %d, want only failed recovery fallback", got)
+	}
+}
+
+func TestProcessLauncherConcurrentStopJoinsFailedLeaderThenRetriesOnce(t *testing.T) {
+	leaderSignalErr := errors.New("leader signal failed")
+	leaderKillErr := errors.New("leader kill failed")
+	var starts atomic.Int32
+	launcher := newUIProcessTestLauncher(&starts, nil)
+	leaderSignalEntered := make(chan struct{})
+	releaseLeaderSignal := make(chan struct{})
+	var signalCalls atomic.Int32
+	launcher.signal = func(process *os.Process, signal os.Signal) error {
+		switch signalCalls.Add(1) {
+		case 1:
+			close(leaderSignalEntered)
+			<-releaseLeaderSignal
+			return leaderSignalErr
+		default:
+			return process.Signal(signal)
+		}
+	}
+	var killCalls atomic.Int32
+	launcher.kill = func(process *os.Process) error {
+		if killCalls.Add(1) == 1 {
+			return leaderKillErr
+		}
+		return process.Kill()
+	}
+	if err := launcher.Show(context.Background()); err != nil {
+		t.Fatalf("Show() error = %v", err)
+	}
+	leaderResult := make(chan error, 1)
+	go func() { leaderResult <- launcher.Stop(context.Background()) }()
+	<-leaderSignalEntered
+	joinerResult := make(chan error, 1)
+	go func() { joinerResult <- launcher.Stop(context.Background()) }()
+	close(releaseLeaderSignal)
+	leaderErr := <-leaderResult
+	if !errors.Is(leaderErr, leaderSignalErr) || !errors.Is(leaderErr, leaderKillErr) {
+		t.Fatalf("leader Stop() error = %v, want injected failures", leaderErr)
+	}
+	select {
+	case err := <-joinerResult:
+		if err != nil {
+			t.Fatalf("joiner Stop() error = %v, want one successful retry", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("joiner Stop() waited on live child after leader failure")
+	}
+	if got := signalCalls.Load(); got != 2 {
+		t.Fatalf("signal calls = %d, want one leader and one joiner attempt", got)
+	}
+	if got := killCalls.Load(); got != 1 {
+		t.Fatalf("kill calls = %d, want only failed leader fallback", got)
+	}
+}
+
 func TestUIProcessHelper(t *testing.T) {
 	if os.Getenv("REMOTE_DOCKER_UI_HELPER") != "1" {
 		return
