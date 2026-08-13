@@ -221,8 +221,8 @@ func TestProcessLauncherRecoveryFailsClosedWhenStopChangesOwnership(t *testing.T
 		return errors.New("focus failed")
 	}
 	err := launcher.Show(context.Background())
-	if err == nil || !errors.Is(err, errUIChildOwnershipChanged) {
-		t.Fatalf("recovery Show() error = %v, want ownership changed", err)
+	if err == nil || !errors.Is(err, errUIProcessLauncherClosed) {
+		t.Fatalf("recovery Show() error = %v, want launcher closed", err)
 	}
 	if got := starts.Load(); got != 1 {
 		t.Fatalf("starts = %d, want no replacement after ownership change", got)
@@ -478,8 +478,8 @@ func TestProcessLauncherShowFailsClosedWhileExactChildIsStopping(t *testing.T) {
 		focusCalls.Add(1)
 		return nil
 	}
-	if err := launcher.Show(context.Background()); !errors.Is(err, errUIChildOwnershipChanged) {
-		t.Fatalf("Show() error = %v, want fail-closed ownership error", err)
+	if err := launcher.Show(context.Background()); !errors.Is(err, errUIProcessLauncherClosed) {
+		t.Fatalf("Show() error = %v, want fail-closed launcher error", err)
 	}
 	if got := focusCalls.Load(); got != 0 {
 		t.Fatalf("focus calls = %d while child stopping, want 0", got)
@@ -487,6 +487,162 @@ func TestProcessLauncherShowFailsClosedWhileExactChildIsStopping(t *testing.T) {
 	close(release)
 	if err := <-stopResult; err != nil {
 		t.Fatalf("Stop() error = %v", err)
+	}
+}
+
+func TestProcessLauncherRecoveryTreatsExactNaturalExitAsSuccessfulStop(t *testing.T) {
+	var starts atomic.Int32
+	waitReturned := make(chan struct{})
+	releaseCallback := make(chan struct{})
+	var waits atomic.Int32
+	launcher := newUIProcessTestLauncher(&starts, nil)
+	launcher.wait = func(command *exec.Cmd) error {
+		err := command.Wait()
+		if waits.Add(1) == 1 {
+			close(waitReturned)
+			<-releaseCallback
+		}
+		return err
+	}
+	launcher.focus = func(context.Context) error {
+		launcher.mu.Lock()
+		process := launcher.process.Process
+		launcher.mu.Unlock()
+		if err := process.Kill(); err != nil {
+			t.Fatalf("end exact child: %v", err)
+		}
+		<-waitReturned
+		return errors.New("focus lost during natural exit")
+	}
+	var releaseOnce sync.Once
+	launcher.signal = func(*os.Process, os.Signal) error {
+		releaseOnce.Do(func() { close(releaseCallback) })
+		return os.ErrProcessDone
+	}
+	launcher.kill = func(*os.Process) error { return os.ErrProcessDone }
+	if err := launcher.Show(context.Background()); err != nil {
+		t.Fatalf("first Show() error = %v", err)
+	}
+	if err := launcher.Show(context.Background()); err != nil {
+		t.Fatalf("recovery Show() error = %v, want natural exit replacement", err)
+	}
+	if got := starts.Load(); got != 2 {
+		t.Fatalf("starts = %d, want one replacement", got)
+	}
+	launcher.signal = nil
+	launcher.kill = nil
+	stopLauncherForTest(t, launcher)
+}
+
+func TestProcessLauncherStopTreatsExactNaturalExitAsSuccess(t *testing.T) {
+	var starts atomic.Int32
+	waitReturned := make(chan struct{})
+	releaseCallback := make(chan struct{})
+	launcher := newUIProcessTestLauncher(&starts, func(_ int32, command *exec.Cmd) {
+		command.Env = append(command.Env, "REMOTE_DOCKER_UI_HELPER_ACTION=exit")
+	})
+	launcher.wait = func(command *exec.Cmd) error {
+		err := command.Wait()
+		close(waitReturned)
+		<-releaseCallback
+		return err
+	}
+	if err := launcher.Show(context.Background()); err != nil {
+		t.Fatalf("Show() error = %v", err)
+	}
+	<-waitReturned
+	var releaseOnce sync.Once
+	launcher.signal = func(*os.Process, os.Signal) error {
+		releaseOnce.Do(func() { close(releaseCallback) })
+		return os.ErrProcessDone
+	}
+	launcher.kill = func(*os.Process) error { return os.ErrProcessDone }
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := launcher.Stop(ctx); err != nil {
+		t.Fatalf("Stop() error = %v, want exact natural exit success", err)
+	}
+}
+
+func TestProcessLauncherStopClosesLauncherAgainstFutureShow(t *testing.T) {
+	var starts atomic.Int32
+	launcher := newUIProcessTestLauncher(&starts, nil)
+	if err := launcher.Show(context.Background()); err != nil {
+		t.Fatalf("Show() error = %v", err)
+	}
+	stopLauncherForTest(t, launcher)
+	if err := launcher.Show(context.Background()); !errors.Is(err, errUIProcessLauncherClosed) {
+		t.Fatalf("Show() after terminal Stop error = %v, want launcher closed", err)
+	}
+	if got := starts.Load(); got != 1 {
+		t.Fatalf("starts = %d, want no start after terminal Stop", got)
+	}
+}
+
+func TestProcessLauncherTerminalStopPreventsInflightRecoveryReplacement(t *testing.T) {
+	var starts atomic.Int32
+	ready := make(chan struct{})
+	launcher := newUIProcessTestLauncher(&starts, func(_ int32, command *exec.Cmd) {
+		command.Env = append(command.Env, "REMOTE_DOCKER_UI_HELPER_ACTION=ready")
+		command.Stdout = &readyWriter{ready: ready}
+	})
+	focusEntered := make(chan struct{})
+	releaseFocus := make(chan struct{})
+	launcher.focus = func(context.Context) error {
+		close(focusEntered)
+		<-releaseFocus
+		return errors.New("focus failed")
+	}
+	if err := launcher.Show(context.Background()); err != nil {
+		t.Fatalf("first Show() error = %v", err)
+	}
+	<-ready
+	showResult := make(chan error, 1)
+	go func() { showResult <- launcher.Show(context.Background()) }()
+	<-focusEntered
+	stopResult := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		stopResult <- launcher.Stop(ctx)
+	}()
+	if err := <-stopResult; err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	close(releaseFocus)
+	if err := <-showResult; !errors.Is(err, errUIProcessLauncherClosed) {
+		t.Fatalf("in-flight Show() error = %v, want launcher closed", err)
+	}
+	if got := starts.Load(); got != 1 {
+		t.Fatalf("starts = %d, want no replacement after terminal Stop", got)
+	}
+}
+
+func TestProcessLauncherFailedStopStaysClosedAndAllowsStopRetry(t *testing.T) {
+	wantSignalErr := errors.New("signal failed")
+	wantKillErr := errors.New("kill failed")
+	var starts atomic.Int32
+	launcher := newUIProcessTestLauncher(&starts, nil)
+	launcher.signal = func(*os.Process, os.Signal) error { return wantSignalErr }
+	launcher.kill = func(*os.Process) error { return wantKillErr }
+	if err := launcher.Show(context.Background()); err != nil {
+		t.Fatalf("Show() error = %v", err)
+	}
+	if err := launcher.Stop(context.Background()); !errors.Is(err, wantSignalErr) || !errors.Is(err, wantKillErr) {
+		t.Fatalf("first Stop() error = %v, want signal and kill errors", err)
+	}
+	if err := launcher.Show(context.Background()); !errors.Is(err, errUIProcessLauncherClosed) {
+		t.Fatalf("Show() after failed terminal Stop error = %v, want launcher closed", err)
+	}
+	if got := starts.Load(); got != 1 {
+		t.Fatalf("starts = %d, want no start after failed terminal Stop", got)
+	}
+	launcher.signal = nil
+	launcher.kill = nil
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := launcher.Stop(ctx); err != nil {
+		t.Fatalf("second Stop() retry error = %v", err)
 	}
 }
 
