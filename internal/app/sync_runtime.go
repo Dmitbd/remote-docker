@@ -46,11 +46,29 @@ type productionSyncReadiness struct {
 	interval   time.Duration
 }
 
+func (r productionSyncReadiness) EnsurePeer(ctx context.Context) error {
+	client, cfg, device, folders, err := r.peerConfiguration()
+	if err != nil {
+		return err
+	}
+	return r.configurePeer(ctx, client, cfg, device, folders)
+}
+
 func (r productionSyncReadiness) EnsureFolder(ctx context.Context, requested workspace.ResolvedPath) error {
 	client, cfg, device, folders, err := r.configuration(requested)
 	if err != nil {
 		return err
 	}
+	return r.configurePeer(ctx, client, cfg, device, folders)
+}
+
+func (r productionSyncReadiness) configurePeer(
+	ctx context.Context,
+	client *syncer.Client,
+	cfg config.Config,
+	device config.Device,
+	folders []remoteWorkspaceFolder,
+) error {
 	interval := r.interval
 	if interval <= 0 {
 		interval = 250 * time.Millisecond
@@ -135,6 +153,24 @@ func (r productionSyncReadiness) WaitBoth(ctx context.Context, requested workspa
 func (r productionSyncReadiness) configuration(
 	requested workspace.ResolvedPath,
 ) (*syncer.Client, config.Config, config.Device, []remoteWorkspaceFolder, error) {
+	client, cfg, device, folders, err := r.peerConfiguration()
+	if err != nil {
+		return nil, config.Config{}, config.Device{}, nil, err
+	}
+	registered, ok := cfg.Workspaces[requested.WorkspaceID]
+	if !ok || registered.Path != requested.Local || requested.Remote != requested.Local {
+		return nil, config.Config{}, config.Device{}, nil, errors.New("managed workspace does not match registration")
+	}
+	return client, cfg, device, folders, nil
+}
+
+func (r productionSyncReadiness) peerConfiguration() (
+	*syncer.Client,
+	config.Config,
+	config.Device,
+	[]remoteWorkspaceFolder,
+	error,
+) {
 	cfg, err := loadAgentConfig(r.store)
 	if err != nil || cfg.ActiveDevice == "" || strings.TrimSpace(cfg.LocalSyncthingDeviceID) == "" {
 		return nil, config.Config{}, config.Device{}, nil, errors.New("Syncthing pairing is incomplete")
@@ -142,10 +178,6 @@ func (r productionSyncReadiness) configuration(
 	device, ok := cfg.Devices[cfg.ActiveDevice]
 	if !ok || strings.TrimSpace(device.SyncthingDeviceID) == "" {
 		return nil, config.Config{}, config.Device{}, nil, errors.New("paired Syncthing device is unavailable")
-	}
-	registered, ok := cfg.Workspaces[requested.WorkspaceID]
-	if !ok || registered.Path != requested.Local || requested.Remote != requested.Local {
-		return nil, config.Config{}, config.Device{}, nil, errors.New("managed workspace does not match registration")
 	}
 	ids := make([]string, 0, len(cfg.Workspaces))
 	for id := range cfg.Workspaces {

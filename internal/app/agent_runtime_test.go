@@ -150,6 +150,28 @@ func TestProductionAgentRuntimeServesPersistedStateOverLocalSocket(t *testing.T)
 	}
 }
 
+func TestNewProductionAgentRuntimeWiresSyncthingBootstrapIntoMacConnection(t *testing.T) {
+	root := t.TempDir()
+	runtimeAgent, err := NewProductionAgentRuntime(ProductionAgentOptions{
+		ConfigPath:     filepath.Join(root, "config.json"),
+		ExecutablePath: filepath.Join(root, "bin", "remote-docker-agent"),
+	})
+	if err != nil {
+		t.Fatalf("NewProductionAgentRuntime() error = %v", err)
+	}
+	machine, err := lifecycle.NewMachine(lifecycle.RoleMacClient, "MacBook")
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	if err := runtimeAgent.BindLifecycle(machine, "0.2.9"); err != nil {
+		t.Fatalf("BindLifecycle() error = %v", err)
+	}
+	connection, ok := runtimeAgent.connection.(*clientConnectionRuntime)
+	if !ok || connection.prepare == nil {
+		t.Fatalf("Mac connection runtime sync bootstrap = %#v", runtimeAgent.connection)
+	}
+}
+
 func TestUpgradeConfigPersistsCurrentSchemaUnderStateLock(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, []byte(`{"schemaVersion":5,"workspaces":{"saved":{"path":"/tmp/saved"}}}`), 0o600); err != nil {

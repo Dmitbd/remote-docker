@@ -18,6 +18,109 @@ import (
 	"github.com/Dmitbd/remote-docker/internal/workspace"
 )
 
+func TestProductionSyncReadinessEnsurePeerConfiguresFreshPairWithoutFolders(t *testing.T) {
+	var devices []syncer.DeviceConfig
+	var folders []syncer.FolderConfig
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/rest/system/connections":
+			_, _ = response.Write([]byte(`{"connections":{}}`))
+		case "/rest/config/devices":
+			if err := json.NewDecoder(request.Body).Decode(&devices); err != nil {
+				t.Fatalf("decode devices: %v", err)
+			}
+			response.WriteHeader(http.StatusNoContent)
+		case "/rest/config/folders":
+			if err := json.NewDecoder(request.Body).Decode(&folders); err != nil {
+				t.Fatalf("decode folders: %v", err)
+			}
+			response.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected local Syncthing request %s %s", request.Method, request.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	readiness, remote := testSyncReadiness(t, server, nil)
+	if err := readiness.EnsurePeer(context.Background()); err != nil {
+		t.Fatalf("EnsurePeer() error = %v", err)
+	}
+	if len(devices) != 1 || devices[0].DeviceID != "WINDOWS-SYNC" ||
+		!reflect.DeepEqual(devices[0].Addresses, []string{"tcp://127.0.0.1:49220"}) {
+		t.Fatalf("local devices = %#v", devices)
+	}
+	if len(folders) != 0 {
+		t.Fatalf("fresh peer folders = %#v, want none", folders)
+	}
+	if remote.deviceID != "MAC-SYNC" || len(remote.folders) != 0 {
+		t.Fatalf("remote bootstrap = %#v", remote)
+	}
+}
+
+func TestProductionSyncReadinessEnsurePeerPreservesManagedFolders(t *testing.T) {
+	var folders []syncer.FolderConfig
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/rest/system/connections":
+			_, _ = response.Write([]byte(`{"connections":{}}`))
+		case "/rest/config/devices":
+			response.WriteHeader(http.StatusNoContent)
+		case "/rest/config/folders":
+			if err := json.NewDecoder(request.Body).Decode(&folders); err != nil {
+				t.Fatalf("decode folders: %v", err)
+			}
+			response.WriteHeader(http.StatusNoContent)
+		case "/rest/db/ignores":
+			response.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected local Syncthing request %s %s", request.Method, request.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	workspaces := map[string]config.Workspace{
+		"fedcba9876543210": {Path: "/Users/demo/other"},
+		"0123456789abcdef": {Path: "/Users/demo/project"},
+	}
+	readiness, remote := testSyncReadiness(t, server, workspaces)
+	if err := readiness.EnsurePeer(context.Background()); err != nil {
+		t.Fatalf("EnsurePeer() error = %v", err)
+	}
+	if len(folders) != 2 || folders[0].ID != "0123456789abcdef" || folders[1].ID != "fedcba9876543210" {
+		t.Fatalf("local folders = %#v", folders)
+	}
+	if len(remote.folders) != 2 || remote.folders[0].ID != "0123456789abcdef" || remote.folders[1].ID != "fedcba9876543210" {
+		t.Fatalf("remote folders = %#v", remote.folders)
+	}
+}
+
+func testSyncReadiness(
+	t *testing.T,
+	server *httptest.Server,
+	workspaces map[string]config.Workspace,
+) (productionSyncReadiness, *recordingRemoteSyncOperations) {
+	t.Helper()
+	store := config.Store{Path: filepath.Join(t.TempDir(), "config.json")}
+	if err := store.Save(config.Config{
+		SchemaVersion: config.CurrentSchemaVersion,
+		ActiveDevice:  "pc-1", LocalSyncthingDeviceID: "MAC-SYNC", LocalSyncthingIdentity: []byte("sealed"),
+		Devices: map[string]config.Device{
+			"pc-1": {Name: "Windows PC", SyncthingDeviceID: "WINDOWS-SYNC"},
+		},
+		Workspaces: workspaces,
+	}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	secrets := credentials.NewMemoryStore()
+	if err := secrets.Put(localSyncthingCredentialOwner, syncer.SyncthingAPIKeyCredential, []byte("local-api-key")); err != nil {
+		t.Fatalf("store API key: %v", err)
+	}
+	remote := &recordingRemoteSyncOperations{}
+	return productionSyncReadiness{
+		store: store, secrets: secrets, httpClient: server.Client(), endpoint: server.URL, remote: remote,
+	}, remote
+}
+
 func TestProductionSyncReadinessConfiguresScansAndWaitsForBothPeers(t *testing.T) {
 	var requests []string
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {

@@ -95,6 +95,7 @@ type AgentRuntime struct {
 	pairingAfter    func()
 	pairingRuntime  *pairingLifecycleReconciler
 	startupRecover  func(context.Context) error
+	syncBootstrap   func(context.Context) error
 
 	sessionMu      sync.Mutex
 	sessionCancel  context.CancelFunc
@@ -297,11 +298,14 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 	})
 	syncInspector := productionSyncInspector{secrets: secrets, httpClient: httpClient}
 	var syncReadiness SyncReadiness
+	var syncBootstrap func(context.Context) error
 	if runtime.GOOS != "windows" {
-		syncReadiness = productionSyncReadiness{
+		readiness := productionSyncReadiness{
 			store: store, secrets: secrets, httpClient: syncHTTPClient,
 			remote: sshRemoteSync{store: store, sshConfigPath: sshConfigPath},
 		}
+		syncReadiness = readiness
+		syncBootstrap = readiness.EnsurePeer
 	}
 	var remoteMetrics metrics.RemoteSampler
 	if runtime.GOOS != "windows" {
@@ -362,6 +366,7 @@ func NewProductionAgentRuntime(options ProductionAgentOptions) (*AgentRuntime, e
 			return nil
 		}(),
 		startupRecover: selectStartupRecovery(runtime.GOOS, agent.Reconnect, startupSelfHeal),
+		syncBootstrap:  syncBootstrap,
 	}, nil
 }
 
@@ -410,7 +415,7 @@ func (r *AgentRuntime) BindLifecycle(machine *lifecycle.Machine, appVersion stri
 		return nil
 	}
 	r.connection = &clientConnectionRuntime{
-		machine: machine,
+		machine: machine, prepare: r.syncBootstrap,
 		ready: func() bool {
 			return r.agent != nil && r.agent.Status().State == AgentReady && r.tunnelReady != nil && r.tunnelReady.Load()
 		},
