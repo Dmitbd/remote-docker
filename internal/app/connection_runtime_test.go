@@ -2,12 +2,56 @@ package app
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
 	"github.com/Dmitbd/remote-docker/internal/windowsbridge"
 )
+
+func TestClientConnectionRuntimeRetriesSyncBootstrapBeforePresence(t *testing.T) {
+	now := time.Now()
+	machine := trustedLifecycleMachine(t, lifecycle.RoleMacClient, &now)
+	transport := &recordingPresenceTransport{sessionID: "session"}
+	prepares := 0
+	starts := 0
+	runtime := &clientConnectionRuntime{
+		machine: machine, clientDeviceID: func() string { return "mac-sync" },
+		prepare: func(context.Context) error {
+			prepares++
+			if prepares == 1 {
+				return errors.New("sync peer unavailable")
+			}
+			return nil
+		},
+		ready:     func() bool { return true },
+		localName: "MacBook", appVersion: "0.2.9",
+		transport: func(context.Context) (PresenceTransport, error) {
+			starts++
+			return transport, nil
+		},
+	}
+
+	if err := runtime.step(context.Background()); err == nil {
+		t.Fatal("first step succeeded before Syncthing peer bootstrap")
+	}
+	if starts != 0 {
+		t.Fatalf("transport starts before bootstrap = %d, want 0", starts)
+	}
+	if err := runtime.step(context.Background()); err != nil {
+		t.Fatalf("second step error = %v", err)
+	}
+	if starts != 1 || prepares != 2 {
+		t.Fatalf("after bootstrap starts=%d prepares=%d, want 1/2", starts, prepares)
+	}
+	if err := runtime.step(context.Background()); err != nil {
+		t.Fatalf("third step error = %v", err)
+	}
+	if prepares != 2 {
+		t.Fatalf("successful bootstrap repeated: prepares=%d, want 2", prepares)
+	}
+}
 
 func TestClientConnectionRuntimeCreatesOneAuthenticatedLeaseAndDrivesReadiness(t *testing.T) {
 	now := time.Now()

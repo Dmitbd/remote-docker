@@ -24,6 +24,7 @@ type presenceTransportFactory func(context.Context) (PresenceTransport, error)
 type clientConnectionRuntime struct {
 	machine        *lifecycle.Machine
 	clientDeviceID func() string
+	prepare        func(context.Context) error
 	ready          func() bool
 	localName      string
 	appVersion     string
@@ -33,6 +34,7 @@ type clientConnectionRuntime struct {
 	lifetimeCtx     context.Context
 	active          *ClientPresence
 	activeTransport PresenceTransport
+	prepared        bool
 }
 
 func (r *clientConnectionRuntime) Run(ctx context.Context, interval time.Duration) error {
@@ -44,6 +46,7 @@ func (r *clientConnectionRuntime) Run(ctx context.Context, interval time.Duratio
 	}
 	r.mu.Lock()
 	r.lifetimeCtx = ctx
+	r.prepared = false
 	r.mu.Unlock()
 	r.stepBounded(ctx)
 	ticker := time.NewTicker(interval)
@@ -72,6 +75,12 @@ func (r *clientConnectionRuntime) step(ctx context.Context) error {
 	if snapshot.TrustedPeers != 1 || snapshot.Peer == nil || snapshot.State == lifecycle.StatePaused ||
 		snapshot.State == lifecycle.StateStopping || snapshot.State == lifecycle.StateNeedsAction || snapshot.Terminal {
 		return nil
+	}
+	if !r.prepared && r.prepare != nil {
+		if err := r.prepare(ctx); err != nil {
+			return err
+		}
+		r.prepared = true
 	}
 	if !r.ready() {
 		if snapshot.State == lifecycle.StateConnected {
