@@ -26,8 +26,8 @@ type DesktopController struct {
 }
 
 type pendingTrustRevoke struct {
-	deviceID  string
-	sessionID string
+	deviceID   string
+	generation string
 }
 
 func NewDesktopController(supervisor *Supervisor, fallback localapi.Handler) (*DesktopController, error) {
@@ -36,27 +36,27 @@ func NewDesktopController(supervisor *Supervisor, fallback localapi.Handler) (*D
 	}
 	controller := &DesktopController{supervisor: supervisor, fallback: fallback}
 	if binder, ok := fallback.(trustRevokedObserverBinder); ok {
-		binder.bindTrustRevokedObserver(func(_ context.Context, deviceID, sessionID string) error {
-			return controller.observeWindowsTrustRevoked(deviceID, sessionID)
+		binder.bindTrustRevokedObserver(func(_ context.Context, deviceID, generation string) error {
+			return controller.observeWindowsTrustRevoked(deviceID, generation)
 		})
 	}
 	return controller, nil
 }
 
-func (c *DesktopController) observeWindowsTrustRevoked(deviceID, sessionID string) error {
+func (c *DesktopController) observeWindowsTrustRevoked(deviceID, generation string) error {
 	c.trustRevokedMu.Lock()
 	defer c.trustRevokedMu.Unlock()
-	err := reconcileWindowsTrustRevoked(c.supervisor.machine, deviceID, sessionID)
+	err := reconcileWindowsTrustRevoked(c.supervisor.machine, deviceID, generation)
 	if err == nil {
-		if pending := c.pendingTrustRevoke; pending != nil && pending.deviceID == deviceID && pending.sessionID == sessionID {
+		if pending := c.pendingTrustRevoke; pending != nil && pending.deviceID == deviceID && pending.generation == generation {
 			c.pendingTrustRevoke = nil
 		}
 		return nil
 	}
 	snapshot := c.supervisor.Snapshot()
 	if snapshot.Role == lifecycle.RoleWindowsHost && snapshot.State == lifecycle.StateStopping &&
-		snapshot.Peer != nil && snapshot.Peer.ID == deviceID {
-		c.pendingTrustRevoke = &pendingTrustRevoke{deviceID: deviceID, sessionID: sessionID}
+		snapshot.Peer != nil && snapshot.Peer.ID == deviceID && snapshot.Peer.Generation == generation {
+		c.pendingTrustRevoke = &pendingTrustRevoke{deviceID: deviceID, generation: generation}
 	}
 	return err
 }
@@ -69,33 +69,24 @@ func (c *DesktopController) retryPendingTrustRevoke(ctx context.Context) error {
 	if pending == nil || !ok {
 		return nil
 	}
-	restorePause := c.supervisor.Snapshot().State == lifecycle.StatePaused
-	if restorePause {
-		if _, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled}); err != nil {
-			return err
-		}
+	if snapshot := c.supervisor.Snapshot(); snapshot.Terminal {
+		return errors.New("application shutdown cannot acknowledge a pending trust revoke")
 	}
-	retryErr := retryer.retryTrustRevokedObserver(ctx, pending.deviceID, pending.sessionID)
-	var pauseErr error
-	if restorePause {
-		pauseErr = c.supervisor.Pause(ctx)
-	}
-	if err := errors.Join(retryErr, pauseErr); err != nil {
+	if err := retryer.retryTrustRevokedObserver(ctx, pending.deviceID, pending.generation); err != nil {
 		return err
 	}
 	c.trustRevokedMu.Lock()
-	if current := c.pendingTrustRevoke; current != nil && current.deviceID == pending.deviceID && current.sessionID == pending.sessionID {
+	if current := c.pendingTrustRevoke; current != nil && current.deviceID == pending.deviceID && current.generation == pending.generation {
 		c.pendingTrustRevoke = nil
 	}
 	c.trustRevokedMu.Unlock()
 	return nil
 }
 
-func reconcileWindowsTrustRevoked(machine *lifecycle.Machine, deviceID, sessionID string) error {
+func reconcileWindowsTrustRevoked(machine *lifecycle.Machine, deviceID, generation string) error {
 	for attempts := 0; attempts < 6; attempts++ {
 		snapshot := machine.Snapshot()
-		if snapshot.Role == lifecycle.RoleWindowsHost && snapshot.TrustedPeers == 0 && snapshot.Pairing != nil &&
-			snapshot.Pairing.SessionID == sessionID {
+		if snapshot.Role == lifecycle.RoleWindowsHost && snapshot.TrustedPeers == 0 && snapshot.Pairing != nil {
 			switch snapshot.Pairing.Status {
 			case lifecycle.PairingPending:
 				if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingApproved}); err != nil {
@@ -104,7 +95,8 @@ func reconcileWindowsTrustRevoked(machine *lifecycle.Machine, deviceID, sessionI
 				continue
 			case lifecycle.PairingApproved:
 				if _, err := machine.Apply(lifecycle.Event{
-					Type: lifecycle.EventPairingCompleted, Peer: &lifecycle.Peer{ID: deviceID},
+					Type: lifecycle.EventPairingCompleted,
+					Peer: &lifecycle.Peer{ID: deviceID, Generation: generation},
 				}); err != nil {
 					continue
 				}
@@ -112,12 +104,12 @@ func reconcileWindowsTrustRevoked(machine *lifecycle.Machine, deviceID, sessionI
 			}
 		}
 		_, err := machine.Apply(lifecycle.Event{
-			Type: lifecycle.EventTrustRevoked, Peer: &lifecycle.Peer{ID: deviceID}, SessionID: sessionID,
+			Type: lifecycle.EventTrustRevoked, Peer: &lifecycle.Peer{ID: deviceID, Generation: generation},
 		})
 		return err
 	}
 	_, err := machine.Apply(lifecycle.Event{
-		Type: lifecycle.EventTrustRevoked, Peer: &lifecycle.Peer{ID: deviceID}, SessionID: sessionID,
+		Type: lifecycle.EventTrustRevoked, Peer: &lifecycle.Peer{ID: deviceID, Generation: generation},
 	})
 	return err
 }
@@ -534,10 +526,10 @@ func sixDigitPairCode(code string) bool {
 }
 
 func (c *DesktopController) reconcilePairing(status localapi.PairingStatusResult) error {
-	return reconcilePairingLifecycle(c.supervisor.machine, status)
+	return reconcilePairingLifecycle(c.supervisor.machine, c.fallback, status)
 }
 
-func reconcilePairingLifecycle(machine *lifecycle.Machine, status localapi.PairingStatusResult) error {
+func reconcilePairingLifecycle(machine *lifecycle.Machine, fallback localapi.Handler, status localapi.PairingStatusResult) error {
 	if machine == nil {
 		return unavailable("pairing lifecycle is unavailable")
 	}
@@ -612,6 +604,9 @@ func reconcilePairingLifecycle(machine *lifecycle.Machine, status localapi.Pairi
 		peer.ID = status.Device.ID
 		peer.Name = status.Device.Name
 		peer.Address = status.Device.Address
+		if resolver, ok := fallback.(committedPairingGenerationResolver); ok {
+			peer.Generation = resolver.committedPairingGeneration(status.Device.ID)
+		}
 		_, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCompleted, Peer: &peer})
 		return err
 	default:

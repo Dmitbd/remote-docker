@@ -334,7 +334,10 @@ func initialTrustedPeer(store config.Store, role lifecycle.Role) *lifecycle.Peer
 	if role == lifecycle.RoleWindowsHost {
 		peerOS = "macos"
 	}
-	return &lifecycle.Peer{ID: cfg.ActiveDevice, Name: device.Name, OS: peerOS, Address: device.Address}
+	return &lifecycle.Peer{
+		ID: cfg.ActiveDevice, Name: device.Name, OS: peerOS,
+		Address: device.Address, Generation: device.PairingGeneration,
+	}
 }
 
 type desktopAPIHandler struct {

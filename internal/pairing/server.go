@@ -299,21 +299,24 @@ func (s *Server) BindTrustRevokedObserver(observer func(context.Context, string,
 	}
 }
 
-// PublishTrustRevoked maps an exact durable device generation back to the
-// pairing session that committed it before publishing the lifecycle event.
+// PublishTrustRevoked retains and publishes the exact durable device
+// generation even when the pairing session belonged to an earlier process.
 func (s *Server) PublishTrustRevoked(ctx context.Context, deviceID, generation string) error {
-	if s == nil {
+	if s == nil || strings.TrimSpace(deviceID) == "" || strings.TrimSpace(generation) == "" {
 		return nil
 	}
 	s.mu.Lock()
 	s.expireLocked()
 	var completed completedTrust
-	if s.completed != nil && s.completed.deviceID == deviceID && s.completed.generation == generation {
+	if s.completed == nil || s.completed.revoked {
+		s.completed = &completedTrust{deviceID: deviceID, generation: generation, revoked: true}
+		completed = *s.completed
+	} else if s.completed.deviceID == deviceID && s.completed.generation == generation {
 		s.completed.revoked = true
 		completed = *s.completed
 	}
 	s.mu.Unlock()
-	if completed.sessionID == "" {
+	if completed.deviceID == "" {
 		return nil
 	}
 	return s.deliverTrustRevoked(ctx, completed)
@@ -321,17 +324,17 @@ func (s *Server) PublishTrustRevoked(ctx context.Context, deviceID, generation s
 
 // RetryTrustRevoked redelivers only the exact durable revoke retained after a
 // lifecycle observer could not acknowledge it during a state transition.
-func (s *Server) RetryTrustRevoked(ctx context.Context, deviceID, sessionID string) error {
+func (s *Server) RetryTrustRevoked(ctx context.Context, deviceID, generation string) error {
 	if s == nil {
 		return nil
 	}
 	s.mu.Lock()
 	var completed completedTrust
-	if s.completed != nil && s.completed.revoked && s.completed.deviceID == deviceID && s.completed.sessionID == sessionID {
+	if s.completed != nil && s.completed.revoked && s.completed.deviceID == deviceID && s.completed.generation == generation {
 		completed = *s.completed
 	}
 	s.mu.Unlock()
-	if completed.sessionID == "" {
+	if completed.deviceID == "" {
 		return nil
 	}
 	return s.deliverTrustRevoked(ctx, completed)
@@ -340,8 +343,8 @@ func (s *Server) RetryTrustRevoked(ctx context.Context, deviceID, sessionID stri
 func (s *Server) deliverTrustRevoked(ctx context.Context, completed completedTrust) error {
 	for attempts := 0; attempts < 2; attempts++ {
 		s.mu.Lock()
-		if s.completed == nil || !s.completed.revoked || s.completed.sessionID != completed.sessionID ||
-			s.completed.deviceID != completed.deviceID || s.completed.generation != completed.generation {
+		if s.completed == nil || !s.completed.revoked || s.completed.deviceID != completed.deviceID ||
+			s.completed.generation != completed.generation {
 			s.mu.Unlock()
 			return nil
 		}
@@ -351,7 +354,7 @@ func (s *Server) deliverTrustRevoked(ctx context.Context, completed completedTru
 		if observer == nil {
 			return ErrSessionState
 		}
-		if err := observer(ctx, completed.deviceID, completed.sessionID); err != nil {
+		if err := observer(ctx, completed.deviceID, completed.generation); err != nil {
 			return err
 		}
 		s.mu.Lock()
@@ -359,8 +362,8 @@ func (s *Server) deliverTrustRevoked(ctx context.Context, completed completedTru
 			s.mu.Unlock()
 			continue
 		}
-		if s.completed != nil && s.completed.revoked && s.completed.sessionID == completed.sessionID &&
-			s.completed.deviceID == completed.deviceID && s.completed.generation == completed.generation {
+		if s.completed != nil && s.completed.revoked && s.completed.deviceID == completed.deviceID &&
+			s.completed.generation == completed.generation {
 			s.completed = nil
 		}
 		s.mu.Unlock()

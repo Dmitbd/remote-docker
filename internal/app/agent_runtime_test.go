@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -247,6 +248,37 @@ func TestPairingLifecycleReconcilerDiscoversWindowsRequestWithoutDesktopPolling(
 	}
 	if firstParams.SessionID != "" || !firstParams.ObserveOnly {
 		t.Fatalf("first background params = %#v", firstParams)
+	}
+}
+
+func TestPairingLifecycleReconcilerCommitsWindowsTrustWithDurableGeneration(t *testing.T) {
+	machine := newLifecycleMachine(t, lifecycle.RoleWindowsHost)
+	if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &lifecycle.Pairing{
+		SessionID: "session-1", Peer: lifecycle.Peer{ID: "temporary-mac", Name: "Mac"}, Code: "123456",
+		Status: lifecycle.PairingPending, ExpiresAt: time.Now().Add(time.Minute),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	handler := &generationPairingHandler{
+		generation: "generation-one",
+		result: localapi.PairingStatusResult{
+			SessionID: "session-1", Status: string(pairing.SessionCompleted),
+			Peer:   localapi.LifecyclePeer{ID: "temporary-mac", Name: "Mac"},
+			Device: &localapi.Device{ID: "mac-one", Name: "Mac"},
+		},
+	}
+	reconciler := &pairingLifecycleReconciler{machine: machine, handler: handler}
+
+	if err := reconciler.reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile completed Windows pairing: %v", err)
+	}
+	snapshot := machine.Snapshot()
+	if snapshot.State != lifecycle.StateConnecting || snapshot.Pairing != nil || snapshot.TrustedPeers != 1 ||
+		snapshot.Peer == nil || snapshot.Peer.ID != "mac-one" || snapshot.Peer.Generation != "generation-one" {
+		t.Fatalf("completed Windows lifecycle = %#v", snapshot)
 	}
 }
 
@@ -4697,7 +4729,9 @@ func TestWindowsProofRevokeClearsExactLifecycleTrustAfterDurableSave(t *testing.
 	if _, _, err := client.Confirm(context.Background(), code); err != nil {
 		t.Fatalf("Confirm() error = %v", err)
 	}
-	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCompleted, Peer: &lifecycle.Peer{ID: "mac-one", Name: "Mac"}})
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCompleted, Peer: &lifecycle.Peer{
+		ID: "mac-one", Name: "Mac", Generation: "generation-one",
+	}})
 	completed, err := coordinator.Cancel(context.Background(), descriptor.ID)
 	if err != nil || completed.Status != string(pairing.SessionCompleted) || completed.Device == nil || completed.Device.ID != "mac-one" {
 		t.Fatalf("Cancel() after durable completion = %#v error=%v", completed, err)
@@ -4740,6 +4774,76 @@ func TestWindowsProofRevokeClearsExactLifecycleTrustAfterDurableSave(t *testing.
 	}
 	if _, _, pending := host.server.CompletedTrust(descriptor.ID); pending {
 		t.Fatal("acknowledged completed ownership was not retired")
+	}
+}
+
+func TestWindowsProofRevokeClearsRestoredLifecycleTrustAfterRestart(t *testing.T) {
+	store := config.Store{Path: filepath.Join(t.TempDir(), "config.json")}
+	var saveCalls atomic.Int32
+	registry := windowsPairingRegistry{
+		store: store,
+		saveConfig: func(cfg config.Config) error {
+			saveCalls.Add(1)
+			return store.Save(cfg)
+		},
+	}
+	proof := bytes.Repeat([]byte{7}, pairing.RevocationProofSize)
+	peerKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Commit(context.Background(), pairing.TrustedPeer{
+		DeviceID: "mac-one", Generation: "generation-one", PublicKey: peerKey,
+		RevocationProofHash: sha256.Sum256(proof),
+	}); err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	installer := &runtimePairingInstaller{}
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := tunnel.Identity{PrivateKey: privateKey, PublicKey: publicKey}
+	host, err := newWindowsPairingHostWithRegistryAndIdentity(installer, registry, identity)
+	if err != nil {
+		t.Fatalf("newWindowsPairingHostWithRegistryAndIdentity() error = %v", err)
+	}
+	coordinator := &windowsPairingCoordinator{server: host.server, installer: installer, registry: &registry}
+	agent := NewAgent(nil, nil, &productionAgentController{pairing: coordinator})
+	restored, err := lifecycle.NewMachine(
+		lifecycle.RoleWindowsHost,
+		"Windows",
+		lifecycle.WithTrustedPeer(lifecycle.Peer{
+			ID: "mac-one", Name: "Mac", Generation: registry.committedGeneration("mac-one"),
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	supervisor, _ := NewSupervisor(restored, newRecordingSessionRuntime())
+	controller, err := NewDesktopController(supervisor, agent)
+	if err != nil {
+		t.Fatalf("NewDesktopController() error = %v", err)
+	}
+
+	if err := registry.RevokeWithProof(
+		context.Background(), installer, "mac-one", "generation-one", proof,
+		func(ctx context.Context, deviceID, generation string) error {
+			return host.server.PublishTrustRevoked(ctx, deviceID, generation)
+		},
+	); err != nil {
+		t.Fatalf("RevokeWithProof() error = %v", err)
+	}
+	got := restored.Snapshot()
+	if got.State != lifecycle.StatePaused || got.TrustedPeers != 0 || got.Peer != nil ||
+		controller.pendingTrustRevoke != nil || installer.revokes != 1 || saveCalls.Load() != 2 {
+		t.Fatalf("restored lifecycle after revoke = %#v pending=%#v revokes=%d saves=%d", got, controller.pendingTrustRevoke, installer.revokes, saveCalls.Load())
+	}
+	if err := host.server.RetryTrustRevoked(context.Background(), "mac-one", "generation-one"); err != nil {
+		t.Fatalf("acknowledged RetryTrustRevoked() error = %v", err)
+	}
+	if installer.revokes != 1 || saveCalls.Load() != 2 {
+		t.Fatalf("local retry repeated durable effects: revokes=%d saves=%d", installer.revokes, saveCalls.Load())
 	}
 }
 
@@ -4811,6 +4915,19 @@ func TestManagedSSHRuntimeEnsureRestartsDeadAgentForReconnect(t *testing.T) {
 type runtimePairingInstaller struct {
 	device  pairing.DeviceInfo
 	revokes int
+}
+
+type generationPairingHandler struct {
+	result     localapi.PairingStatusResult
+	generation string
+}
+
+func (h *generationPairingHandler) Handle(context.Context, localapi.Method, json.RawMessage) (any, error) {
+	return h.result, nil
+}
+
+func (h *generationPairingHandler) committedPairingGeneration(string) string {
+	return h.generation
 }
 
 type trustRevokedBindingCoordinator struct {

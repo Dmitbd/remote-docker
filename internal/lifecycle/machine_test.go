@@ -483,26 +483,22 @@ func TestStopFailureRestoresCancellablePairingWithoutClearingComparisonCode(t *t
 	}
 }
 
-func TestTrustRevokedRequiresExactWindowsPeerAndPairingSession(t *testing.T) {
-	machine := mustMachine(t, RoleWindowsHost)
+func TestTrustRevokedRequiresExactWindowsPeerGeneration(t *testing.T) {
+	trusted := Peer{ID: "mac-one", Name: "Mac", Generation: "generation-one"}
+	machine, err := NewMachine(RoleWindowsHost, "Windows", WithTrustedPeer(trusted))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
 	mustApply(t, machine, Event{Type: EventEnabled})
-	pairing := Pairing{
-		SessionID: "session-current", Peer: Peer{ID: "mac-current", Name: "Mac"}, Code: "123456",
-	}
-	mustApply(t, machine, Event{Type: EventPairingStarted, Pairing: &pairing})
-	mustApply(t, machine, Event{Type: EventPairingApproved})
-	connecting := mustApply(t, machine, Event{Type: EventPairingCompleted, Peer: &pairing.Peer})
-	if connecting.State != StateConnecting || connecting.TrustedPeers != 1 || connecting.Peer == nil {
-		t.Fatalf("pre-revoke snapshot = %#v", connecting)
-	}
 
-	for _, event := range []Event{
-		{Type: EventTrustRevoked, Peer: &Peer{ID: pairing.Peer.ID}, SessionID: "session-old"},
-		{Type: EventTrustRevoked, Peer: &Peer{ID: "mac-old"}, SessionID: pairing.SessionID},
+	for _, peer := range []Peer{
+		{ID: trusted.ID},
+		{ID: trusted.ID, Generation: "generation-old"},
+		{ID: "mac-old", Generation: trusted.Generation},
 	} {
 		before := machine.Snapshot()
-		if _, err := machine.Apply(event); !errors.As(err, new(*TransitionError)) {
-			t.Fatalf("Apply(%#v) error = %v, want TransitionError", event, err)
+		if _, err := machine.Apply(Event{Type: EventTrustRevoked, Peer: &peer}); !errors.As(err, new(*TransitionError)) {
+			t.Fatalf("Apply(%#v) error = %v, want TransitionError", peer, err)
 		}
 		if after := machine.Snapshot(); after.Revision != before.Revision || after.TrustedPeers != 1 || after.Peer == nil {
 			t.Fatalf("mismatched revoke changed trust: before=%#v after=%#v", before, after)
@@ -510,10 +506,69 @@ func TestTrustRevokedRequiresExactWindowsPeerAndPairingSession(t *testing.T) {
 	}
 
 	revoked := mustApply(t, machine, Event{
-		Type: EventTrustRevoked, Peer: &Peer{ID: pairing.Peer.ID}, SessionID: pairing.SessionID,
+		Type: EventTrustRevoked, Peer: &Peer{ID: trusted.ID, Generation: trusted.Generation},
 	})
 	if revoked.State != StateHostWaiting || revoked.TrustedPeers != 0 || revoked.Peer != nil || revoked.Pairing != nil {
 		t.Fatalf("revoked snapshot = %#v", revoked)
+	}
+}
+
+func TestTrustRevokedClearsExactRestoredGenerationWhilePaused(t *testing.T) {
+	trusted := Peer{ID: "mac-one", Name: "Mac", Generation: "generation-one"}
+	machine, err := NewMachine(RoleWindowsHost, "Windows", WithTrustedPeer(trusted))
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+
+	revoked := mustApply(t, machine, Event{
+		Type: EventTrustRevoked, Peer: &Peer{ID: trusted.ID, Generation: trusted.Generation},
+	})
+	if revoked.State != StatePaused || revoked.TrustedPeers != 0 || revoked.Peer != nil || revoked.Pairing != nil {
+		t.Fatalf("paused revoked snapshot = %#v", revoked)
+	}
+}
+
+func TestTrustRevokedRejectsStoppingAndTerminalPaused(t *testing.T) {
+	trusted := Peer{ID: "mac-one", Name: "Mac", Generation: "generation-one"}
+	event := Event{Type: EventTrustRevoked, Peer: &Peer{ID: trusted.ID, Generation: trusted.Generation}}
+
+	stopping, err := NewMachine(RoleWindowsHost, "Windows", WithTrustedPeer(trusted))
+	if err != nil {
+		t.Fatalf("NewMachine(stopping) error = %v", err)
+	}
+	mustApply(t, stopping, Event{Type: EventQuitRequested})
+	if _, err := stopping.Apply(event); !errors.As(err, new(*TransitionError)) {
+		t.Fatalf("stopping revoke error = %v, want TransitionError", err)
+	}
+
+	terminalPaused, err := NewMachine(RoleWindowsHost, "Windows", WithTrustedPeer(trusted))
+	if err != nil {
+		t.Fatalf("NewMachine(terminal) error = %v", err)
+	}
+	mustApply(t, terminalPaused, Event{Type: EventQuitRequested})
+	mustApply(t, terminalPaused, Event{Type: EventStopCompleted})
+	if _, err := terminalPaused.Apply(event); !errors.As(err, new(*TransitionError)) {
+		t.Fatalf("terminal paused revoke error = %v, want TransitionError", err)
+	}
+	if got := terminalPaused.Snapshot(); got.State != StatePaused || !got.Terminal || got.TrustedPeers != 1 || got.Peer == nil {
+		t.Fatalf("terminal paused snapshot = %#v", got)
+	}
+}
+
+func TestPairingCompletedPreservesTrustedPeerGeneration(t *testing.T) {
+	machine := mustMachine(t, RoleWindowsHost)
+	mustApply(t, machine, Event{Type: EventEnabled})
+	pairing := Pairing{
+		SessionID: "session-current", Peer: Peer{ID: "mac-current", Name: "Mac"}, Code: "123456",
+	}
+	mustApply(t, machine, Event{Type: EventPairingStarted, Pairing: &pairing})
+	mustApply(t, machine, Event{Type: EventPairingApproved})
+	completed := mustApply(t, machine, Event{
+		Type: EventPairingCompleted,
+		Peer: &Peer{ID: pairing.Peer.ID, Name: pairing.Peer.Name, Generation: "generation-one"},
+	})
+	if completed.Peer == nil || completed.Peer.Generation != "generation-one" {
+		t.Fatalf("completed trusted peer = %#v", completed.Peer)
 	}
 }
 

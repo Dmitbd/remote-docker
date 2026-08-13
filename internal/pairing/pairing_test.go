@@ -621,10 +621,10 @@ func TestPairingServerPublishesOnlyExactCompletedTrustRevocationOutsideLock(t *t
 	}
 
 	var calls int
-	fixture.server.BindTrustRevokedObserver(func(_ context.Context, deviceID, sessionID string) error {
+	fixture.server.BindTrustRevokedObserver(func(_ context.Context, deviceID, generation string) error {
 		calls++
-		if deviceID != "mac-studio" || sessionID != fixture.descriptor.ID {
-			t.Fatalf("observer device=%q session=%q", deviceID, sessionID)
+		if deviceID != "mac-studio" || generation != "generation-one" {
+			t.Fatalf("observer device=%q generation=%q", deviceID, generation)
 		}
 		if _, _, active := fixture.server.ActiveSession(); active {
 			t.Fatal("observer saw an active completed session")
@@ -655,6 +655,105 @@ func TestPairingServerPublishesOnlyExactCompletedTrustRevocationOutsideLock(t *t
 	}
 }
 
+func TestPairingServerRetainsGenerationOwnedRevocationAcrossRestart(t *testing.T) {
+	t.Run("retry exact generation", func(t *testing.T) {
+		server, err := NewServer(newServerIdentity(t))
+		if err != nil {
+			t.Fatalf("NewServer() error = %v", err)
+		}
+		observerErr := errors.New("lifecycle is stopping")
+		fail := true
+		calls := 0
+		server.BindTrustRevokedObserver(func(_ context.Context, deviceID, generation string) error {
+			calls++
+			if deviceID != "mac-one" || generation != "generation-one" {
+				t.Fatalf("observer device=%q generation=%q", deviceID, generation)
+			}
+			if fail {
+				return observerErr
+			}
+			return nil
+		})
+
+		if err := server.PublishTrustRevoked(context.Background(), "mac-one", "generation-one"); !errors.Is(err, observerErr) {
+			t.Fatalf("PublishTrustRevoked() error = %v, want %v", err, observerErr)
+		}
+		if err := server.RetryTrustRevoked(context.Background(), "mac-one", "generation-old"); err != nil {
+			t.Fatalf("stale RetryTrustRevoked() error = %v", err)
+		}
+		if calls != 1 {
+			t.Fatalf("stale retry observer calls = %d, want 1", calls)
+		}
+
+		fail = false
+		if err := server.RetryTrustRevoked(context.Background(), "mac-one", "generation-one"); err != nil {
+			t.Fatalf("exact RetryTrustRevoked() error = %v", err)
+		}
+		if calls != 2 {
+			t.Fatalf("exact retry observer calls = %d, want 2", calls)
+		}
+		if err := server.RetryTrustRevoked(context.Background(), "mac-one", "generation-one"); err != nil {
+			t.Fatalf("acknowledged RetryTrustRevoked() error = %v", err)
+		}
+		if calls != 2 {
+			t.Fatalf("acknowledged retry observer calls = %d, want 2", calls)
+		}
+	})
+
+	t.Run("observer replacement owns acknowledgement", func(t *testing.T) {
+		server, err := NewServer(newServerIdentity(t))
+		if err != nil {
+			t.Fatalf("NewServer() error = %v", err)
+		}
+		firstStarted := make(chan struct{})
+		releaseFirst := make(chan struct{})
+		server.BindTrustRevokedObserver(func(_ context.Context, deviceID, generation string) error {
+			if deviceID != "mac-one" || generation != "generation-one" {
+				t.Fatalf("first observer device=%q generation=%q", deviceID, generation)
+			}
+			close(firstStarted)
+			<-releaseFirst
+			return nil
+		})
+		published := make(chan error, 1)
+		go func() {
+			published <- server.PublishTrustRevoked(context.Background(), "mac-one", "generation-one")
+		}()
+		select {
+		case <-firstStarted:
+		case <-time.After(time.Second):
+			t.Fatal("first observer did not start")
+		}
+
+		replacementCalls := 0
+		server.BindTrustRevokedObserver(func(_ context.Context, deviceID, generation string) error {
+			replacementCalls++
+			if deviceID != "mac-one" || generation != "generation-one" {
+				t.Fatalf("replacement observer device=%q generation=%q", deviceID, generation)
+			}
+			return nil
+		})
+		close(releaseFirst)
+		select {
+		case err := <-published:
+			if err != nil {
+				t.Fatalf("PublishTrustRevoked() error = %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("replaced observer publication did not finish")
+		}
+		if replacementCalls != 1 {
+			t.Fatalf("replacement observer calls = %d, want 1", replacementCalls)
+		}
+		if err := server.RetryTrustRevoked(context.Background(), "mac-one", "generation-one"); err != nil {
+			t.Fatalf("acknowledged RetryTrustRevoked() error = %v", err)
+		}
+		if replacementCalls != 1 {
+			t.Fatalf("old observer acknowledgement cleared replacement ownership: calls=%d", replacementCalls)
+		}
+	})
+}
+
 func TestPairingServerRequiresCurrentObserverAcknowledgementAndProtectsNewerCompletion(t *testing.T) {
 	t.Run("callback replacement", func(t *testing.T) {
 		fixture := newPairingFixture(t)
@@ -683,10 +782,10 @@ func TestPairingServerRequiresCurrentObserverAcknowledgementAndProtectsNewerComp
 			t.Fatal("first observer did not start")
 		}
 		replacementCalls := 0
-		fixture.server.BindTrustRevokedObserver(func(_ context.Context, deviceID, sessionID string) error {
+		fixture.server.BindTrustRevokedObserver(func(_ context.Context, deviceID, generation string) error {
 			replacementCalls++
-			if deviceID != "mac-studio" || sessionID != fixture.descriptor.ID {
-				t.Fatalf("replacement observer device=%q session=%q", deviceID, sessionID)
+			if deviceID != "mac-studio" || generation != "generation-one" {
+				t.Fatalf("replacement observer device=%q generation=%q", deviceID, generation)
 			}
 			return nil
 		})
@@ -735,17 +834,17 @@ func TestPairingServerRequiresCurrentObserverAcknowledgementAndProtectsNewerComp
 		}
 
 		calls := 0
-		fixture.server.BindTrustRevokedObserver(func(_ context.Context, deviceID, sessionID string) error {
+		fixture.server.BindTrustRevokedObserver(func(_ context.Context, deviceID, generation string) error {
 			calls++
-			if deviceID != "mac-new" || sessionID != newDescriptor.ID {
-				t.Fatalf("new observer device=%q session=%q", deviceID, sessionID)
+			if deviceID != "mac-new" || generation != "generation-new" {
+				t.Fatalf("new observer device=%q generation=%q", deviceID, generation)
 			}
 			return nil
 		})
 		if err := fixture.server.PublishTrustRevoked(context.Background(), "mac-studio", "generation-one"); err != nil {
 			t.Fatalf("stale PublishTrustRevoked() error = %v", err)
 		}
-		if err := fixture.server.RetryTrustRevoked(context.Background(), "mac-studio", fixture.descriptor.ID); err != nil {
+		if err := fixture.server.RetryTrustRevoked(context.Background(), "mac-studio", "generation-one"); err != nil {
 			t.Fatalf("stale RetryTrustRevoked() error = %v", err)
 		}
 		if calls != 0 {

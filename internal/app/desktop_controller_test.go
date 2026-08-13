@@ -233,7 +233,9 @@ func TestDesktopControllerBindsExactTrustRevokedLifecycleObserver(t *testing.T) 
 	}
 	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &pairingState})
 	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingApproved})
-	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCompleted, Peer: &lifecycle.Peer{ID: "mac-one", Name: "Mac"}})
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCompleted, Peer: &lifecycle.Peer{
+		ID: "mac-one", Name: "Mac", Generation: "generation-one",
+	}})
 	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
 	fallback := &trustRevokedBindingController{}
 	if _, err := NewDesktopController(supervisor, fallback); err != nil {
@@ -243,7 +245,7 @@ func TestDesktopControllerBindsExactTrustRevokedLifecycleObserver(t *testing.T) 
 		t.Fatal("trust-revoked lifecycle observer was not bound")
 	}
 
-	if err := fallback.observer(context.Background(), "mac-one", "session-1"); err != nil {
+	if err := fallback.observer(context.Background(), "mac-one", "generation-one"); err != nil {
 		t.Fatalf("trust-revoked observer error = %v", err)
 	}
 	got := machine.Snapshot()
@@ -271,7 +273,7 @@ func TestDesktopControllerTrustRevokedObserverReconcilesDurableCompletionBeforeR
 				t.Fatalf("NewDesktopController() error = %v", err)
 			}
 
-			if err := fallback.observer(context.Background(), "mac-one", "session-1"); err != nil {
+			if err := fallback.observer(context.Background(), "mac-one", "generation-one"); err != nil {
 				t.Fatalf("trust-revoked observer error = %v", err)
 			}
 			got := machine.Snapshot()
@@ -279,6 +281,90 @@ func TestDesktopControllerTrustRevokedObserverReconcilesDurableCompletionBeforeR
 				t.Fatalf("reconciled revoked lifecycle snapshot = %#v", got)
 			}
 		})
+	}
+}
+
+func TestDesktopControllerPairingCompletionCommitsWindowsGeneration(t *testing.T) {
+	machine := newLifecycleMachine(t, lifecycle.RoleWindowsHost)
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled})
+	pairingState := lifecycle.Pairing{
+		SessionID: "session-1", Peer: lifecycle.Peer{ID: "temporary-mac", Name: "Mac"},
+		Code: "123456", ExpiresAt: time.Now().Add(time.Minute),
+	}
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &pairingState})
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := &generationPairingHandler{
+		generation: "generation-one",
+		result: localapi.PairingStatusResult{
+			SessionID: "session-1", Status: string(pairing.SessionCompleted),
+			Peer:   localapi.LifecyclePeer{ID: "temporary-mac", Name: "Mac"},
+			Device: &localapi.Device{ID: "mac-one", Name: "Mac"},
+		},
+	}
+	controller, err := NewDesktopController(supervisor, fallback)
+	if err != nil {
+		t.Fatalf("NewDesktopController() error = %v", err)
+	}
+
+	if _, err := controller.Handle(context.Background(), localapi.MethodPairStatus, json.RawMessage(`{"session_id":"session-1"}`)); err != nil {
+		t.Fatalf("PairStatus() error = %v", err)
+	}
+	snapshot := machine.Snapshot()
+	if snapshot.State != lifecycle.StateConnecting || snapshot.TrustedPeers != 1 || snapshot.Peer == nil ||
+		snapshot.Peer.ID != "mac-one" || snapshot.Peer.Generation != "generation-one" {
+		t.Fatalf("completed Windows lifecycle = %#v", snapshot)
+	}
+}
+
+func TestDesktopControllerTrustRevokedObserverClearsExactGenerationAfterPause(t *testing.T) {
+	machine, err := lifecycle.NewMachine(
+		lifecycle.RoleWindowsHost,
+		"Windows",
+		lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "mac-one", Name: "Mac", Generation: "generation-one"}),
+	)
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := &trustRevokedBindingController{}
+	controller, err := NewDesktopController(supervisor, fallback)
+	if err != nil {
+		t.Fatalf("NewDesktopController() error = %v", err)
+	}
+
+	if err := fallback.observer(context.Background(), "mac-one", "generation-one"); err != nil {
+		t.Fatalf("trust-revoked observer error = %v", err)
+	}
+	got := machine.Snapshot()
+	if got.State != lifecycle.StatePaused || got.TrustedPeers != 0 || got.Peer != nil ||
+		controller.pendingTrustRevoke != nil || fallback.retryCalls != 0 {
+		t.Fatalf("paused revoke snapshot = %#v pending=%#v retries=%d", got, controller.pendingTrustRevoke, fallback.retryCalls)
+	}
+}
+
+func TestDesktopControllerTrustRevokedObserverRejectsStaleGeneration(t *testing.T) {
+	machine, err := lifecycle.NewMachine(
+		lifecycle.RoleWindowsHost,
+		"Windows",
+		lifecycle.WithTrustedPeer(lifecycle.Peer{ID: "mac-one", Name: "Mac", Generation: "generation-new"}),
+	)
+	if err != nil {
+		t.Fatalf("NewMachine() error = %v", err)
+	}
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := &trustRevokedBindingController{}
+	controller, err := NewDesktopController(supervisor, fallback)
+	if err != nil {
+		t.Fatalf("NewDesktopController() error = %v", err)
+	}
+
+	if err := fallback.observer(context.Background(), "mac-one", "generation-old"); err == nil {
+		t.Fatal("stale trust-revoked observer was acknowledged")
+	}
+	got := machine.Snapshot()
+	if got.State != lifecycle.StatePaused || got.TrustedPeers != 1 || got.Peer == nil ||
+		got.Peer.Generation != "generation-new" || controller.pendingTrustRevoke != nil || fallback.retryCalls != 0 {
+		t.Fatalf("stale revoke snapshot = %#v pending=%#v retries=%d", got, controller.pendingTrustRevoke, fallback.retryCalls)
 	}
 }
 
@@ -291,7 +377,9 @@ func TestDesktopControllerRetainsPendingTrustRevokeAcrossShutdown(t *testing.T) 
 	}
 	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &pairingState})
 	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingApproved})
-	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCompleted, Peer: &lifecycle.Peer{ID: "mac-one", Name: "Mac"}})
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCompleted, Peer: &lifecycle.Peer{
+		ID: "mac-one", Name: "Mac", Generation: "generation-one",
+	}})
 	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
 	fallback := &trustRevokedBindingController{}
 	controller, err := NewDesktopController(supervisor, fallback)
@@ -299,7 +387,7 @@ func TestDesktopControllerRetainsPendingTrustRevokeAcrossShutdown(t *testing.T) 
 		t.Fatalf("NewDesktopController() error = %v", err)
 	}
 	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventQuitRequested})
-	if err := fallback.observer(context.Background(), "mac-one", "session-1"); err == nil {
+	if err := fallback.observer(context.Background(), "mac-one", "generation-one"); err == nil {
 		t.Fatal("trust-revoked observer acknowledged terminal stopping state")
 	}
 	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventStopCompleted})
@@ -338,7 +426,9 @@ func TestDesktopControllerDoesNotRetryPendingTrustRevokeAfterStopFailure(t *test
 	}
 	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &pairingState})
 	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingApproved})
-	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCompleted, Peer: &lifecycle.Peer{ID: "mac-one", Name: "Mac"}})
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCompleted, Peer: &lifecycle.Peer{
+		ID: "mac-one", Name: "Mac", Generation: "generation-one",
+	}})
 
 	cancelDone := make(chan error, 1)
 	go func() {
@@ -346,7 +436,7 @@ func TestDesktopControllerDoesNotRetryPendingTrustRevokeAfterStopFailure(t *test
 		cancelDone <- cancelErr
 	}()
 	waitForTestSignal(t, stopStarted, "failed connection stop")
-	if err := fallback.observer(context.Background(), "mac-one", "session-1"); err == nil {
+	if err := fallback.observer(context.Background(), "mac-one", "generation-one"); err == nil {
 		t.Fatal("trust-revoked observer acknowledged stopping state")
 	}
 	close(releaseStop)
@@ -397,7 +487,9 @@ func TestDesktopControllerRetriesPendingTrustRevokeAfterPauseAndDisconnectStop(t
 			}
 			_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &pairingState})
 			_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingApproved})
-			_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCompleted, Peer: &lifecycle.Peer{ID: "mac-one", Name: "Mac"}})
+			_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCompleted, Peer: &lifecycle.Peer{
+				ID: "mac-one", Name: "Mac", Generation: "generation-one",
+			}})
 			if tt.connected {
 				_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventConnected})
 			}
@@ -408,7 +500,7 @@ func TestDesktopControllerRetriesPendingTrustRevokeAfterPauseAndDisconnectStop(t
 				operationDone <- operationErr
 			}()
 			waitForTestSignal(t, stopStarted, tt.name+" stop")
-			if err := fallback.observer(context.Background(), "mac-one", "session-1"); err == nil {
+			if err := fallback.observer(context.Background(), "mac-one", "generation-one"); err == nil {
 				t.Fatal("trust-revoked observer acknowledged stopping state")
 			}
 			if got := machine.Snapshot(); got.State != lifecycle.StateStopping || got.TrustedPeers != 1 || got.Peer == nil ||
@@ -422,7 +514,7 @@ func TestDesktopControllerRetriesPendingTrustRevokeAfterPauseAndDisconnectStop(t
 			got := machine.Snapshot()
 			stopCalls, _ := runtime.stopSnapshot()
 			if got.State != tt.wantState || got.TrustedPeers != 0 || got.Peer != nil || controller.pendingTrustRevoke != nil ||
-				fallback.retryCalls != 1 || stopCalls != 1 {
+				fallback.retryCalls != 1 || fallback.retryDeviceID != "mac-one" || fallback.retryGeneration != "generation-one" || stopCalls != 1 {
 				t.Fatalf("reconciled %s = %#v pending=%#v retries=%d stops=%d", tt.method, got, controller.pendingTrustRevoke, fallback.retryCalls, stopCalls)
 			}
 		})

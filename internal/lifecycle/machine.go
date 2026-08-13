@@ -123,7 +123,6 @@ type Machine struct {
 	connectionStartFrom     State
 	problemFrom             State
 	pairingCancellationFrom State
-	trustedPairingSessionID string
 	subscribers             map[uint64]chan Snapshot
 	nextID                  uint64
 }
@@ -269,7 +268,7 @@ func (m *Machine) applyLocked(event Event) error {
 	if m.connectionStarting {
 		switch event.Type {
 		case EventConnectionStartCommitted, EventConnectionStartAbortRequested, EventConnectionCancelRequested, EventConnected,
-			EventHeartbeat, EventNetworkLost, EventNetworkRestored, EventStopCompleted, EventStopFailed:
+			EventHeartbeat, EventNetworkLost, EventNetworkRestored, EventStopCompleted, EventStopFailed, EventTrustRevoked:
 		default:
 			return m.transitionError(event, "trusted connection startup is in progress")
 		}
@@ -367,7 +366,6 @@ func (m *Machine) applyLocked(event Event) error {
 		if snapshot.State != StateConnecting || snapshot.Pairing == nil || snapshot.Pairing.Status != PairingApproved || event.Peer == nil || event.Peer.ID == "" {
 			return m.transitionError(event, "approved pairing metadata is unavailable")
 		}
-		m.trustedPairingSessionID = snapshot.Pairing.SessionID
 		peer := *event.Peer
 		snapshot.Peer = &peer
 		snapshot.TrustedPeers = 1
@@ -520,7 +518,6 @@ func (m *Machine) applyLocked(event Event) error {
 		snapshot.LastDisconnect = nil
 		snapshot.ActionInProgress = false
 		m.forgetting = false
-		m.trustedPairingSessionID = ""
 		if snapshot.Problem != nil {
 			m.enterNeedsAction()
 		}
@@ -534,17 +531,20 @@ func (m *Machine) applyLocked(event Event) error {
 			m.enterNeedsAction()
 		}
 	case EventTrustRevoked:
-		peerID := ""
+		peerID, generation := "", ""
 		if event.Peer != nil {
 			peerID = strings.TrimSpace(event.Peer.ID)
+			generation = strings.TrimSpace(event.Peer.Generation)
 		}
-		validState := snapshot.State == StateConnecting || snapshot.State == StateHostWaiting
+		validState := snapshot.State == StateConnecting || snapshot.State == StateHostWaiting || snapshot.State == StatePaused
 		if snapshot.Role != RoleWindowsHost || !validState || snapshot.Peer == nil ||
-			peerID == "" || peerID != snapshot.Peer.ID || strings.TrimSpace(event.SessionID) == "" ||
-			event.SessionID != m.trustedPairingSessionID {
-			return m.transitionError(event, "revoked trust does not own the current peer and pairing session")
+			peerID == "" || peerID != snapshot.Peer.ID || generation == "" ||
+			generation != snapshot.Peer.Generation {
+			return m.transitionError(event, "revoked trust does not own the current peer generation")
 		}
-		snapshot.State = StateHostWaiting
+		if snapshot.State != StatePaused {
+			snapshot.State = StateHostWaiting
+		}
 		snapshot.Peer = nil
 		snapshot.TrustedPeers = 0
 		snapshot.Pairing = nil
@@ -554,7 +554,8 @@ func (m *Machine) applyLocked(event Event) error {
 		snapshot.Docker = DockerStatus{State: ServiceStopped}
 		snapshot.Sync = SyncStatus{State: ServiceStopped}
 		snapshot.LastDisconnect = nil
-		m.trustedPairingSessionID = ""
+		m.connectionStarting = false
+		m.connectionStartFrom = ""
 	case EventProblemDetected:
 		if event.Problem == nil || event.Problem.Code == "" {
 			return m.transitionError(event, "problem metadata is incomplete")

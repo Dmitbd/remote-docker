@@ -836,6 +836,9 @@ func (r *pairingLifecycleReconciler) applyObserved(snapshot lifecycle.Snapshot, 
 			peer.ID = status.Device.ID
 			peer.Name = status.Device.Name
 			peer.Address = status.Device.Address
+			if resolver, ok := r.handler.(committedPairingGenerationResolver); ok {
+				peer.Generation = resolver.committedPairingGeneration(status.Device.ID)
+			}
 			return r.applyObservedEvent(snapshot, lifecycle.EventPairingCompleted, &peer)
 		}
 		return snapshot, nil
@@ -1130,14 +1133,24 @@ func (c *productionAgentController) bindTrustRevokedObserver(observer trustRevok
 	}
 }
 
-func (c *productionAgentController) retryTrustRevokedObserver(ctx context.Context, deviceID, sessionID string) error {
+func (c *productionAgentController) retryTrustRevokedObserver(ctx context.Context, deviceID, generation string) error {
 	if c == nil || c.pairing == nil {
 		return nil
 	}
 	if retryer, ok := c.pairing.(trustRevokedObserverRetryer); ok {
-		return retryer.retryTrustRevokedObserver(ctx, deviceID, sessionID)
+		return retryer.retryTrustRevokedObserver(ctx, deviceID, generation)
 	}
 	return nil
+}
+
+func (c *productionAgentController) committedPairingGeneration(deviceID string) string {
+	if c == nil || c.pairing == nil {
+		return ""
+	}
+	if resolver, ok := c.pairing.(committedPairingGenerationResolver); ok {
+		return resolver.committedPairingGeneration(deviceID)
+	}
+	return ""
 }
 
 func (c *productionAgentController) abandonPairing(sessionID string) {
@@ -2182,11 +2195,31 @@ func (c windowsPairingCoordinator) bindTrustRevokedObserver(observer trustRevoke
 	}
 }
 
-func (c windowsPairingCoordinator) retryTrustRevokedObserver(ctx context.Context, deviceID, sessionID string) error {
+func (c windowsPairingCoordinator) retryTrustRevokedObserver(ctx context.Context, deviceID, generation string) error {
 	if c.server == nil {
 		return nil
 	}
-	return c.server.RetryTrustRevoked(ctx, deviceID, sessionID)
+	return c.server.RetryTrustRevoked(ctx, deviceID, generation)
+}
+
+func (c windowsPairingCoordinator) committedPairingGeneration(deviceID string) string {
+	if c.registry == nil {
+		return ""
+	}
+	return c.registry.committedGeneration(deviceID)
+}
+
+func (r windowsPairingRegistry) committedGeneration(deviceID string) string {
+	var generation string
+	_ = r.runConfigTransaction(func() error {
+		cfg, err := loadAgentConfig(r.store)
+		if err != nil || cfg.ActiveDevice != deviceID {
+			return err
+		}
+		generation = cfg.Devices[deviceID].PairingGeneration
+		return nil
+	})
+	return generation
 }
 
 func (windowsPairingCoordinator) Candidates(context.Context) (localapi.PairCandidatesResult, error) {

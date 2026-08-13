@@ -64,6 +64,10 @@ type trustRevokedObserverRetryer interface {
 	retryTrustRevokedObserver(context.Context, string, string) error
 }
 
+type committedPairingGenerationResolver interface {
+	committedPairingGeneration(string) string
+}
+
 type Agent struct {
 	observer   AgentObserver
 	restorer   InfrastructureRestorer
@@ -98,14 +102,24 @@ func (a *Agent) bindTrustRevokedObserver(observer trustRevokedObserver) {
 	}
 }
 
-func (a *Agent) retryTrustRevokedObserver(ctx context.Context, deviceID, sessionID string) error {
+func (a *Agent) retryTrustRevokedObserver(ctx context.Context, deviceID, generation string) error {
 	if a == nil || a.controller == nil {
 		return nil
 	}
 	if retryer, ok := a.controller.(trustRevokedObserverRetryer); ok {
-		return retryer.retryTrustRevokedObserver(ctx, deviceID, sessionID)
+		return retryer.retryTrustRevokedObserver(ctx, deviceID, generation)
 	}
 	return nil
+}
+
+func (a *Agent) committedPairingGeneration(deviceID string) string {
+	if a == nil || a.controller == nil {
+		return ""
+	}
+	if resolver, ok := a.controller.(committedPairingGenerationResolver); ok {
+		return resolver.committedPairingGeneration(deviceID)
+	}
+	return ""
 }
 
 func (a *Agent) Status() AgentStatus {

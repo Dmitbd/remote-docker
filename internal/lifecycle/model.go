@@ -83,11 +83,12 @@ const (
 )
 
 type Peer struct {
-	ID      string
-	Name    string
-	OS      string
-	Version string
-	Address string
+	ID         string
+	Name       string
+	OS         string
+	Version    string
+	Address    string
+	Generation string
 }
 
 type Pairing struct {
