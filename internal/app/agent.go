@@ -60,6 +60,10 @@ type trustRevokedObserverBinder interface {
 	bindTrustRevokedObserver(trustRevokedObserver)
 }
 
+type trustRevokedObserverRetryer interface {
+	retryTrustRevokedObserver(context.Context, string, string) error
+}
+
 type Agent struct {
 	observer   AgentObserver
 	restorer   InfrastructureRestorer
@@ -92,6 +96,16 @@ func (a *Agent) bindTrustRevokedObserver(observer trustRevokedObserver) {
 	if binder, ok := a.controller.(trustRevokedObserverBinder); ok {
 		binder.bindTrustRevokedObserver(observer)
 	}
+}
+
+func (a *Agent) retryTrustRevokedObserver(ctx context.Context, deviceID, sessionID string) error {
+	if a == nil || a.controller == nil {
+		return nil
+	}
+	if retryer, ok := a.controller.(trustRevokedObserverRetryer); ok {
+		return retryer.retryTrustRevokedObserver(ctx, deviceID, sessionID)
+	}
+	return nil
 }
 
 func (a *Agent) Status() AgentStatus {

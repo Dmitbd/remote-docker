@@ -18,21 +18,66 @@ const pairingRollbackTimeout = 5 * time.Second
 // DesktopController is the single mutation boundary shared by the window,
 // tray, and command-line client. Presentation code never controls processes.
 type DesktopController struct {
-	supervisor *Supervisor
-	fallback   localapi.Handler
-	operations sync.Mutex
+	supervisor         *Supervisor
+	fallback           localapi.Handler
+	operations         sync.Mutex
+	trustRevokedMu     sync.Mutex
+	pendingTrustRevoke *pendingTrustRevoke
+}
+
+type pendingTrustRevoke struct {
+	deviceID  string
+	sessionID string
 }
 
 func NewDesktopController(supervisor *Supervisor, fallback localapi.Handler) (*DesktopController, error) {
 	if supervisor == nil {
 		return nil, errors.New("desktop lifecycle supervisor is required")
 	}
+	controller := &DesktopController{supervisor: supervisor, fallback: fallback}
 	if binder, ok := fallback.(trustRevokedObserverBinder); ok {
 		binder.bindTrustRevokedObserver(func(_ context.Context, deviceID, sessionID string) error {
-			return reconcileWindowsTrustRevoked(supervisor.machine, deviceID, sessionID)
+			return controller.observeWindowsTrustRevoked(deviceID, sessionID)
 		})
 	}
-	return &DesktopController{supervisor: supervisor, fallback: fallback}, nil
+	return controller, nil
+}
+
+func (c *DesktopController) observeWindowsTrustRevoked(deviceID, sessionID string) error {
+	c.trustRevokedMu.Lock()
+	defer c.trustRevokedMu.Unlock()
+	err := reconcileWindowsTrustRevoked(c.supervisor.machine, deviceID, sessionID)
+	if err == nil {
+		if pending := c.pendingTrustRevoke; pending != nil && pending.deviceID == deviceID && pending.sessionID == sessionID {
+			c.pendingTrustRevoke = nil
+		}
+		return nil
+	}
+	snapshot := c.supervisor.Snapshot()
+	if snapshot.Role == lifecycle.RoleWindowsHost && snapshot.State == lifecycle.StateStopping &&
+		snapshot.Peer != nil && snapshot.Peer.ID == deviceID {
+		c.pendingTrustRevoke = &pendingTrustRevoke{deviceID: deviceID, sessionID: sessionID}
+	}
+	return err
+}
+
+func (c *DesktopController) retryPendingTrustRevoke(ctx context.Context) error {
+	c.trustRevokedMu.Lock()
+	pending := c.pendingTrustRevoke
+	retryer, ok := c.fallback.(trustRevokedObserverRetryer)
+	c.trustRevokedMu.Unlock()
+	if pending == nil || !ok {
+		return nil
+	}
+	if err := retryer.retryTrustRevokedObserver(ctx, pending.deviceID, pending.sessionID); err != nil {
+		return err
+	}
+	c.trustRevokedMu.Lock()
+	if current := c.pendingTrustRevoke; current != nil && current.deviceID == pending.deviceID && current.sessionID == pending.sessionID {
+		c.pendingTrustRevoke = nil
+	}
+	c.trustRevokedMu.Unlock()
+	return nil
 }
 
 func reconcileWindowsTrustRevoked(machine *lifecycle.Machine, deviceID, sessionID string) error {
@@ -296,8 +341,13 @@ func (c *DesktopController) cancelConnectionLocked(ctx context.Context, raw json
 			return nil, unavailable("pairing cancellation did not reach a terminal state")
 		}
 	}
-	if err := c.supervisor.CancelConnection(ctx); err != nil {
+	stopErr := c.supervisor.CancelConnection(ctx)
+	if stopErr != nil {
 		return nil, unavailable("Remote Docker connection attempt could not be stopped safely")
+	}
+	revokeErr := c.retryPendingTrustRevoke(ctx)
+	if revokeErr != nil {
+		return nil, unavailable("revoked Windows trust could not be reconciled safely")
 	}
 	return c.actionResult(), nil
 }

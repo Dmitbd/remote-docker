@@ -55,6 +55,7 @@ type completedTrust struct {
 	sessionID  string
 	deviceID   string
 	generation string
+	revoked    bool
 }
 
 // Server owns one short-lived pairing session.
@@ -68,6 +69,7 @@ type Server struct {
 	afterInstall func(context.Context, TrustedPeer) error
 	revoke       func(context.Context, string, string, []byte) error
 	trustRevoked func(context.Context, string, string) error
+	observerID   uint64
 	now          func() time.Time
 	random       io.Reader
 	active       *sessionState
@@ -286,7 +288,15 @@ func (s *Server) BindTrustRevokedObserver(observer func(context.Context, string,
 	}
 	s.mu.Lock()
 	s.trustRevoked = observer
+	s.observerID++
+	var pending completedTrust
+	if s.completed != nil {
+		pending = *s.completed
+	}
 	s.mu.Unlock()
+	if observer != nil && pending.revoked {
+		_ = s.deliverTrustRevoked(context.Background(), pending)
+	}
 }
 
 // PublishTrustRevoked maps an exact durable device generation back to the
@@ -297,17 +307,66 @@ func (s *Server) PublishTrustRevoked(ctx context.Context, deviceID, generation s
 	}
 	s.mu.Lock()
 	s.expireLocked()
-	observer := s.trustRevoked
-	sessionID := ""
+	var completed completedTrust
 	if s.completed != nil && s.completed.deviceID == deviceID && s.completed.generation == generation {
-		sessionID = s.completed.sessionID
-		s.completed = nil
+		s.completed.revoked = true
+		completed = *s.completed
 	}
 	s.mu.Unlock()
-	if observer == nil || sessionID == "" {
+	if completed.sessionID == "" {
 		return nil
 	}
-	return observer(ctx, deviceID, sessionID)
+	return s.deliverTrustRevoked(ctx, completed)
+}
+
+// RetryTrustRevoked redelivers only the exact durable revoke retained after a
+// lifecycle observer could not acknowledge it during a state transition.
+func (s *Server) RetryTrustRevoked(ctx context.Context, deviceID, sessionID string) error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	var completed completedTrust
+	if s.completed != nil && s.completed.revoked && s.completed.deviceID == deviceID && s.completed.sessionID == sessionID {
+		completed = *s.completed
+	}
+	s.mu.Unlock()
+	if completed.sessionID == "" {
+		return nil
+	}
+	return s.deliverTrustRevoked(ctx, completed)
+}
+
+func (s *Server) deliverTrustRevoked(ctx context.Context, completed completedTrust) error {
+	for attempts := 0; attempts < 2; attempts++ {
+		s.mu.Lock()
+		if s.completed == nil || !s.completed.revoked || s.completed.sessionID != completed.sessionID ||
+			s.completed.deviceID != completed.deviceID || s.completed.generation != completed.generation {
+			s.mu.Unlock()
+			return nil
+		}
+		observer := s.trustRevoked
+		observerID := s.observerID
+		s.mu.Unlock()
+		if observer == nil {
+			return ErrSessionState
+		}
+		if err := observer(ctx, completed.deviceID, completed.sessionID); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		if observerID != s.observerID {
+			s.mu.Unlock()
+			continue
+		}
+		if s.completed != nil && s.completed.revoked && s.completed.sessionID == completed.sessionID &&
+			s.completed.deviceID == completed.deviceID && s.completed.generation == completed.generation {
+			s.completed = nil
+		}
+		s.mu.Unlock()
+		return nil
+	}
+	return ErrSessionState
 }
 
 // CompletedTrust resolves the exact durable owner recorded by the completed

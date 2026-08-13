@@ -4615,7 +4615,14 @@ func TestProductionAgentControllerCachesTerminalCancellationForExactSession(t *t
 
 func TestWindowsProofRevokeClearsExactLifecycleTrustAfterDurableSave(t *testing.T) {
 	store := config.Store{Path: filepath.Join(t.TempDir(), "config.json")}
-	registry := windowsPairingRegistry{store: store}
+	var saveCalls atomic.Int32
+	registry := windowsPairingRegistry{
+		store: store,
+		saveConfig: func(cfg config.Config) error {
+			saveCalls.Add(1)
+			return store.Save(cfg)
+		},
+	}
 	installer := &runtimePairingInstaller{device: pairing.DeviceInfo{
 		SSHHostPublicKey: "ssh-ed25519 WINDOWS-HOST", SyncthingDeviceID: "WINDOWS-SYNC",
 		SSHPort: 49222, SyncthingPort: 49220,
@@ -4632,11 +4639,21 @@ func TestWindowsProofRevokeClearsExactLifecycleTrustAfterDurableSave(t *testing.
 	coordinator := &windowsPairingCoordinator{server: host.server, installer: installer, registry: &registry}
 	agent := NewAgent(nil, nil, &productionAgentController{pairing: coordinator})
 	machine := newLifecycleMachine(t, lifecycle.RoleWindowsHost)
-	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
-	if _, err := NewDesktopController(supervisor, agent); err != nil {
+	runtime := newRecordingSessionRuntime()
+	stopStarted := make(chan struct{})
+	releaseStop := make(chan struct{})
+	runtime.onStop = func() {
+		close(stopStarted)
+		<-releaseStop
+	}
+	supervisor, _ := NewSupervisor(machine, runtime)
+	controller, err := NewDesktopController(supervisor, agent)
+	if err != nil {
 		t.Fatalf("NewDesktopController() error = %v", err)
 	}
-	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled})
+	if _, err := controller.Handle(context.Background(), localapi.MethodEnable, nil); err != nil {
+		t.Fatalf("Enable() error = %v", err)
+	}
 
 	clientPublicKey, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -4689,6 +4706,15 @@ func TestWindowsProofRevokeClearsExactLifecycleTrustAfterDurableSave(t *testing.
 	if err != nil || committed.ActiveDevice != "mac-one" || committed.Devices["mac-one"].PairingGeneration != "generation-one" || installer.revokes != 0 {
 		t.Fatalf("completed cancel changed durable trust = %#v revokes=%d error=%v", committed, installer.revokes, err)
 	}
+	cancelDone := make(chan error, 1)
+	go func() {
+		_, cancelErr := controller.Handle(context.Background(), localapi.MethodConnectionCancel, nil)
+		cancelDone <- cancelErr
+	}()
+	waitForTestSignal(t, stopStarted, "connection cancellation stop")
+	if got := machine.Snapshot(); got.State != lifecycle.StateStopping || got.TrustedPeers != 1 || got.Peer == nil || got.Peer.ID != "mac-one" {
+		t.Fatalf("lifecycle while stop is blocked = %#v", got)
+	}
 
 	if err := client.Revoke(context.Background(), "mac-one", "generation-one", proof); err != nil {
 		t.Fatalf("Revoke() error = %v", err)
@@ -4697,9 +4723,23 @@ func TestWindowsProofRevokeClearsExactLifecycleTrustAfterDurableSave(t *testing.
 	if err != nil || cfg.ActiveDevice != "" || len(cfg.Devices) != 0 {
 		t.Fatalf("durable registry after revoke = %#v error=%v", cfg, err)
 	}
+	if _, _, pending := host.server.CompletedTrust(descriptor.ID); !pending {
+		t.Fatal("exact completed ownership was discarded before lifecycle acknowledgement")
+	}
+	if got := machine.Snapshot(); got.State != lifecycle.StateStopping || got.TrustedPeers != 1 || got.Peer == nil {
+		t.Fatalf("blocked lifecycle was changed before StopCompleted = %#v", got)
+	}
+	close(releaseStop)
+	if err := waitForTestError(t, cancelDone, "connection cancellation result"); err != nil {
+		t.Fatalf("ConnectionCancel() error = %v", err)
+	}
 	got := machine.Snapshot()
-	if got.State != lifecycle.StateHostWaiting || got.TrustedPeers != 0 || got.Peer != nil || got.Pairing != nil || installer.revokes != 1 {
-		t.Fatalf("lifecycle after durable revoke = %#v installer revokes=%d", got, installer.revokes)
+	if got.State != lifecycle.StateHostWaiting || got.TrustedPeers != 0 || got.Peer != nil || got.Pairing != nil ||
+		installer.revokes != 1 || saveCalls.Load() != 2 {
+		t.Fatalf("lifecycle after durable revoke = %#v installer revokes=%d saves=%d", got, installer.revokes, saveCalls.Load())
+	}
+	if _, _, pending := host.server.CompletedTrust(descriptor.ID); pending {
+		t.Fatal("acknowledged completed ownership was not retired")
 	}
 }
 

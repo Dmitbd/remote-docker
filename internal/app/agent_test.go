@@ -294,7 +294,8 @@ func (c *recordingController) Handle(_ context.Context, method localapi.Method, 
 }
 
 type trustRevokedBindingController struct {
-	observer trustRevokedObserver
+	observer   trustRevokedObserver
+	retryCalls int
 }
 
 func (*trustRevokedBindingController) Handle(context.Context, localapi.Method, json.RawMessage) (any, error) {
@@ -303,6 +304,11 @@ func (*trustRevokedBindingController) Handle(context.Context, localapi.Method, j
 
 func (c *trustRevokedBindingController) bindTrustRevokedObserver(observer trustRevokedObserver) {
 	c.observer = observer
+}
+
+func (c *trustRevokedBindingController) retryTrustRevokedObserver(ctx context.Context, deviceID, sessionID string) error {
+	c.retryCalls++
+	return c.observer(ctx, deviceID, sessionID)
 }
 
 type recordingControlClient struct {

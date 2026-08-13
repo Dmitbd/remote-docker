@@ -282,6 +282,84 @@ func TestDesktopControllerTrustRevokedObserverReconcilesDurableCompletionBeforeR
 	}
 }
 
+func TestDesktopControllerRetainsPendingTrustRevokeAcrossShutdown(t *testing.T) {
+	machine := newLifecycleMachine(t, lifecycle.RoleWindowsHost)
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled})
+	pairingState := lifecycle.Pairing{
+		SessionID: "session-1", Peer: lifecycle.Peer{ID: "temporary-mac", Name: "Mac"},
+		Code: "123456", ExpiresAt: time.Now().Add(time.Minute),
+	}
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &pairingState})
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingApproved})
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCompleted, Peer: &lifecycle.Peer{ID: "mac-one", Name: "Mac"}})
+	supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+	fallback := &trustRevokedBindingController{}
+	controller, err := NewDesktopController(supervisor, fallback)
+	if err != nil {
+		t.Fatalf("NewDesktopController() error = %v", err)
+	}
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventQuitRequested})
+	if err := fallback.observer(context.Background(), "mac-one", "session-1"); err == nil {
+		t.Fatal("trust-revoked observer acknowledged terminal stopping state")
+	}
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventStopCompleted})
+	if err := controller.retryPendingTrustRevoke(context.Background()); err == nil {
+		t.Fatal("terminal retry acknowledged a lifecycle revoke")
+	}
+	got := machine.Snapshot()
+	if got.State != lifecycle.StatePaused || !got.Terminal || got.TrustedPeers != 1 || got.Peer == nil ||
+		controller.pendingTrustRevoke == nil || fallback.retryCalls != 1 {
+		t.Fatalf("shutdown pending revoke = %#v pending=%#v retries=%d", got, controller.pendingTrustRevoke, fallback.retryCalls)
+	}
+}
+
+func TestDesktopControllerDoesNotRetryPendingTrustRevokeAfterStopFailure(t *testing.T) {
+	machine := newLifecycleMachine(t, lifecycle.RoleWindowsHost)
+	runtime := newRecordingSessionRuntime()
+	stopStarted := make(chan struct{})
+	releaseStop := make(chan struct{})
+	runtime.stop = func(context.Context) error {
+		close(stopStarted)
+		<-releaseStop
+		return errors.New("injected stop failure")
+	}
+	supervisor, _ := NewSupervisor(machine, runtime)
+	fallback := &trustRevokedBindingController{}
+	controller, err := NewDesktopController(supervisor, fallback)
+	if err != nil {
+		t.Fatalf("NewDesktopController() error = %v", err)
+	}
+	if _, err := controller.Handle(context.Background(), localapi.MethodEnable, nil); err != nil {
+		t.Fatalf("Enable() error = %v", err)
+	}
+	pairingState := lifecycle.Pairing{
+		SessionID: "session-1", Peer: lifecycle.Peer{ID: "temporary-mac", Name: "Mac"},
+		Code: "123456", ExpiresAt: time.Now().Add(time.Minute),
+	}
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &pairingState})
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingApproved})
+	_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCompleted, Peer: &lifecycle.Peer{ID: "mac-one", Name: "Mac"}})
+
+	cancelDone := make(chan error, 1)
+	go func() {
+		_, cancelErr := controller.Handle(context.Background(), localapi.MethodConnectionCancel, nil)
+		cancelDone <- cancelErr
+	}()
+	waitForTestSignal(t, stopStarted, "failed connection stop")
+	if err := fallback.observer(context.Background(), "mac-one", "session-1"); err == nil {
+		t.Fatal("trust-revoked observer acknowledged stopping state")
+	}
+	close(releaseStop)
+	if err := waitForTestError(t, cancelDone, "failed connection cancellation"); err == nil {
+		t.Fatal("ConnectionCancel() error = nil")
+	}
+	got := machine.Snapshot()
+	if got.State != lifecycle.StateConnecting || got.TrustedPeers != 1 || got.Peer == nil || got.Peer.ID != "mac-one" ||
+		controller.pendingTrustRevoke == nil || fallback.retryCalls != 0 {
+		t.Fatalf("failed-stop pending revoke = %#v pending=%#v retries=%d", got, controller.pendingTrustRevoke, fallback.retryCalls)
+	}
+}
+
 func TestDesktopControllerPublishesTypedIdentityProblemAfterTrustedStartAbort(t *testing.T) {
 	machine, err := lifecycle.NewMachine(
 		lifecycle.RoleMacClient,

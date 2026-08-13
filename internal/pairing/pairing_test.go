@@ -655,6 +655,108 @@ func TestPairingServerPublishesOnlyExactCompletedTrustRevocationOutsideLock(t *t
 	}
 }
 
+func TestPairingServerRequiresCurrentObserverAcknowledgementAndProtectsNewerCompletion(t *testing.T) {
+	t.Run("callback replacement", func(t *testing.T) {
+		fixture := newPairingFixture(t)
+		if err := fixture.server.Approve(fixture.descriptor.ID); err != nil {
+			t.Fatalf("Approve() error = %v", err)
+		}
+		code, _ := fixture.client.Code()
+		if _, _, err := fixture.client.Confirm(context.Background(), code); err != nil {
+			t.Fatalf("Confirm() error = %v", err)
+		}
+
+		firstStarted := make(chan struct{})
+		releaseFirst := make(chan struct{})
+		fixture.server.BindTrustRevokedObserver(func(context.Context, string, string) error {
+			close(firstStarted)
+			<-releaseFirst
+			return nil
+		})
+		published := make(chan error, 1)
+		go func() {
+			published <- fixture.server.PublishTrustRevoked(context.Background(), "mac-studio", "generation-one")
+		}()
+		select {
+		case <-firstStarted:
+		case <-time.After(time.Second):
+			t.Fatal("first observer did not start")
+		}
+		replacementCalls := 0
+		fixture.server.BindTrustRevokedObserver(func(_ context.Context, deviceID, sessionID string) error {
+			replacementCalls++
+			if deviceID != "mac-studio" || sessionID != fixture.descriptor.ID {
+				t.Fatalf("replacement observer device=%q session=%q", deviceID, sessionID)
+			}
+			return nil
+		})
+		close(releaseFirst)
+		select {
+		case err := <-published:
+			if err != nil {
+				t.Fatalf("PublishTrustRevoked() error = %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("replaced observer publication did not finish")
+		}
+		if replacementCalls != 1 {
+			t.Fatalf("replacement observer calls = %d, want 1", replacementCalls)
+		}
+		if _, _, retained := fixture.server.CompletedTrust(fixture.descriptor.ID); retained {
+			t.Fatal("current observer acknowledgement did not retire completed ownership")
+		}
+	})
+
+	t.Run("newer completion", func(t *testing.T) {
+		fixture := newPairingFixture(t)
+		if err := fixture.server.Approve(fixture.descriptor.ID); err != nil {
+			t.Fatalf("Approve() error = %v", err)
+		}
+		code, _ := fixture.client.Code()
+		if _, _, err := fixture.client.Confirm(context.Background(), code); err != nil {
+			t.Fatalf("Confirm() error = %v", err)
+		}
+
+		newPublicKey, _, _ := ed25519.GenerateKey(nil)
+		newDescriptor, err := fixture.server.StartSession(newPublicKey, MaxSessionTTL)
+		if err != nil {
+			t.Fatalf("new StartSession() error = %v", err)
+		}
+		if err := fixture.server.Approve(newDescriptor.ID); err != nil {
+			t.Fatalf("new Approve() error = %v", err)
+		}
+		newClient := Client{
+			BaseURL: fixture.httpServer.URL, Session: newDescriptor, DeviceID: "mac-new",
+			Generation: "generation-new", AuthorizedKey: "ssh-ed25519 MAC-NEW-KEY",
+		}
+		newCode, _ := newClient.Code()
+		if _, _, err := newClient.Confirm(context.Background(), newCode); err != nil {
+			t.Fatalf("new Confirm() error = %v", err)
+		}
+
+		calls := 0
+		fixture.server.BindTrustRevokedObserver(func(_ context.Context, deviceID, sessionID string) error {
+			calls++
+			if deviceID != "mac-new" || sessionID != newDescriptor.ID {
+				t.Fatalf("new observer device=%q session=%q", deviceID, sessionID)
+			}
+			return nil
+		})
+		if err := fixture.server.PublishTrustRevoked(context.Background(), "mac-studio", "generation-one"); err != nil {
+			t.Fatalf("stale PublishTrustRevoked() error = %v", err)
+		}
+		if err := fixture.server.RetryTrustRevoked(context.Background(), "mac-studio", fixture.descriptor.ID); err != nil {
+			t.Fatalf("stale RetryTrustRevoked() error = %v", err)
+		}
+		if calls != 0 {
+			t.Fatalf("stale delivery observer calls = %d", calls)
+		}
+		if deviceID, generation, retained := fixture.server.CompletedTrust(newDescriptor.ID); !retained || deviceID != "mac-new" || generation != "generation-new" {
+			t.Fatalf("new completed ownership = device=%q generation=%q retained=%t", deviceID, generation, retained)
+		}
+	})
+}
+
 func TestPairingSessionControlRejectsUnknownOrWrongClient(t *testing.T) {
 	fixture := newPairingFixture(t)
 	unknown := fixture.client.Session

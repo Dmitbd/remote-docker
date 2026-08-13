@@ -1130,6 +1130,16 @@ func (c *productionAgentController) bindTrustRevokedObserver(observer trustRevok
 	}
 }
 
+func (c *productionAgentController) retryTrustRevokedObserver(ctx context.Context, deviceID, sessionID string) error {
+	if c == nil || c.pairing == nil {
+		return nil
+	}
+	if retryer, ok := c.pairing.(trustRevokedObserverRetryer); ok {
+		return retryer.retryTrustRevokedObserver(ctx, deviceID, sessionID)
+	}
+	return nil
+}
+
 func (c *productionAgentController) abandonPairing(sessionID string) {
 	if c == nil || c.pairing == nil {
 		return
@@ -2170,6 +2180,13 @@ func (c windowsPairingCoordinator) bindTrustRevokedObserver(observer trustRevoke
 	if c.server != nil {
 		c.server.BindTrustRevokedObserver(observer)
 	}
+}
+
+func (c windowsPairingCoordinator) retryTrustRevokedObserver(ctx context.Context, deviceID, sessionID string) error {
+	if c.server == nil {
+		return nil
+	}
+	return c.server.RetryTrustRevoked(ctx, deviceID, sessionID)
 }
 
 func (windowsPairingCoordinator) Candidates(context.Context) (localapi.PairCandidatesResult, error) {
