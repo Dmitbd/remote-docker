@@ -75,6 +75,10 @@ To stop its work while keeping the app open, choose **Pause**. To exit fully and
 
 The development candidate has focused race-test and Windows cross-compilation coverage only. Until physical verification is recorded, a real shortcut, WebView2, tray, focus, or process-lifecycle problem remains an unverified result rather than a completed guarantee.
 
+**Development candidate only:** on Windows the tray icon is expected to change with the application state: paused, search/waiting, pairing, connected, or error. These small state icons are embedded in the executable and are separate from the full application icon used by the shortcut. Windows uses regular colored ICOs; macOS keeps its template menu-bar icons. The Windows icons have automated structure and selection coverage, but their visibility on light and dark taskbars has not yet been physically verified.
+
+If the Windows tray icon is missing, indistinguishable, stale, or disappears after closing the window with X, record the current UI state, taskbar theme and whether the desktop process is still running. Do not enable autostart or copy icon files into the installation directory as a workaround. Reopen the existing window from the shortcut once; if the icon still does not match the state, keep the exact application version and screenshot for the physical verification report.
+
 ## The Mac still uses a local Docker engine
 
 The Resources screen reports whether a known local Docker socket is active. Also inspect the managed context:

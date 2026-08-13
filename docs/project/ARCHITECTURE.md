@@ -3,7 +3,7 @@
 **Статус документа:** Текущее + В активной ветке + Целевое состояние
 
 **Текущее проверено относительно:** `main` @ `3b7df2c`
-**Активная ветка проверена относительно:** `codex/fix-connection-cancel-windows-shell` @ `00d0bcf`
+**Активная ветка проверена относительно:** `codex/fix-connection-cancel-windows-shell` @ `9e27cf3`
 **Дата содержательной проверки:** 2026-08-13
 
 ## Как читать статусы
@@ -201,6 +201,14 @@ UI не определяет состояние самостоятельно: о
 Закрытие окна крестиком остаётся скрытием в tray, а не Finish work; повторный запуск ярлыка должен показать существующее окно. Эти Windows-сценарии подтверждены только сфокусированными автоматическими тестами и cross-compilation активной ветки. Физическая проверка точного artifact ещё не выполнена.
 
 Изменение не добавляет listener, port, service, autostart, protocol или schema и не меняет границу same-user local API.
+
+### В активной ветке: Windows tray icons
+
+Windows tray использует пять отдельных state-specific ICO: `paused`, `search`, `pairing`, `connected` и `error`. Каждый ICO детерминированно собирается из выбранного pixel sign и содержит PNG-backed варианты 16, 20, 24 и 32 px. Файлы встраиваются в `RemoteDocker.exe` через Go `embed`; установщик не копирует их как отдельные runtime-файлы.
+
+Platform consumer сохраняет разные форматы и режимы отображения: Windows получает ICO через regular tray icon API, macOS — существующий monochrome PNG через template icon API, а Unix и неизвестные platform values — цветной PNG через regular icon API. Полноразмерный application ICO остаётся отдельным asset: build script встраивает его в Windows executables, а NSIS копирует его для Start Menu и optional Desktop shortcut. State-specific tray assets его не заменяют.
+
+Изменение tray assets не добавляет listener, port, service, autostart, protocol или schema. Автоматические проверки подтверждают структуру и детерминированность ICO, соответствие embedded assets, выбор state/platform и Windows cross-compilation, но не видимость Windows shell icon. Отображение всех пяти состояний на светлой и тёмной taskbar требует физической проверки точного artifact.
 
 ## Данные, keys и ownership
 

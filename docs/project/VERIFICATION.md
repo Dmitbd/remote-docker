@@ -3,7 +3,7 @@
 **Статус документа:** Текущее
 
 **Проверено относительно:** package source `main` @ `09ba7ca`
-**Автоматические проверки активной ветки:** `codex/fix-connection-cancel-windows-shell` @ `00d0bcf`
+**Автоматические проверки активной ветки:** `codex/fix-connection-cancel-windows-shell` @ `9e27cf3`
 **Дата содержательной проверки:** 2026-08-13
 
 ## Правила доказательств
@@ -55,6 +55,15 @@
 - Launcher-owned synchronized state заменяет чтение `exec.Cmd.ProcessState`; исходно воспроизведённая race закрыта regression tests активной ветки.
 - Stop терминален для launcher. Поздний/in-flight Show не запускает UI после Finish work; concurrent Stop присоединяется к exact operation, а retry arbitration разрешает не более одной terminal retry-попытки.
 - Сфокусированный race-набор `internal/desktop` и desktop command, а также Windows cross-compilation обоих test binaries пройдены локально для `00d0bcf`. Это доказывает проверяемые контракты и компилируемость target, но не поведение Windows, WebView2, shortcut, tray или реальных процессов.
+- Listener, port, service, autostart, protocol и schema не добавлялись.
+
+### В активной ветке: state-specific Windows tray icon
+
+- Детерминированный generator и его tests подтверждают пять Windows ICO (`paused`, `search`, `pairing`, `connected`, `error`), PNG-backed entries 16/20/24/32 px и сохранение отдельного полноразмерного application ICO.
+- `internal/assets` tests подтверждают exact embedded ICO bytes для Windows, существующие template PNG для macOS и цветной regular PNG fallback для Unix/unknown platforms.
+- `internal/desktop` tests подтверждают выбор state asset и mode: Windows ICO/regular, macOS PNG/template, Unix/unknown PNG/regular.
+- Windows tray ICO входят в `RemoteDocker.exe` через Go `embed` и не устанавливаются отдельными файлами. NSIS продолжает копировать отдельный `remote-docker.ico` для application/shortcut; существующий package contract проверяет этот путь и отсутствие autostart.
+- Сфокусированные Go tests и Windows cross-compilation подтверждают source/build contract, но не видимость или качество рендеринга icon в Windows shell. Реальный installer для этой активной ветки не собирался.
 - Listener, port, service, autostart, protocol и schema не добавлялись.
 
 ### Интеграционная проверка 2026-08-11
@@ -113,7 +122,7 @@
 
 ### Физическая Windows desktop boundary активной ветки
 
-Для `codex/fix-connection-cancel-windows-shell` @ `00d0bcf` installer/artifact не собирался. Все строки ниже остаются **Не проверено** до запуска точного artifact на Windows.
+Для `codex/fix-connection-cancel-windows-shell` @ `9e27cf3` installer/artifact не собирался. Все строки ниже остаются **Не проверено** до запуска точного artifact на Windows.
 
 | Сценарий | Ожидаемый результат | Статус |
 |---|---|---|
@@ -123,6 +132,14 @@
 | Focus error или неотвечающий exact UI | Одна bounded recovery-попытка завершает только exact owned child и запускает не более одного replacement | Не проверено |
 | Ошибка recovery | Операция завершается ограниченно с ошибкой; foreign/newer process не изменяется; retry loop отсутствует | Не проверено |
 | Finish work одновременно с focus/Stop | После завершения нет owned UI child; поздний или in-flight Show не запускает новый | Не проверено |
+| Tray: `paused`, светлая и тёмная taskbar | Значок видим и соответствует paused-state | Не проверено |
+| Tray: `search`, светлая и тёмная taskbar | Значок видим и отличается от paused-state | Не проверено |
+| Tray: `pairing`, светлая и тёмная taskbar | Значок видим и отличается от search-state | Не проверено |
+| Tray: `connected`, светлая и тёмная taskbar | Значок видим и соответствует connected-state | Не проверено |
+| Tray: `error`, светлая и тёмная taskbar | Значок видим и явно отличается от normal states | Не проверено |
+| Application и shortcut icon | Ярлык и executable используют отдельный полноразмерный application icon, а не state-specific tray ICO | Не проверено |
+| Крестик и tray icon | Обычный X скрывает окно; state icon остаётся доступен возле часов | Не проверено |
+| Finish work и tray icon | После terminal shutdown значок исчезает и desktop/UI processes завершены | Не проверено |
 
 ## Сеть и recovery
 
