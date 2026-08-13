@@ -54,7 +54,8 @@ type presenceRPCStarter func(context.Context) (*presenceRPCProcess, error)
 // presence lease. Calls are serialized so request IDs and responses cannot be
 // confused with other Remote Docker RPC processes.
 type sshPresenceTransport struct {
-	starter presenceRPCStarter
+	lifetime context.Context
+	starter  presenceRPCStarter
 
 	mu      sync.Mutex
 	process *presenceRPCProcess
@@ -62,12 +63,19 @@ type sshPresenceTransport struct {
 	nextID  uint64
 }
 
-func newSSHPresenceTransport(starter presenceRPCStarter) *sshPresenceTransport {
-	return &sshPresenceTransport{starter: starter}
+func newSSHPresenceTransport(lifetime context.Context, starter presenceRPCStarter) *sshPresenceTransport {
+	if lifetime == nil {
+		lifetime = context.Background()
+	}
+	return &sshPresenceTransport{lifetime: lifetime, starter: starter}
 }
 
-func newProductionSSHPresenceTransport(store config.Store, sshConfigPath string) *sshPresenceTransport {
-	return newSSHPresenceTransport(func(ctx context.Context) (*presenceRPCProcess, error) {
+func newProductionSSHPresenceTransport(
+	lifetime context.Context,
+	store config.Store,
+	sshConfigPath string,
+) *sshPresenceTransport {
+	return newSSHPresenceTransport(lifetime, func(ctx context.Context) (*presenceRPCProcess, error) {
 		cfg, err := loadAgentConfig(store)
 		if err != nil || strings.TrimSpace(cfg.ActiveDevice) == "" {
 			return nil, errors.New("trusted presence peer is unavailable")
@@ -165,7 +173,7 @@ func (t *sshPresenceTransport) call(ctx context.Context, method string, params a
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.process == nil {
-		process, err := t.starter(ctx)
+		process, err := t.starter(t.lifetime)
 		if err != nil || process == nil || process.stdin == nil || process.stdout == nil || process.stop == nil {
 			return ErrPresenceLease
 		}
@@ -189,9 +197,10 @@ func (t *sshPresenceTransport) call(ctx context.Context, method string, params a
 		line []byte
 		err  error
 	}
+	reader := t.reader
 	read := make(chan readResult, 1)
 	go func() {
-		line, readErr := t.reader.ReadSlice('\n')
+		line, readErr := reader.ReadSlice('\n')
 		read <- readResult{line: append([]byte(nil), line...), err: readErr}
 	}()
 	var received readResult

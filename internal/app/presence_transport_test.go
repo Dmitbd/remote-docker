@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPresenceSSHArgsUsePinnedConfigAndDedicatedAllowedCommand(t *testing.T) {
@@ -20,6 +22,107 @@ func TestPresenceSSHArgsUsePinnedConfigAndDedicatedAllowedCommand(t *testing.T) 
 	}
 	if got := presenceSSHArgs("/managed/ssh_config", "remote-docker-device-pc-1-control"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("presence SSH args = %#v, want %#v", got, want)
+	}
+}
+
+func TestSSHPresenceTransportDoesNotBindProcessToSuccessfulRequestContext(t *testing.T) {
+	lifetimeCtx, cancelLifetime := context.WithCancel(context.Background())
+	defer cancelLifetime()
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+
+	serverInput, clientInput := io.Pipe()
+	clientOutput, serverOutput := io.Pipe()
+	go func() {
+		defer serverOutput.Close()
+		decoder := json.NewDecoder(serverInput)
+		encoder := json.NewEncoder(serverOutput)
+		for index := 0; index < 2; index++ {
+			var request presenceRPCRequest
+			if err := decoder.Decode(&request); err != nil {
+				return
+			}
+			encoded, _ := json.Marshal(presenceWireResult{
+				SessionID: "session-1", DockerReady: true, SyncReady: true,
+			})
+			_ = encoder.Encode(presenceRPCResponse{
+				JSONRPC: "2.0", ID: request.ID, Result: encoded,
+			})
+		}
+	}()
+
+	startedWith := make(chan context.Context, 1)
+	stops := 0
+	transport := newSSHPresenceTransport(lifetimeCtx, func(ctx context.Context) (*presenceRPCProcess, error) {
+		startedWith <- ctx
+		return &presenceRPCProcess{
+			stdin: clientInput, stdout: clientOutput,
+			stop: func() error {
+				stops++
+				_ = clientInput.Close()
+				return nil
+			},
+		}, nil
+	})
+
+	hello, err := transport.Hello(requestCtx, PresenceHello{
+		ClientDeviceID: "mac", ClientName: "MacBook", AppVersion: "0.2.9",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelRequest()
+	processCtx := <-startedWith
+	if err := processCtx.Err(); err != nil {
+		t.Fatalf("process context after successful request = %v", err)
+	}
+	if _, err := transport.Heartbeat(context.Background(), hello.SessionID, 1); err != nil {
+		t.Fatalf("Heartbeat() after request cancellation = %v", err)
+	}
+	cancelLifetime()
+	select {
+	case <-processCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("process context survived session cancellation")
+	}
+	if err := transport.Close(); err != nil || stops != 1 {
+		t.Fatalf("Close() error=%v stops=%d, want nil/1", err, stops)
+	}
+}
+
+func TestSSHPresenceTransportRequestTimeoutStillStopsProcess(t *testing.T) {
+	serverInput, clientInput := io.Pipe()
+	clientOutput, serverOutput := io.Pipe()
+	requestRead := make(chan struct{})
+	go func() {
+		var request presenceRPCRequest
+		_ = json.NewDecoder(serverInput).Decode(&request)
+		close(requestRead)
+	}()
+
+	stops := 0
+	transport := newSSHPresenceTransport(context.Background(), func(context.Context) (*presenceRPCProcess, error) {
+		return &presenceRPCProcess{
+			stdin: clientInput, stdout: clientOutput,
+			stop: func() error {
+				stops++
+				_ = clientInput.Close()
+				_ = clientOutput.Close()
+				_ = serverOutput.Close()
+				return nil
+			},
+		}, nil
+	})
+	requestCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err := transport.Hello(requestCtx, PresenceHello{
+		ClientDeviceID: "mac", ClientName: "MacBook", AppVersion: "0.2.9",
+	})
+	<-requestRead
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Hello() error = %v, want deadline exceeded", err)
+	}
+	if stops != 1 {
+		t.Fatalf("process stops = %d, want 1", stops)
 	}
 }
 
@@ -49,7 +152,7 @@ func TestSSHPresenceTransportKeepsOneProcessForHelloHeartbeatsAndDisconnect(t *t
 	}()
 
 	starts, stops := 0, 0
-	transport := newSSHPresenceTransport(func(context.Context) (*presenceRPCProcess, error) {
+	transport := newSSHPresenceTransport(context.Background(), func(context.Context) (*presenceRPCProcess, error) {
 		starts++
 		return &presenceRPCProcess{
 			stdin: clientInput, stdout: clientOutput,
@@ -92,7 +195,7 @@ func TestSSHPresenceTransportRejectsMismatchedOrOversizedResponsesAndStopsProces
 			input, writer := io.Pipe()
 			reader := bufio.NewReader(strings.NewReader(test.response))
 			stops := 0
-			transport := newSSHPresenceTransport(func(context.Context) (*presenceRPCProcess, error) {
+			transport := newSSHPresenceTransport(context.Background(), func(context.Context) (*presenceRPCProcess, error) {
 				return &presenceRPCProcess{
 					stdin: writer, stdout: io.NopCloser(reader),
 					stop: func() error { stops++; _ = writer.Close(); return nil },

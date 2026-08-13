@@ -428,7 +428,7 @@ func (r *AgentRuntime) BindLifecycle(machine *lifecycle.Machine, appVersion stri
 		},
 		localName: snapshot.LocalName, appVersion: appVersion,
 		transport: func(ctx context.Context) (PresenceTransport, error) {
-			return newProductionSSHPresenceTransport(r.store, r.sshConfigPath), nil
+			return newProductionSSHPresenceTransport(ctx, r.store, r.sshConfigPath), nil
 		},
 	}
 	if tunnelRuntime, ok := r.tunnelClient.(tunnelClientLifecycle); ok && tunnelRuntime.client != nil {
