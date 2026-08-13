@@ -13,7 +13,7 @@ Remote confirmation может установить trust на Windows рань�
 ## Решение или испробованный подход
 
 - Pairing protocol имеет явную версию; несовместимая пара останавливается с upgrade-required результатом.
-- До remote confirmation Mac сохраняет durable rollback journal, уникальную generation и revocation proof; Windows хранит только proof hash и public pairing metadata.
+- До remote confirmation Mac сохраняет durable rollback journal, уникальную generation и revocation proof; Windows хранит только proof hash и public pairing metadata. Durable committed trust и revoke адресуются точной парой `(deviceID, PairingGeneration)`.
 - Status polling остаётся observe-only. Completion и cleanup выполняются отдельно под generation-scoped leases и общим cross-process state lock.
 - `localOnly` атомарно фиксирует запрет remote revoke. Независимые remote, Docker и local cleanup stages имеют отдельные bounded contexts и повторяются идемпотентно.
 - Docker Context получает уникальный owner token. Create/update/restore/remove разрешены только при точном совпадении token, endpoint и managed description; ambiguous ownership завершается без мутации.
@@ -30,8 +30,8 @@ Remote confirmation может установить trust на Windows рань�
 
 В активной ветке отмена установки соединения продолжает этот durable-cleanup контракт двумя обязательными границами:
 
-- Ранний идемпотентный proof revoke не доказывает, что ранее допущенный Windows Confirm уже не может зафиксировать trust. Mac сохраняет exact session/generation journal и revocation proof, пока TLS-pinned observe-only запрос точной session не пройдёт через тот же server mutex и не подтвердит terminal/not-found состояние. Только после этой quiescence boundary повторный exact-generation revoke может завершить remote stage и удалить proof.
-- Proof-authenticated Windows revoke сначала сохраняет durable удаление registry и принадлежащих pairing артефактов. Exact device/session notification вызывается вне transaction/locks и остаётся привязанным к завершённому pairing до успешного lifecycle acknowledgement. Если lifecycle находится в `stopping`, после успешного non-terminal `StopCompleted` повторяется только локальная доставка; remote revoke, installer cleanup и config save не выполняются второй раз. `StopFailed`, terminal quit и stale generation не подтверждают и не применяют это уведомление.
+- Ранний идемпотентный proof revoke не доказывает, что ранее допущенный Windows Confirm уже не может зафиксировать trust. Mac сохраняет journal и revocation proof для точной пары `(deviceID, PairingGeneration)`, пока TLS-pinned observe-only запрос точной session не пройдёт через тот же server mutex и не подтвердит terminal/not-found состояние. Эта generation-owned запись сохраняется через restart; только после quiescence boundary повторный exact-generation revoke может завершить remote stage и удалить proof.
+- Proof-authenticated Windows revoke сначала сохраняет durable удаление registry и принадлежащих pairing артефактов для точной пары `(deviceID, PairingGeneration)`. Exact device/session notification вызывается вне transaction/locks и остаётся retained до успешного local lifecycle acknowledgement. Если lifecycle находится в `stopping`, после успешного non-terminal `StopCompleted` повторяется только локальная доставка; remote revoke, installer cleanup и config save не выполняются второй раз. `StopFailed`, terminal quit и stale generation не подтверждают и не применяют это уведомление.
 
 Дополнение реализовано в активной ветке `codex/fix-connection-cancel-windows-shell` и не считается частью `main` до интеграции. Сфокусированные race и pinned loopback TLS tests пройдены; физическая Mac↔Windows проверка отложена. Protocol/schema version, ports, listeners, services и autostart этим дополнением не меняются.
 

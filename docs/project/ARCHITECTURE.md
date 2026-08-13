@@ -3,7 +3,7 @@
 **Статус документа:** Текущее + В активной ветке + Целевое состояние
 
 **Текущее проверено относительно:** `main` @ `3b7df2c`
-**Активная ветка проверена относительно:** `codex/fix-connection-cancel-windows-shell` @ `9e27cf3`
+**Активная ветка проверена относительно:** `codex/fix-connection-cancel-windows-shell` @ `c55715c`
 **Дата содержательной проверки:** 2026-08-13
 
 ## Как читать статусы
@@ -188,7 +188,7 @@ Lifecycle machine содержит состояния:
 - `stopping`;
 - `needs_action`.
 
-UI не определяет состояние самостоятельно: он читает local API snapshot и отправляет команды. Discovery вызывается только в `searching`. Closing window сохраняет tray/menu-bar application, а Finish work вызывает terminal shutdown.
+UI не определяет состояние самостоятельно: он читает local API snapshot и отправляет команды. Discovery вызывается только в `searching`. В текущей конфигурации Wails обычный X завершает только дочерний Wails UI process: desktop process, lifecycle/runtime и tray/menu-bar продолжают работать. Следующий `Show` создаёт новый UI child, а не скрывает и не возвращает то же окно; transient UI state в новом child начинается заново. Finish work выполняет terminal shutdown.
 
 ### В активной ветке: ownership и восстановление Windows UI
 
@@ -198,13 +198,13 @@ UI не определяет состояние самостоятельно: о
 
 `exec.Cmd.ProcessState` не является общей liveness-моделью: launcher использует собственное синхронизированное состояние и exact completion channel. `Stop` терминально закрывает launcher для будущих `Show`, поэтому поздний или уже выполняющийся focus не может запустить UI после Finish work. Одновременные Stop присоединяются к точной stop operation; если точный child ещё жив после ошибки, только один caller может выполнить единственную terminal retry-попытку. Известная ложная ошибка после уже исчерпанного retry вынесена отдельно в backlog и не означает работающий child или повторное завершение процесса.
 
-Закрытие окна крестиком остаётся скрытием в tray, а не Finish work; повторный запуск ярлыка должен показать существующее окно. Эти Windows-сценарии подтверждены только сфокусированными автоматическими тестами и cross-compilation активной ветки. Физическая проверка точного artifact ещё не выполнена.
+Обычный X не равен Finish work: в текущей конфигурации Wails он завершает только exact owned UI child, пока desktop process, lifecycle/runtime и tray продолжают работать. Повторный запуск ярлыка через `Show` создаёт replacement UI child, а не показывает скрытое прежнее окно; transient UI state поэтому сбрасывается. Эти Windows-сценарии подтверждены только сфокусированными автоматическими тестами и cross-compilation активной ветки. Физическая проверка точного artifact ещё не выполнена.
 
 Изменение не добавляет listener, port, service, autostart, protocol или schema и не меняет границу same-user local API.
 
 ### В активной ветке: Windows tray icons
 
-Windows tray использует пять отдельных state-specific ICO: `paused`, `search`, `pairing`, `connected` и `error`. Каждый ICO детерминированно собирается из выбранного pixel sign и содержит PNG-backed варианты 16, 20, 24 и 32 px. Файлы встраиваются в `RemoteDocker.exe` через Go `embed`; установщик не копирует их как отдельные runtime-файлы.
+Windows tray использует пять отдельных state-specific ICO: `paused`, `search`, `pairing`, `connected` и `error`. Каждый ICO детерминированно собирается из выбранного pixel sign и содержит PNG-backed варианты 16, 20, 24 и 32 px. Файлы встраиваются в `RemoteDocker.exe` через Go `embed`; установщик не копирует их как отдельные runtime-файлы. Lifecycle `pairing_cancellation_pending` явно выбирает существующий `pairing` asset: отмена ещё завершает pairing, а не ищет host.
 
 Platform consumer сохраняет разные форматы и режимы отображения: Windows получает ICO через regular tray icon API, macOS — существующий monochrome PNG через template icon API, а Unix и неизвестные platform values — цветной PNG через regular icon API. Полноразмерный application ICO остаётся отдельным asset: build script встраивает его в Windows executables, а NSIS копирует его для Start Menu и optional Desktop shortcut. State-specific tray assets его не заменяют.
 
@@ -227,7 +227,7 @@ Platform consumer сохраняет разные форматы и режимы
 - WSL хранит authorized SSH identity, Syncthing configuration и managed Docker data;
 - installer хранит application/data roots и владеет только своими shortcuts/firewall rules.
 
-Pairing generation, revocation proof, rollback stages, cleanup lease и Docker Context owner token входят в текущий config schema. Docker Context изменяется или восстанавливается только при точном совпадении owner token, endpoint и managed description; неоднозначное ownership приводит к fail-closed результату без мутации чужого context.
+Pairing generation, revocation proof, rollback stages, cleanup lease и Docker Context owner token входят в текущий config schema. Durable identity remote trust/revoke — точная пара `(deviceID, PairingGeneration)`: generation-owned pending revoke сохраняется через restart до exact remote revoke/quiescence boundary и не может примениться к более новому trust. Docker Context изменяется или восстанавливается только при точном совпадении owner token, endpoint и managed description; неоднозначное ownership приводит к fail-closed результату без мутации чужого context.
 
 ## Lifecycle операций
 
@@ -238,7 +238,7 @@ Pairing generation, revocation proof, rollback stages, cleanup lease и Docker C
 - **Disconnect** завершает текущую connection session, сохраняя trusted peer.
 - **Forget** удаляет выбранное доверие и принадлежащие ему local artifacts; remote revoke может потребовать доступный Windows peer.
 - **Finish work** переводит lifecycle в terminal stopping, завершает runtime, relays, child processes и desktop/UI shell.
-- **Close window** не равен Finish work и оставляет tray/menu-bar application доступным.
+- **Close window** не равен Finish work: текущий X завершает только Wails UI child, сохраняя desktop process, lifecycle/runtime и tray/menu-bar; следующий `Show` создаёт replacement child.
 
 Приложение не регистрирует autostart. После reboot его запускают вручную.
 
@@ -256,7 +256,7 @@ Cancel/stop сначала переводит lifecycle в `stopping`. Pairing s
 
 Если Windows успел подтвердить trust, а Mac ещё не завершил локальный commit, Mac хранит exact session/generation journal и revocation proof. Успешный ранний revoke не считается окончательным, пока TLS-pinned observe-only запрос точной session не подтвердит, что ранее допущенный Confirm завершился. До этой quiescence boundary proof и journal остаются пригодными для повторной exact-generation очистки после timeout или restart.
 
-На Windows proof-authenticated revoke сначала удаляет принадлежащие pairing артефакты и сохраняет durable registry, а затем вне config transaction и server lock уведомляет lifecycle о точных device/session. Если lifecycle в это время находится в `stopping`, уведомление остаётся привязанным к точному завершённому pairing и доставляется локально после успешного non-terminal `StopCompleted` для cancel, disconnect или pause. Такая доставка не повторяет network revoke, installer cleanup или config save. `StopFailed` и terminal quit не подтверждают уведомление ложно; stale session/generation не очищает более новое trust.
+На Windows proof-authenticated revoke сначала удаляет принадлежащие pairing артефакты и сохраняет durable generation-owned revoke для точной пары `(deviceID, PairingGeneration)`, а затем вне config transaction и server lock уведомляет lifecycle о точном device/session. Если lifecycle в это время находится в `stopping`, уведомление сохраняется до local acknowledgement и доставляется локально только после успешного non-terminal `StopCompleted` для cancel, disconnect или pause. Такая доставка не повторяет network revoke, installer cleanup или config save. `StopFailed` и terminal quit не подтверждают уведомление ложно; stale session/generation не очищает более новое trust.
 
 UI передаёт cancel/stop через отдельную local API операцию с ограниченным временем выполнения, показывает loader и блокирует повторный клик до результата. Это подтверждено сфокусированными автоматическими тестами, но ещё не проверено на физической паре Mac↔Windows.
 

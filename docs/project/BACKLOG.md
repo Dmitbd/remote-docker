@@ -3,7 +3,7 @@
 **Статус документа:** Текущее
 
 **Текущее проверено относительно:** `main` @ `3b7df2c`
-**Активная ветка проверена относительно:** `codex/fix-connection-cancel-windows-shell` @ `9e27cf3`
+**Активная ветка проверена относительно:** `codex/fix-connection-cancel-windows-shell` @ `c55715c`
 **Дата содержательной проверки:** 2026-08-13
 
 Backlog содержит только незавершённую работу. Наличие пункта не разрешает агенту автоматически брать его в текущую задачу.
@@ -75,8 +75,8 @@ Backlog содержит только незавершённую работу. �
 - **Доказательство:** Требует устройства
 - **Влияние:** Ошибка установки или update может оставить старый process, некорректный WSL state либо затронуть чужие OS resources.
 - **Известно:** Packaging contracts и проверяемый shutdown/rollback gate находятся в `main`. В активной ветке добавлены exact-window recovery и пять embedded Windows tray ICO; focused tests и cross-compilation не подтверждают их отображение Windows shell. Реальный NSIS/PowerShell/WSL lifecycle после `cfc06ec` не проверен.
-- **Критерий завершения:** Fresh install, same-version retry, supported update, reboot continuation, normal uninstall и explicit data removal дают заявленный результат без видимых зависших consoles и autostart. Закрытие окна крестиком скрывает его в tray; повторный запуск ярлыка показывает то же окно без второго desktop/UI process. В tray различимы `paused`, `search`, `pairing`, `connected` и `error` на светлой и тёмной taskbar; полноразмерная иконка ярлыка не заменена state icon.
-- **Проверка:** Windows installer UI, logs, process list, WSL distributions, firewall rules, app/data directories и preserved Docker data. Отдельно зафиксировать process tree после закрытия крестиком и нескольких повторных запусков ярлыка, а также screenshot каждого tray state на light/dark taskbar и исчезновение icon после **Finish work**.
+- **Критерий завершения:** Fresh install, same-version retry, supported update, reboot continuation, normal uninstall и explicit data removal дают заявленный результат без видимых зависших consoles и autostart. В текущей конфигурации Wails X завершает только UI child; desktop process, lifecycle/runtime и tray остаются, а следующий запуск ярлыка создаёт replacement UI child без второго desktop process. В tray различимы `paused`, `search`, `pairing`, `connected` и `error` на светлой и тёмной taskbar; полноразмерная иконка ярлыка не заменена state icon.
+- **Проверка:** Windows installer UI, logs, process list, WSL distributions, firewall rules, app/data directories и preserved Docker data. Отдельно зафиксировать process tree после X и нескольких повторных запусков ярлыка, доказать создание нового UI child и reset transient UI state, а также screenshot каждого tray state на light/dark taskbar и исчезновение icon после **Finish work**.
 - **Связано:** `docs/INSTALL.md`, `tests/integration/windows_package.Tests.ps1`, [verification](VERIFICATION.md#install-update-uninstall).
 
 ### RD-B005: Проверить cleanup, idle resources и отсутствие утечек

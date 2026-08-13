@@ -115,15 +115,29 @@ func TestPlatformContainersContainExpectedEntries(t *testing.T) {
 }
 
 func TestEveryLifecycleStateMapsToATrayAsset(t *testing.T) {
-	states := []lifecycle.State{
-		lifecycle.StatePaused, lifecycle.StateClientReady, lifecycle.StateSearching, lifecycle.StateHostWaiting,
-		lifecycle.StatePairing, lifecycle.StateConnecting, lifecycle.StateConnected, lifecycle.StateReconnecting,
-		lifecycle.StateStopping, lifecycle.StateNeedsAction,
+	states := []struct {
+		state lifecycle.State
+		want  TrayState
+	}{
+		{state: lifecycle.StatePaused, want: TrayPaused},
+		{state: lifecycle.StateClientReady, want: TraySearch},
+		{state: lifecycle.StateSearching, want: TraySearch},
+		{state: lifecycle.StateHostWaiting, want: TraySearch},
+		{state: lifecycle.StatePairing, want: TrayPairing},
+		{state: lifecycle.StatePairingCancellationPending, want: TrayPairing},
+		{state: lifecycle.StateConnecting, want: TrayConnected},
+		{state: lifecycle.StateConnected, want: TrayConnected},
+		{state: lifecycle.StateReconnecting, want: TraySearch},
+		{state: lifecycle.StateStopping, want: TrayPaused},
+		{state: lifecycle.StateNeedsAction, want: TrayError},
 	}
-	for _, state := range states {
-		mapped := TrayStateFor(lifecycle.Snapshot{State: state})
+	for _, tt := range states {
+		mapped := TrayStateFor(lifecycle.Snapshot{State: tt.state})
+		if mapped != tt.want {
+			t.Fatalf("state %s maps to tray %s, want %s", tt.state, mapped, tt.want)
+		}
 		if len(TrayIcon("darwin", mapped)) == 0 || len(TrayIcon("windows", mapped)) == 0 {
-			t.Fatalf("state %s maps to missing tray asset %s", state, mapped)
+			t.Fatalf("state %s maps to missing tray asset %s", tt.state, mapped)
 		}
 	}
 }

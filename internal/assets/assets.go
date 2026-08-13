@@ -41,7 +41,7 @@ func TrayStateFor(snapshot lifecycle.Snapshot) TrayState {
 	switch snapshot.State {
 	case lifecycle.StatePaused, lifecycle.StateStopping:
 		return TrayPaused
-	case lifecycle.StatePairing:
+	case lifecycle.StatePairing, lifecycle.StatePairingCancellationPending:
 		return TrayPairing
 	case lifecycle.StateConnecting, lifecycle.StateConnected:
 		return TrayConnected

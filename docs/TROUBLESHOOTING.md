@@ -63,13 +63,13 @@ The first version intentionally supports one trusted Mac and one Windows host. R
 
 ## The window disappeared but Docker still works
 
-Closing the window with X hides it and keeps Remote Docker available in the macOS menu bar or Windows tray. This is not **Finish work**. Open the existing window from that icon.
+In the current Wails configuration, closing the window with X exits only the Wails UI child. The desktop process, lifecycle/runtime, and macOS menu bar or Windows tray remain available. This is not **Finish work**. The next Show from the shortcut creates a new UI child; it does not hide or reopen the same window, so transient UI state resets.
 
 **Development candidate only:** the Windows shortcut focus and bounded UI recovery behavior below exists in the current development branch. It is not part of `main` or the `0.2.8` package and has not yet been verified with a built artifact on physical Windows.
 
-On Windows, launching the shortcut again while Remote Docker is already running is expected to show the same owned window and then end the second launcher process. It must not start a second agent or a second UI. A focus error, a `shown: false` result, or an application that is not ready is reported as a failed launch instead of false success.
+On Windows, launching the shortcut again while Remote Docker is already running uses the same-user local API and must receive `shown: true`; the second launcher then ends. If X has already exited the UI child, this Show creates one replacement child while the desktop process remains. It must not start a second agent or a second desktop process. A focus error, a `shown: false` result, or an application that is not ready is reported as a failed launch instead of false success.
 
-If the exact owned UI stops naturally, the desktop process may start it once. If that UI is still running but does not answer the private focus request, Remote Docker makes one bounded recovery attempt for that exact child. It does not search for or stop windows and processes by a shared title, name, or PID. Do not repeatedly click the shortcut while this bounded operation is in progress.
+If the exact owned UI stops naturally, the next Show may create it once. If that UI is still running but does not answer the private focus request, Remote Docker makes one bounded recovery attempt for that exact child. It does not search for or stop windows and processes by a shared title, name, or PID. Do not repeatedly click the shortcut while this bounded operation is in progress.
 
 To stop its work while keeping the app open, choose **Pause**. To exit fully and stop all owned background work, choose **Finish work**.
 
@@ -77,7 +77,7 @@ The development candidate has focused race-test and Windows cross-compilation co
 
 **Development candidate only:** on Windows the tray icon is expected to change with the application state: paused, search/waiting, pairing, connected, or error. These small state icons are embedded in the executable and are separate from the full application icon used by the shortcut. Windows uses regular colored ICOs; macOS keeps its template menu-bar icons. The Windows icons have automated structure and selection coverage, but their visibility on light and dark taskbars has not yet been physically verified.
 
-If the Windows tray icon is missing, indistinguishable, stale, or disappears after closing the window with X, record the current UI state, taskbar theme and whether the desktop process is still running. Do not enable autostart or copy icon files into the installation directory as a workaround. Reopen the existing window from the shortcut once; if the icon still does not match the state, keep the exact application version and screenshot for the physical verification report.
+If the Windows tray icon is missing, indistinguishable, stale, or disappears after closing the window with X, record the current UI state, taskbar theme and whether the desktop process is still running. Do not enable autostart or copy icon files into the installation directory as a workaround. Use the shortcut once to create a replacement UI child; if the icon still does not match the state, keep the exact application version and screenshot for the physical verification report.
 
 ## The Mac still uses a local Docker engine
 

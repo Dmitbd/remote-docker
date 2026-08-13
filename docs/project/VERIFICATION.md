@@ -3,7 +3,7 @@
 **Статус документа:** Текущее
 
 **Проверено относительно:** package source `main` @ `09ba7ca`
-**Автоматические проверки активной ветки:** `codex/fix-connection-cancel-windows-shell` @ `9e27cf3`
+**Автоматические проверки активной ветки:** `codex/fix-connection-cancel-windows-shell` @ `c55715c`
 **Дата содержательной проверки:** 2026-08-13
 
 ## Правила доказательств
@@ -44,6 +44,7 @@
 - `internal/lifecycle` и `internal/app` race tests подтверждают переход `pairing`/`connecting` → `stopping`, очистку comparison code только после успешного stop, retry после `StopFailed` и сохранение полностью committed trust.
 - Mac coordinator race tests подтверждают exact session/generation arbitration, сохранение revocation proof после partial commit и delayed Confirm, TLS-pinned observe-only quiescence fence и защиту более нового pairing от stale cleanup.
 - Windows pairing/app race tests и pinned loopback TLS-сценарий подтверждают порядок durable registry revoke → lifecycle notification, сохранение точного уведомления во время `stopping` и его однократную локальную доставку после успешного cancel/disconnect/pause без второго network revoke или config save.
+- `internal/assets` test подтверждает явное отображение lifecycle `pairing_cancellation_pending` в существующий tray asset `pairing`; новый tray state или asset не вводится.
 - Автоматические проверки не подтверждают реальный WebView, tray/menu-bar, firewall/VPN path, OS process cleanup или обмен между двумя устройствами. Физическая матрица остаётся непройденной до интеграции Windows window activation и tray icon и сборки точных artifacts.
 - Ветка не добавляет protocol/schema version, LAN ports, listeners, services или autostart.
 
@@ -126,8 +127,9 @@
 
 | Сценарий | Ожидаемый результат | Статус |
 |---|---|---|
-| Закрыть окно крестиком | Окно скрывается; Remote Docker остаётся доступен в tray; Finish work не выполняется | Не проверено |
-| Повторно запустить ярлык при скрытом окне | Существующее окно показывается и выводится вперёд; второй запуск завершается | Не проверено |
+| Закрыть окно крестиком | В текущей конфигурации Wails завершается только UI child; desktop process, lifecycle/runtime и tray остаются, Finish work не выполняется | Не проверено |
+| Повторно запустить ярлык после X | Второй launcher завершается; `Show` создаёт replacement UI child, а не показывает скрытое прежнее окно | Не проверено |
+| Проверить recreation UI после X | Новый UI child получает fresh transient UI state; desktop/lifecycle/runtime и tray не перезапускаются | Не проверено |
 | Сверить process tree после повторных запусков | Работают ровно один desktop process и один принадлежащий ему UI child | Не проверено |
 | Focus error или неотвечающий exact UI | Одна bounded recovery-попытка завершает только exact owned child и запускает не более одного replacement | Не проверено |
 | Ошибка recovery | Операция завершается ограниченно с ошибкой; foreign/newer process не изменяется; retry loop отсутствует | Не проверено |
@@ -138,7 +140,7 @@
 | Tray: `connected`, светлая и тёмная taskbar | Значок видим и соответствует connected-state | Не проверено |
 | Tray: `error`, светлая и тёмная taskbar | Значок видим и явно отличается от normal states | Не проверено |
 | Application и shortcut icon | Ярлык и executable используют отдельный полноразмерный application icon, а не state-specific tray ICO | Не проверено |
-| Крестик и tray icon | Обычный X скрывает окно; state icon остаётся доступен возле часов | Не проверено |
+| Крестик и tray icon | Обычный X завершает только UI child; state icon остаётся доступен возле часов | Не проверено |
 | Finish work и tray icon | После terminal shutdown значок исчезает и desktop/UI processes завершены | Не проверено |
 
 ## Сеть и recovery
