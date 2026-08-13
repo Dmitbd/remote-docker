@@ -59,11 +59,7 @@ func run() error {
 	configPath := config.DefaultPath(runtime.GOOS, home)
 	instance, err := acquireDesktopUpgradeGate(ctx, runtime.GOOS, configPath, productionDesktopUpgradeDependencies())
 	if errors.Is(err, desktop.ErrAlreadyRunning) {
-		var result map[string]any
-		focusCtx, focusCancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer focusCancel()
-		_ = (localapi.Client{}).Call(focusCtx, localapi.MethodShowWindow, nil, &result)
-		return nil
+		return showExistingDesktop(ctx, 2*time.Second, (localapi.Client{}).Call)
 	}
 	if err != nil {
 		return err
@@ -344,7 +340,7 @@ func initialTrustedPeer(store config.Store, role lifecycle.Role) *lifecycle.Peer
 type desktopAPIHandler struct {
 	base     localapi.Handler
 	mu       sync.RWMutex
-	show     func()
+	show     func() error
 	shutdown func()
 }
 
@@ -354,7 +350,7 @@ func (h *desktopAPIHandler) setShutdown(shutdown func()) {
 	h.mu.Unlock()
 }
 
-func (h *desktopAPIHandler) setShow(show func()) {
+func (h *desktopAPIHandler) setShow(show func() error) {
 	h.mu.Lock()
 	h.show = show
 	h.mu.Unlock()
@@ -365,8 +361,11 @@ func (h *desktopAPIHandler) Handle(ctx context.Context, method localapi.Method, 
 		h.mu.RLock()
 		show := h.show
 		h.mu.RUnlock()
-		if show != nil {
-			show()
+		if show == nil {
+			return nil, errors.New("desktop application is not ready")
+		}
+		if err := show(); err != nil {
+			return nil, err
 		}
 		return map[string]bool{"shown": true}, nil
 	}
@@ -383,3 +382,28 @@ func (h *desktopAPIHandler) Handle(ctx context.Context, method localapi.Method, 
 }
 
 var _ localapi.Handler = (*desktopAPIHandler)(nil)
+
+type showWindowResult struct {
+	Shown bool `json:"shown"`
+}
+
+type localAPICall func(context.Context, localapi.Method, any, any) error
+
+func showExistingDesktop(ctx context.Context, timeout time.Duration, call localAPICall) error {
+	if call == nil {
+		return errors.New("show existing Remote Docker window is unavailable")
+	}
+	if timeout <= 0 {
+		return errors.New("show existing Remote Docker window timeout is invalid")
+	}
+	focusCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var result showWindowResult
+	if err := call(focusCtx, localapi.MethodShowWindow, nil, &result); err != nil {
+		return fmt.Errorf("show existing Remote Docker window: %w", err)
+	}
+	if !result.Shown {
+		return errors.New("existing Remote Docker window was not shown")
+	}
+	return nil
+}

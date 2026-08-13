@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -98,14 +99,35 @@ func TestTrayApplicationReflectsLifecycleIconUpdates(t *testing.T) {
 	}
 }
 
+func TestApplicationShowPropagatesUIProcessError(t *testing.T) {
+	wantErr := errors.New("focus failed")
+	application, err := NewApplication(ApplicationOptions{
+		UI: &fakeUIProcess{showErr: wantErr},
+		Snapshot: func() lifecycle.Snapshot {
+			return lifecycle.Snapshot{State: lifecycle.StatePaused}
+		},
+		Tray: newFakeTray(),
+	})
+	if err != nil {
+		t.Fatalf("NewApplication() error = %v", err)
+	}
+	if err := application.Show(); !errors.Is(err, wantErr) {
+		t.Fatalf("Show() error = %v, want %v", err, wantErr)
+	}
+}
+
 type fakeUIProcess struct {
 	showCalls atomic.Int32
 	stopCalls atomic.Int32
 	running   atomic.Bool
+	showErr   error
 }
 
 func (p *fakeUIProcess) Show(context.Context) error {
 	p.showCalls.Add(1)
+	if p.showErr != nil {
+		return p.showErr
+	}
 	p.running.Store(true)
 	return nil
 }

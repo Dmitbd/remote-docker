@@ -78,10 +78,10 @@ func (a *Application) Run(ctx context.Context) error {
 	return a.quitErr
 }
 
-func (a *Application) Show() {
+func (a *Application) Show() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = a.ui.Show(ctx)
+	return a.ui.Show(ctx)
 }
 
 func (a *Application) Quit(ctx context.Context) error {
@@ -109,7 +109,7 @@ func (a *Application) handleOpen(ctx context.Context, item trayMenuItem) {
 		case <-ctx.Done():
 			return
 		case <-item.Clicked():
-			a.Show()
+			_ = a.Show()
 		}
 	}
 }

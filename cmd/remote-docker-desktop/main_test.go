@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,6 +16,122 @@ import (
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
 	"github.com/Dmitbd/remote-docker/internal/localapi"
 )
+
+func TestDesktopAPIShowWindowReportsConfirmedResult(t *testing.T) {
+	handler := &desktopAPIHandler{}
+	handler.setShow(func() error { return nil })
+	result, err := handler.Handle(context.Background(), localapi.MethodShowWindow, nil)
+	if err != nil {
+		t.Fatalf("Handle(ShowWindow) error = %v", err)
+	}
+	if got := result.(map[string]bool)["shown"]; !got {
+		t.Fatalf("Handle(ShowWindow) shown = %t, want true", got)
+	}
+}
+
+func TestDesktopAPIShowWindowRequiresRegisteredApplication(t *testing.T) {
+	handler := &desktopAPIHandler{}
+	result, err := handler.Handle(context.Background(), localapi.MethodShowWindow, nil)
+	if err == nil {
+		t.Fatal("Handle(ShowWindow) error = nil without application")
+	}
+	if result != nil {
+		t.Fatalf("Handle(ShowWindow) result = %#v, want nil", result)
+	}
+}
+
+func TestDesktopAPIShowWindowPropagatesApplicationError(t *testing.T) {
+	wantErr := errors.New("focus failed")
+	handler := &desktopAPIHandler{}
+	handler.setShow(func() error { return wantErr })
+	result, err := handler.Handle(context.Background(), localapi.MethodShowWindow, nil)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Handle(ShowWindow) error = %v, want %v", err, wantErr)
+	}
+	if result != nil {
+		t.Fatalf("Handle(ShowWindow) result = %#v, want nil", result)
+	}
+
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	done := make(chan error, 1)
+	go func() {
+		done <- (localapi.Server{
+			Handler:       handler,
+			AuthorizePeer: func(net.Conn) error { return nil },
+		}).ServeConn(context.Background(), serverConn)
+	}()
+	client := localapi.Client{Dial: func(context.Context) (net.Conn, error) { return clientConn, nil }}
+	var shown struct {
+		Shown bool `json:"shown"`
+	}
+	err = client.Call(context.Background(), localapi.MethodShowWindow, nil, &shown)
+	var remoteErr *localapi.RemoteError
+	if !errors.As(err, &remoteErr) || remoteErr.Code != localapi.ErrorInternal {
+		t.Fatalf("local API error = %v, want public internal boundary", err)
+	}
+	if shown.Shown {
+		t.Fatal("local API returned shown:true after focus error")
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("ServeConn() error = %v", err)
+	}
+}
+
+func TestShowExistingDesktopRequiresConfirmedPayload(t *testing.T) {
+	tests := []struct {
+		name    string
+		result  showWindowResult
+		callErr error
+	}{
+		{name: "call error", callErr: errors.New("transport failed")},
+		{name: "shown false", result: showWindowResult{Shown: false}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := showExistingDesktop(context.Background(), time.Second, func(_ context.Context, method localapi.Method, _ any, result any) error {
+				if method != localapi.MethodShowWindow {
+					t.Fatalf("method = %q, want %q", method, localapi.MethodShowWindow)
+				}
+				payload, marshalErr := json.Marshal(test.result)
+				if marshalErr != nil {
+					t.Fatalf("marshal result: %v", marshalErr)
+				}
+				if unmarshalErr := json.Unmarshal(payload, result); unmarshalErr != nil {
+					t.Fatalf("unmarshal result: %v", unmarshalErr)
+				}
+				return test.callErr
+			})
+			if err == nil {
+				t.Fatal("showExistingDesktop() error = nil, want failure")
+			}
+		})
+	}
+}
+
+func TestShowExistingDesktopAcceptsConfirmedPayload(t *testing.T) {
+	err := showExistingDesktop(context.Background(), time.Second, func(_ context.Context, _ localapi.Method, _ any, result any) error {
+		result.(*showWindowResult).Shown = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("showExistingDesktop() error = %v", err)
+	}
+}
+
+func TestShowExistingDesktopUsesBoundedContext(t *testing.T) {
+	started := time.Now()
+	err := showExistingDesktop(context.Background(), 10*time.Millisecond, func(ctx context.Context, _ localapi.Method, _ any, _ any) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("showExistingDesktop() error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("showExistingDesktop() elapsed = %v, want bounded call", elapsed)
+	}
+}
 
 func TestWaitForDesktopShutdownRequiresCompletion(t *testing.T) {
 	done := make(chan error)
