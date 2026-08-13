@@ -129,6 +129,9 @@ func TestPairingApprovalPublishesConnectingUntilTrustIsCommitted(t *testing.T) {
 				SessionID: "session", Peer: Peer{ID: "peer", Name: "Peer"},
 				Code: "123456", ExpiresAt: time.Now().Add(time.Minute),
 			}
+			if role == RoleWindowsHost {
+				pairing.Peer.Generation = "generation-one"
+			}
 			mustApply(t, machine, Event{Type: EventPairingStarted, Pairing: &pairing})
 
 			approved := mustApply(t, machine, Event{Type: EventPairingApproved})
@@ -572,6 +575,42 @@ func TestPairingCompletedPreservesTrustedPeerGeneration(t *testing.T) {
 	}
 }
 
+func TestWindowsPairingCompletedRejectsEmptyTrustedPeerGeneration(t *testing.T) {
+	machine := mustMachine(t, RoleWindowsHost)
+	mustApply(t, machine, Event{Type: EventEnabled})
+	pairing := Pairing{
+		SessionID: "session-current", Peer: Peer{ID: "mac-current", Name: "Mac"}, Code: "123456",
+	}
+	mustApply(t, machine, Event{Type: EventPairingStarted, Pairing: &pairing})
+	mustApply(t, machine, Event{Type: EventPairingApproved})
+	before := machine.Snapshot()
+
+	if _, err := machine.Apply(Event{
+		Type: EventPairingCompleted, Peer: &Peer{ID: pairing.Peer.ID, Name: pairing.Peer.Name},
+	}); !errors.As(err, new(*TransitionError)) {
+		t.Fatalf("empty-generation completion error = %v, want TransitionError", err)
+	}
+	after := machine.Snapshot()
+	if after.Revision != before.Revision || after.State != StateConnecting || after.Pairing == nil ||
+		after.TrustedPeers != 0 || after.Peer != nil {
+		t.Fatalf("empty-generation completion changed lifecycle: before=%#v after=%#v", before, after)
+	}
+
+	mac := mustMachine(t, RoleMacClient)
+	mustApply(t, mac, Event{Type: EventEnabled})
+	mustApply(t, mac, Event{Type: EventSearchStarted})
+	mustApply(t, mac, Event{Type: EventPairingStarted, Pairing: &Pairing{
+		SessionID: "session-mac", Peer: Peer{ID: "windows", Name: "Windows"}, Code: "123456",
+	}})
+	mustApply(t, mac, Event{Type: EventPairingApproved})
+	completed := mustApply(t, mac, Event{
+		Type: EventPairingCompleted, Peer: &Peer{ID: "windows", Name: "Windows"},
+	})
+	if completed.TrustedPeers != 1 || completed.Peer == nil {
+		t.Fatalf("Mac completion without Windows-host generation = %#v", completed)
+	}
+}
+
 func TestNetworkRecoveryUsesSixtySecondDeadline(t *testing.T) {
 	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
 	machine, err := NewMachine(RoleWindowsHost, "Render PC", WithClock(fixedClock(now)))
@@ -890,6 +929,9 @@ func connectMachine(t *testing.T, machine *Machine) {
 	pairing := Pairing{
 		SessionID: "session-1", Peer: Peer{ID: "peer-1", Name: "Peer"}, Code: "123456",
 		Status: PairingPending, ExpiresAt: time.Now().Add(time.Minute),
+	}
+	if machine.Snapshot().Role == RoleWindowsHost {
+		pairing.Peer.Generation = "generation-one"
 	}
 	if machine.Snapshot().Role == RoleMacClient {
 		mustApply(t, machine, Event{Type: EventSearchStarted})

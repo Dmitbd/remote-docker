@@ -155,17 +155,19 @@ func TestDesktopControllerConnectionCancelPreservesDurableCompletionThatWon(t *t
 				Peer:   localapi.LifecyclePeer{ID: "temporary-peer", Name: "Peer"},
 				Device: &localapi.Device{ID: "trusted-peer", Name: "Peer"},
 			}
-			fallback := &recordingLocalHandler{results: map[localapi.Method]any{
-				localapi.MethodPairStart: localapi.PairStartResult{
-					SessionID: "session-1", Code: "123456", ExpiresAt: expires,
-					Peer: localapi.LifecyclePeer{ID: "temporary-peer", Name: "Peer"},
-				},
-				localapi.MethodPairApprove: localapi.PairingStatusResult{
-					SessionID: "session-1", Code: "123456", Status: string(pairing.SessionApproved), ExpiresAt: expires,
-					Peer: localapi.LifecyclePeer{ID: "temporary-peer", Name: "Peer"},
-				},
-				localapi.MethodPairCancel: completed,
-			}}
+			fallback := &generationRecordingLocalHandler{
+				generation: "generation-one",
+				recordingLocalHandler: recordingLocalHandler{results: map[localapi.Method]any{
+					localapi.MethodPairStart: localapi.PairStartResult{
+						SessionID: "session-1", Code: "123456", ExpiresAt: expires,
+						Peer: localapi.LifecyclePeer{ID: "temporary-peer", Name: "Peer"},
+					},
+					localapi.MethodPairApprove: localapi.PairingStatusResult{
+						SessionID: "session-1", Code: "123456", Status: string(pairing.SessionApproved), ExpiresAt: expires,
+						Peer: localapi.LifecyclePeer{ID: "temporary-peer", Name: "Peer"},
+					},
+					localapi.MethodPairCancel: completed,
+				}}}
 			controller, _ := NewDesktopController(supervisor, fallback)
 			_, _ = controller.Handle(context.Background(), localapi.MethodEnable, nil)
 			if role == lifecycle.RoleMacClient {
@@ -195,6 +197,15 @@ func TestDesktopControllerConnectionCancelPreservesDurableCompletionThatWon(t *t
 			}
 		})
 	}
+}
+
+type generationRecordingLocalHandler struct {
+	recordingLocalHandler
+	generation string
+}
+
+func (h *generationRecordingLocalHandler) committedPairingGeneration(string) (string, error) {
+	return h.generation, nil
 }
 
 func TestDesktopControllerConnectionCancelStopsTrustedStartupWithoutPairingMutation(t *testing.T) {
@@ -313,6 +324,49 @@ func TestDesktopControllerPairingCompletionCommitsWindowsGeneration(t *testing.T
 	if snapshot.State != lifecycle.StateConnecting || snapshot.TrustedPeers != 1 || snapshot.Peer == nil ||
 		snapshot.Peer.ID != "mac-one" || snapshot.Peer.Generation != "generation-one" {
 		t.Fatalf("completed Windows lifecycle = %#v", snapshot)
+	}
+}
+
+func TestDesktopControllerPairingCompletionRejectsUnownedGeneration(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		err  error
+	}{
+		{name: "config transaction", err: errors.New("config transaction failed")},
+		{name: "config load", err: errors.New("config load failed")},
+		{name: "missing device", err: errors.New("committed device record is missing")},
+		{name: "empty generation", err: errors.New("committed pairing generation is empty")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			machine := newLifecycleMachine(t, lifecycle.RoleWindowsHost)
+			_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled})
+			pairingState := lifecycle.Pairing{
+				SessionID: "session-1", Peer: lifecycle.Peer{ID: "temporary-mac", Name: "Mac"},
+				Code: "123456", ExpiresAt: time.Now().Add(time.Minute),
+			}
+			_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &pairingState})
+			supervisor, _ := NewSupervisor(machine, newRecordingSessionRuntime())
+			fallback := &generationPairingHandler{
+				generationErr: tt.err,
+				result: localapi.PairingStatusResult{
+					SessionID: "session-1", Status: string(pairing.SessionCompleted),
+					Peer:   localapi.LifecyclePeer{ID: "temporary-mac", Name: "Mac"},
+					Device: &localapi.Device{ID: "mac-one", Name: "Mac"},
+				},
+			}
+			controller, err := NewDesktopController(supervisor, fallback)
+			if err != nil {
+				t.Fatalf("NewDesktopController() error = %v", err)
+			}
+
+			if _, err := controller.Handle(context.Background(), localapi.MethodPairStatus, json.RawMessage(`{"session_id":"session-1"}`)); !errors.Is(err, tt.err) {
+				t.Fatalf("PairStatus() error = %v, want %v", err, tt.err)
+			}
+			snapshot := machine.Snapshot()
+			if snapshot.TrustedPeers != 0 || snapshot.Peer != nil || snapshot.Pairing == nil {
+				t.Fatalf("failed resolver committed lifecycle trust = %#v", snapshot)
+			}
+		})
 	}
 }
 

@@ -604,8 +604,16 @@ func reconcilePairingLifecycle(machine *lifecycle.Machine, fallback localapi.Han
 		peer.ID = status.Device.ID
 		peer.Name = status.Device.Name
 		peer.Address = status.Device.Address
-		if resolver, ok := fallback.(committedPairingGenerationResolver); ok {
-			peer.Generation = resolver.committedPairingGeneration(status.Device.ID)
+		if snapshot.Role == lifecycle.RoleWindowsHost {
+			resolver, ok := fallback.(committedPairingGenerationResolver)
+			if !ok {
+				return unavailable("committed pairing generation is unavailable")
+			}
+			generation, err := resolver.committedPairingGeneration(status.Device.ID)
+			if err != nil {
+				return err
+			}
+			peer.Generation = generation
 		}
 		_, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCompleted, Peer: &peer})
 		return err

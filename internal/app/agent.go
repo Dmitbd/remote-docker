@@ -65,7 +65,7 @@ type trustRevokedObserverRetryer interface {
 }
 
 type committedPairingGenerationResolver interface {
-	committedPairingGeneration(string) string
+	committedPairingGeneration(string) (string, error)
 }
 
 type Agent struct {
@@ -112,14 +112,14 @@ func (a *Agent) retryTrustRevokedObserver(ctx context.Context, deviceID, generat
 	return nil
 }
 
-func (a *Agent) committedPairingGeneration(deviceID string) string {
+func (a *Agent) committedPairingGeneration(deviceID string) (string, error) {
 	if a == nil || a.controller == nil {
-		return ""
+		return "", errors.New("committed pairing generation is unavailable")
 	}
 	if resolver, ok := a.controller.(committedPairingGenerationResolver); ok {
 		return resolver.committedPairingGeneration(deviceID)
 	}
-	return ""
+	return "", errors.New("committed pairing generation is unavailable")
 }
 
 func (a *Agent) Status() AgentStatus {

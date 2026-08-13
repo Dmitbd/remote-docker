@@ -5,12 +5,12 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -279,6 +279,48 @@ func TestPairingLifecycleReconcilerCommitsWindowsTrustWithDurableGeneration(t *t
 	if snapshot.State != lifecycle.StateConnecting || snapshot.Pairing != nil || snapshot.TrustedPeers != 1 ||
 		snapshot.Peer == nil || snapshot.Peer.ID != "mac-one" || snapshot.Peer.Generation != "generation-one" {
 		t.Fatalf("completed Windows lifecycle = %#v", snapshot)
+	}
+}
+
+func TestPairingLifecycleReconcilerRejectsUnownedWindowsCompletion(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		err  error
+	}{
+		{name: "config transaction", err: errors.New("config transaction failed")},
+		{name: "config load", err: errors.New("config load failed")},
+		{name: "missing device", err: errors.New("committed device record is missing")},
+		{name: "empty generation", err: errors.New("committed pairing generation is empty")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			machine := newLifecycleMachine(t, lifecycle.RoleWindowsHost)
+			if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &lifecycle.Pairing{
+				SessionID: "session-1", Peer: lifecycle.Peer{ID: "temporary-mac", Name: "Mac"}, Code: "123456",
+				Status: lifecycle.PairingPending, ExpiresAt: time.Now().Add(time.Minute),
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			handler := &generationPairingHandler{
+				generationErr: tt.err,
+				result: localapi.PairingStatusResult{
+					SessionID: "session-1", Status: string(pairing.SessionCompleted),
+					Peer:   localapi.LifecyclePeer{ID: "temporary-mac", Name: "Mac"},
+					Device: &localapi.Device{ID: "mac-one", Name: "Mac"},
+				},
+			}
+			reconciler := &pairingLifecycleReconciler{machine: machine, handler: handler}
+
+			if err := reconciler.reconcile(context.Background()); !errors.Is(err, tt.err) {
+				t.Fatalf("reconcile error = %v, want %v", err, tt.err)
+			}
+			snapshot := machine.Snapshot()
+			if snapshot.TrustedPeers != 0 || snapshot.Peer != nil || snapshot.Pairing == nil {
+				t.Fatalf("failed resolver committed lifecycle trust = %#v", snapshot)
+			}
+		})
 	}
 }
 
@@ -3723,6 +3765,10 @@ type trackingStateLocker struct {
 	entries int
 }
 
+type failingStateLocker struct{ err error }
+
+func (l failingStateLocker) WithLock(context.Context, func() error) error { return l.err }
+
 func seedPendingRemoteCleanup(t *testing.T, root string) (config.Store, *credentials.MemoryStore, string) {
 	t.Helper()
 	store := config.Store{Path: filepath.Join(root, "config.json")}
@@ -4572,6 +4618,59 @@ func TestWindowsPairingStatusTreatsNoActiveSessionAsIdle(t *testing.T) {
 	}
 }
 
+func TestWindowsPairingCoordinatorCommittedGenerationFailsClosed(t *testing.T) {
+	transactionErr := errors.New("injected state lock failure")
+	transactionRegistry := windowsPairingRegistry{
+		store:              config.Store{Path: filepath.Join(t.TempDir(), "config.json")},
+		configTransactions: &configTransactions{locker: failingStateLocker{err: transactionErr}},
+	}
+	if generation, err := (windowsPairingCoordinator{registry: &transactionRegistry}).committedPairingGeneration("mac-one"); !errors.Is(err, transactionErr) || generation != "" {
+		t.Fatalf("transaction failure generation=%q error=%v", generation, err)
+	}
+
+	loadStore := config.Store{Path: filepath.Join(t.TempDir(), "config.json")}
+	if err := os.WriteFile(loadStore.Path, []byte("not-json\n"), 0o600); err != nil {
+		t.Fatalf("write invalid config: %v", err)
+	}
+	loadRegistry := windowsPairingRegistry{store: loadStore}
+	if generation, err := (windowsPairingCoordinator{registry: &loadRegistry}).committedPairingGeneration("mac-one"); err == nil || generation != "" {
+		t.Fatalf("load failure generation=%q error=%v", generation, err)
+	}
+
+	missingStore := config.Store{Path: filepath.Join(t.TempDir(), "config.json")}
+	if err := os.WriteFile(missingStore.Path, []byte(`{"schemaVersion":6,"activeDevice":"mac-one","devices":{}}`), 0o600); err != nil {
+		t.Fatalf("write missing-device config: %v", err)
+	}
+	missingRegistry := windowsPairingRegistry{store: missingStore}
+	if generation, err := (windowsPairingCoordinator{registry: &missingRegistry}).committedPairingGeneration("mac-one"); err == nil || generation != "" {
+		t.Fatalf("missing device generation=%q error=%v", generation, err)
+	}
+
+	emptyStore := config.Store{Path: filepath.Join(t.TempDir(), "config.json")}
+	if err := emptyStore.Save(config.Config{
+		SchemaVersion: config.CurrentSchemaVersion, ActiveDevice: "mac-one",
+		Devices: map[string]config.Device{"mac-one": {Name: "Mac"}},
+	}); err != nil {
+		t.Fatalf("save empty-generation config: %v", err)
+	}
+	emptyRegistry := windowsPairingRegistry{store: emptyStore}
+	if generation, err := (windowsPairingCoordinator{registry: &emptyRegistry}).committedPairingGeneration("mac-one"); err == nil || generation != "" {
+		t.Fatalf("empty generation=%q error=%v", generation, err)
+	}
+
+	validStore := config.Store{Path: filepath.Join(t.TempDir(), "config.json")}
+	if err := validStore.Save(config.Config{
+		SchemaVersion: config.CurrentSchemaVersion, ActiveDevice: "mac-one",
+		Devices: map[string]config.Device{"mac-one": {Name: "Mac", PairingGeneration: "generation-one"}},
+	}); err != nil {
+		t.Fatalf("save valid config: %v", err)
+	}
+	validRegistry := windowsPairingRegistry{store: validStore}
+	if generation, err := (windowsPairingCoordinator{registry: &validRegistry}).committedPairingGeneration("mac-one"); err != nil || generation != "generation-one" {
+		t.Fatalf("valid generation=%q error=%v", generation, err)
+	}
+}
+
 func TestWindowsPairingCoordinatorCancelsPendingAndApprovedExactSession(t *testing.T) {
 	for _, state := range []pairing.SessionState{pairing.SessionPending, pairing.SessionApproved} {
 		t.Run(string(state), func(t *testing.T) {
@@ -4778,44 +4877,107 @@ func TestWindowsProofRevokeClearsExactLifecycleTrustAfterDurableSave(t *testing.
 }
 
 func TestWindowsProofRevokeClearsRestoredLifecycleTrustAfterRestart(t *testing.T) {
-	store := config.Store{Path: filepath.Join(t.TempDir(), "config.json")}
+	root := t.TempDir()
+	windowsStore := config.Store{Path: filepath.Join(root, "windows-config.json")}
 	var saveCalls atomic.Int32
 	registry := windowsPairingRegistry{
-		store: store,
+		store: windowsStore,
 		saveConfig: func(cfg config.Config) error {
 			saveCalls.Add(1)
-			return store.Save(cfg)
+			return windowsStore.Save(cfg)
 		},
 	}
-	proof := bytes.Repeat([]byte{7}, pairing.RevocationProofSize)
-	peerKey, _, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := registry.Commit(context.Background(), pairing.TrustedPeer{
-		DeviceID: "mac-one", Generation: "generation-one", PublicKey: peerKey,
-		RevocationProofHash: sha256.Sum256(proof),
-	}); err != nil {
-		t.Fatalf("Commit() error = %v", err)
-	}
-	installer := &runtimePairingInstaller{}
+	installer := &runtimePairingInstaller{device: pairing.DeviceInfo{
+		SSHHostPublicKey: "ssh-ed25519 WINDOWS-HOST", SyncthingDeviceID: "WINDOWS-SYNC",
+		SSHPort: 49222, SyncthingPort: 49220,
+	}}
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	identity := tunnel.Identity{PrivateKey: privateKey, PublicKey: publicKey}
-	host, err := newWindowsPairingHostWithRegistryAndIdentity(installer, registry, identity)
+	originalHost, err := newWindowsPairingHostWithRegistryAndIdentity(installer, registry, identity)
 	if err != nil {
 		t.Fatalf("newWindowsPairingHostWithRegistryAndIdentity() error = %v", err)
 	}
-	coordinator := &windowsPairingCoordinator{server: host.server, installer: installer, registry: &registry}
+	originalHTTP := newWindowsPairingHTTPTestServer(t, originalHost.server, nil)
+	dialAddress := originalHTTP.Listener.Addr().String()
+	dial := func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, dialAddress)
+	}
+	macStore := config.Store{Path: filepath.Join(root, "mac-config.json")}
+	secrets := credentials.NewMemoryStore()
+	transport := discoveryPairingTransport{
+		Store: macStore, Secrets: secrets, DialContext: dial,
+		discover: func(context.Context) ([]discovery.Peer, error) {
+			return []discovery.Peer{{
+				InstanceID: originalHost.server.InstanceID(), Pairing: true,
+				Port: 43119, Addresses: []net.IP{net.ParseIP("127.0.0.1")},
+			}}, nil
+		},
+		inspect: func(context.Context, string, string) (pairing.Info, error) {
+			return pairing.Info{
+				InstanceID: originalHost.server.InstanceID(), DisplayName: "Windows",
+				ServerPublicKey: identity.PublicKey,
+			}, nil
+		},
+		bootstrap: func(_ context.Context, _ string, key ed25519.PublicKey) (pairing.SessionDescriptor, error) {
+			return originalHost.server.StartSession(key, pairing.MaxSessionTTL)
+		},
+	}
+	mac := newMacPairingCoordinator(macPairingOptions{
+		Store: macStore, Secrets: secrets, Transport: transport,
+		Docker: &runtimeDockerExecutor{}, DockerCLI: "docker-real", DockerContext: "remote-docker",
+		ClientDeviceID: func(context.Context) (string, error) { return "mac-one", nil },
+		SSHConfigPath:  filepath.Join(root, "ssh_config"), ManagedSSHRoot: testManagedSSHRoot(t, root),
+		KnownHostsPath: filepath.Join(root, "known_hosts"), AgentSocketPath: filepath.Join(root, "ssh-agent.sock"),
+		ControlDir: filepath.Join(root, "control"),
+	})
+	started, err := mac.Start(context.Background(), originalHost.server.InstanceID())
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if err := originalHost.server.Approve(started.SessionID); err != nil {
+		t.Fatalf("Approve() error = %v", err)
+	}
+	mac.mu.Lock()
+	pending := *mac.pending
+	pending.revocationProof = append([]byte(nil), mac.pending.revocationProof...)
+	mac.mu.Unlock()
+	if _, err := transport.Confirm(
+		context.Background(), pending.target, pending.descriptor, pending.clientDeviceID, pending.cleanupID,
+		pending.authorizedKey, started.Code, pending.revocationProof,
+	); err != nil {
+		t.Fatalf("Confirm() error = %v", err)
+	}
+	committed, err := windowsStore.Load()
+	if err != nil || committed.ActiveDevice != "mac-one" ||
+		committed.Devices["mac-one"].PairingGeneration != pending.cleanupID || saveCalls.Load() != 1 {
+		t.Fatalf("committed Windows trust = %#v saves=%d error=%v", committed, saveCalls.Load(), err)
+	}
+	originalHTTP.Close()
+	originalHost = nil
+
+	freshHost, err := newWindowsPairingHostWithRegistryAndIdentity(installer, registry, identity)
+	if err != nil {
+		t.Fatalf("fresh newWindowsPairingHostWithRegistryAndIdentity() error = %v", err)
+	}
+	var networkRevokes atomic.Int32
+	freshHTTP := newWindowsPairingHTTPTestServer(t, freshHost.server, func(request *http.Request) {
+		if request.URL.Path == "/v1/pair/revoke" {
+			networkRevokes.Add(1)
+		}
+	})
+	defer freshHTTP.Close()
+	dialAddress = freshHTTP.Listener.Addr().String()
+	coordinator := &windowsPairingCoordinator{server: freshHost.server, installer: installer, registry: &registry}
 	agent := NewAgent(nil, nil, &productionAgentController{pairing: coordinator})
+	restoredPeer := InitialTrustedPeer(windowsStore, lifecycle.RoleWindowsHost)
+	if restoredPeer == nil || restoredPeer.ID != "mac-one" || restoredPeer.Generation != pending.cleanupID {
+		t.Fatalf("restored startup peer = %#v", restoredPeer)
+	}
 	restored, err := lifecycle.NewMachine(
-		lifecycle.RoleWindowsHost,
-		"Windows",
-		lifecycle.WithTrustedPeer(lifecycle.Peer{
-			ID: "mac-one", Name: "Mac", Generation: registry.committedGeneration("mac-one"),
-		}),
+		lifecycle.RoleWindowsHost, "Windows", lifecycle.WithTrustedPeer(*restoredPeer),
 	)
 	if err != nil {
 		t.Fatalf("NewMachine() error = %v", err)
@@ -4826,25 +4988,84 @@ func TestWindowsProofRevokeClearsRestoredLifecycleTrustAfterRestart(t *testing.T
 		t.Fatalf("NewDesktopController() error = %v", err)
 	}
 
-	if err := registry.RevokeWithProof(
-		context.Background(), installer, "mac-one", "generation-one", proof,
-		func(ctx context.Context, deviceID, generation string) error {
-			return host.server.PublishTrustRevoked(ctx, deviceID, generation)
-		},
+	revokeClient := pairing.Client{
+		BaseURL:    "https://127.0.0.1:49221",
+		Session:    pairing.SessionDescriptor{ServerPublicKey: identity.PublicKey},
+		HTTPClient: pairing.NewPinnedHTTPClient(identity.PublicKey, dial),
+	}
+	if err := revokeClient.Revoke(
+		context.Background(), pending.clientDeviceID, pending.cleanupID, pending.revocationProof,
 	); err != nil {
-		t.Fatalf("RevokeWithProof() error = %v", err)
+		t.Fatalf("pinned TLS Revoke() error = %v", err)
 	}
 	got := restored.Snapshot()
 	if got.State != lifecycle.StatePaused || got.TrustedPeers != 0 || got.Peer != nil ||
-		controller.pendingTrustRevoke != nil || installer.revokes != 1 || saveCalls.Load() != 2 {
-		t.Fatalf("restored lifecycle after revoke = %#v pending=%#v revokes=%d saves=%d", got, controller.pendingTrustRevoke, installer.revokes, saveCalls.Load())
+		controller.pendingTrustRevoke != nil || installer.revokes != 1 || saveCalls.Load() != 2 || networkRevokes.Load() != 1 {
+		t.Fatalf("restored lifecycle after revoke = %#v pending=%#v installer=%d saves=%d network=%d",
+			got, controller.pendingTrustRevoke, installer.revokes, saveCalls.Load(), networkRevokes.Load())
 	}
-	if err := host.server.RetryTrustRevoked(context.Background(), "mac-one", "generation-one"); err != nil {
+	journalConfig, err := macStore.Load()
+	journal, exists := journalConfig.PendingRevocations[pending.cleanupID]
+	if err != nil || !exists || journal.SessionID != started.SessionID || journal.Device.RevocationCredentialOwner == "" {
+		t.Fatalf("Mac rollback journal = %#v exists=%t error=%v", journal, exists, err)
+	}
+	quiesced, err := mac.pairingConfirmationQuiesced(context.Background(), journal)
+	if err != nil || !quiesced {
+		t.Fatalf("pairing confirmation fence quiesced=%t error=%v", quiesced, err)
+	}
+	if err := mac.updatePendingRevocation(pending.cleanupID, func(current *config.PendingRevocation) {
+		current.CleanupRequested = true
+		current.RemoteRevoked = true
+		current.CompletionLeaseToken = ""
+		current.CompletionLeaseExpiresAt = ""
+	}); err != nil {
+		t.Fatalf("mark fenced remote revoke: %v", err)
+	}
+	if err := mac.ReconcilePendingRevocations(context.Background()); err != nil {
+		t.Fatalf("ReconcilePendingRevocations() error = %v", err)
+	}
+	finalMac, err := macStore.Load()
+	if err != nil || len(finalMac.PendingRevocations) != 0 {
+		t.Fatalf("final Mac cleanup journal = %#v error=%v", finalMac.PendingRevocations, err)
+	}
+	if _, err := secrets.Get(journal.Device.RevocationCredentialOwner, revocationProofCredential); !errors.Is(err, credentials.ErrNotFound) {
+		t.Fatalf("finalized revocation proof error = %v", err)
+	}
+	if err := freshHost.server.RetryTrustRevoked(context.Background(), "mac-one", pending.cleanupID); err != nil {
 		t.Fatalf("acknowledged RetryTrustRevoked() error = %v", err)
 	}
-	if installer.revokes != 1 || saveCalls.Load() != 2 {
-		t.Fatalf("local retry repeated durable effects: revokes=%d saves=%d", installer.revokes, saveCalls.Load())
+	if err := mac.ReconcilePendingRevocations(context.Background()); err != nil {
+		t.Fatalf("idempotent ReconcilePendingRevocations() error = %v", err)
 	}
+	if installer.revokes != 1 || saveCalls.Load() != 2 || networkRevokes.Load() != 1 {
+		t.Fatalf("redelivery repeated effects: installer=%d saves=%d network=%d", installer.revokes, saveCalls.Load(), networkRevokes.Load())
+	}
+}
+
+func newWindowsPairingHTTPTestServer(t *testing.T, server *pairing.Server, observe func(*http.Request)) *httptest.Server {
+	t.Helper()
+	tlsConfig, err := server.TLSConfig()
+	if err != nil {
+		t.Fatalf("TLSConfig() error = %v", err)
+	}
+	certificate, err := tlsConfig.GetCertificate(&tls.ClientHelloInfo{})
+	if err != nil {
+		t.Fatalf("GetCertificate() error = %v", err)
+	}
+	tlsConfig = tlsConfig.Clone()
+	tlsConfig.GetCertificate = nil
+	tlsConfig.Certificates = []tls.Certificate{*certificate}
+	handler := http.Handler(server)
+	if observe != nil {
+		handler = http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			observe(request)
+			server.ServeHTTP(response, request)
+		})
+	}
+	httpServer := httptest.NewUnstartedServer(handler)
+	httpServer.TLS = tlsConfig
+	httpServer.StartTLS()
+	return httpServer
 }
 
 func TestPrivatePeerListenerRejectsPublicPeerAtAcceptBoundary(t *testing.T) {
@@ -4918,16 +5139,17 @@ type runtimePairingInstaller struct {
 }
 
 type generationPairingHandler struct {
-	result     localapi.PairingStatusResult
-	generation string
+	result        localapi.PairingStatusResult
+	generation    string
+	generationErr error
 }
 
 func (h *generationPairingHandler) Handle(context.Context, localapi.Method, json.RawMessage) (any, error) {
 	return h.result, nil
 }
 
-func (h *generationPairingHandler) committedPairingGeneration(string) string {
-	return h.generation
+func (h *generationPairingHandler) committedPairingGeneration(string) (string, error) {
+	return h.generation, h.generationErr
 }
 
 type trustRevokedBindingCoordinator struct {

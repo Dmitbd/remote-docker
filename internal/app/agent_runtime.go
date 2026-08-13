@@ -836,9 +836,15 @@ func (r *pairingLifecycleReconciler) applyObserved(snapshot lifecycle.Snapshot, 
 			peer.ID = status.Device.ID
 			peer.Name = status.Device.Name
 			peer.Address = status.Device.Address
-			if resolver, ok := r.handler.(committedPairingGenerationResolver); ok {
-				peer.Generation = resolver.committedPairingGeneration(status.Device.ID)
+			resolver, ok := r.handler.(committedPairingGenerationResolver)
+			if !ok {
+				return snapshot, unavailable("committed pairing generation is unavailable")
 			}
+			generation, err := resolver.committedPairingGeneration(status.Device.ID)
+			if err != nil {
+				return snapshot, err
+			}
+			peer.Generation = generation
 			return r.applyObservedEvent(snapshot, lifecycle.EventPairingCompleted, &peer)
 		}
 		return snapshot, nil
@@ -1046,6 +1052,28 @@ func selectStartupRecovery(
 	}
 }
 
+// InitialTrustedPeer restores only exact durable public trust. Windows trust
+// additionally requires its persisted generation because lifecycle revoke
+// ownership must survive a desktop restart.
+func InitialTrustedPeer(store config.Store, role lifecycle.Role) *lifecycle.Peer {
+	cfg, err := store.Load()
+	if err != nil || cfg.ActiveDevice == "" {
+		return nil
+	}
+	device, ok := cfg.Devices[cfg.ActiveDevice]
+	if !ok || role == lifecycle.RoleWindowsHost && strings.TrimSpace(device.PairingGeneration) == "" {
+		return nil
+	}
+	peerOS := "windows"
+	if role == lifecycle.RoleWindowsHost {
+		peerOS = "macos"
+	}
+	return &lifecycle.Peer{
+		ID: cfg.ActiveDevice, Name: device.Name, OS: peerOS,
+		Address: device.Address, Generation: device.PairingGeneration,
+	}
+}
+
 type runtimePairingCoordinator interface {
 	Candidates(context.Context) (localapi.PairCandidatesResult, error)
 	Start(context.Context, string) (localapi.PairStartResult, error)
@@ -1143,14 +1171,14 @@ func (c *productionAgentController) retryTrustRevokedObserver(ctx context.Contex
 	return nil
 }
 
-func (c *productionAgentController) committedPairingGeneration(deviceID string) string {
+func (c *productionAgentController) committedPairingGeneration(deviceID string) (string, error) {
 	if c == nil || c.pairing == nil {
-		return ""
+		return "", errors.New("committed pairing generation is unavailable")
 	}
 	if resolver, ok := c.pairing.(committedPairingGenerationResolver); ok {
 		return resolver.committedPairingGeneration(deviceID)
 	}
-	return ""
+	return "", errors.New("committed pairing generation is unavailable")
 }
 
 func (c *productionAgentController) abandonPairing(sessionID string) {
@@ -2202,24 +2230,37 @@ func (c windowsPairingCoordinator) retryTrustRevokedObserver(ctx context.Context
 	return c.server.RetryTrustRevoked(ctx, deviceID, generation)
 }
 
-func (c windowsPairingCoordinator) committedPairingGeneration(deviceID string) string {
+func (c windowsPairingCoordinator) committedPairingGeneration(deviceID string) (string, error) {
 	if c.registry == nil {
-		return ""
+		return "", errors.New("Windows pairing registry is unavailable")
 	}
 	return c.registry.committedGeneration(deviceID)
 }
 
-func (r windowsPairingRegistry) committedGeneration(deviceID string) string {
+func (r windowsPairingRegistry) committedGeneration(deviceID string) (string, error) {
 	var generation string
-	_ = r.runConfigTransaction(func() error {
+	err := r.runConfigTransaction(func() error {
 		cfg, err := loadAgentConfig(r.store)
-		if err != nil || cfg.ActiveDevice != deviceID {
+		if err != nil {
 			return err
 		}
-		generation = cfg.Devices[deviceID].PairingGeneration
+		if cfg.ActiveDevice != deviceID {
+			return errors.New("committed device is not active")
+		}
+		device, ok := cfg.Devices[deviceID]
+		if !ok {
+			return errors.New("committed device record is missing")
+		}
+		generation = strings.TrimSpace(device.PairingGeneration)
+		if generation == "" {
+			return errors.New("committed pairing generation is empty")
+		}
 		return nil
 	})
-	return generation
+	if err != nil {
+		return "", err
+	}
+	return generation, nil
 }
 
 func (windowsPairingCoordinator) Candidates(context.Context) (localapi.PairCandidatesResult, error) {

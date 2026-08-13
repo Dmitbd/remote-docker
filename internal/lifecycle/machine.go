@@ -363,7 +363,8 @@ func (m *Machine) applyLocked(event Event) error {
 			m.pairingCancellationFrom = ""
 		}
 	case EventPairingCompleted:
-		if snapshot.State != StateConnecting || snapshot.Pairing == nil || snapshot.Pairing.Status != PairingApproved || event.Peer == nil || event.Peer.ID == "" {
+		if snapshot.State != StateConnecting || snapshot.Pairing == nil || snapshot.Pairing.Status != PairingApproved || event.Peer == nil || event.Peer.ID == "" ||
+			snapshot.Role == RoleWindowsHost && strings.TrimSpace(event.Peer.Generation) == "" {
 			return m.transitionError(event, "approved pairing metadata is unavailable")
 		}
 		peer := *event.Peer

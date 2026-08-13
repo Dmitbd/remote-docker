@@ -286,6 +286,23 @@ func TestInitialTrustedPeerRestoresOnlyActivePublicRecord(t *testing.T) {
 	}
 }
 
+func TestInitialTrustedPeerRejectsWindowsTrustWithoutGeneration(t *testing.T) {
+	store := config.Store{Path: filepath.Join(t.TempDir(), "config.json")}
+	if err := store.Save(config.Config{
+		SchemaVersion: config.CurrentSchemaVersion, ActiveDevice: "mac-one",
+		Devices: map[string]config.Device{"mac-one": {Name: "Mac"}},
+	}); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	if peer := initialTrustedPeer(store, lifecycle.RoleWindowsHost); peer != nil {
+		t.Fatalf("Windows restored empty-generation trust = %#v", peer)
+	}
+	peer := initialTrustedPeer(store, lifecycle.RoleMacClient)
+	if peer == nil || peer.ID != "mac-one" || peer.Name != "Mac" || peer.Generation != "" {
+		t.Fatalf("Mac restored peer = %#v", peer)
+	}
+}
+
 func TestUIExecutableLivesBesideDesktopHost(t *testing.T) {
 	desktopPath := filepath.Join(string(filepath.Separator), "Applications", "Remote Docker.app", "Contents", "MacOS", "remote-docker-desktop")
 	got := uiExecutablePath(desktopPath)

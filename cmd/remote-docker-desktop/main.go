@@ -322,22 +322,7 @@ func waitForDesktopShutdown(done <-chan error, timeout time.Duration) error {
 }
 
 func initialTrustedPeer(store config.Store, role lifecycle.Role) *lifecycle.Peer {
-	cfg, err := store.Load()
-	if err != nil || cfg.ActiveDevice == "" {
-		return nil
-	}
-	device, ok := cfg.Devices[cfg.ActiveDevice]
-	if !ok {
-		return nil
-	}
-	peerOS := "windows"
-	if role == lifecycle.RoleWindowsHost {
-		peerOS = "macos"
-	}
-	return &lifecycle.Peer{
-		ID: cfg.ActiveDevice, Name: device.Name, OS: peerOS,
-		Address: device.Address, Generation: device.PairingGeneration,
-	}
+	return app.InitialTrustedPeer(store, role)
 }
 
 type desktopAPIHandler struct {
