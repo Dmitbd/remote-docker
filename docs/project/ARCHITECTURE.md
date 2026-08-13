@@ -1,15 +1,13 @@
 # Архитектура Remote Docker
 
-**Статус документа:** Текущее + В активной ветке + Целевое состояние
+**Статус документа:** Текущее + Целевое состояние
 
-**Текущее проверено относительно:** `main` @ `3b7df2c`
-**Активная ветка проверена относительно:** `codex/fix-connection-cancel-windows-shell` @ `0993ff80b19614ed2596deb32f5ceb44dd50da6f`
+**Текущее проверено относительно:** `main` @ `b5103e9`
 **Дата содержательной проверки:** 2026-08-13
 
 ## Как читать статусы
 
 - **Текущее** — находится в `main` и подтверждено production-кодом.
-- **В активной ветке** — существует в невлитой ветке и ещё не является частью `main`.
 - **Целевое состояние** — обязательное свойство рабочего MVP, которое может быть реализовано не полностью.
 
 ## Системная граница
@@ -151,7 +149,7 @@ Endpoint overrides, которые обходят managed identity, запрещ
 - Preflight ждёт готовность обеих сторон перед Docker-командой с bind mount.
 - Named volumes и Docker data не являются workspace и не синхронизируются.
 
-### В активной ветке
+### Текущее: восстановление Mac Syncthing identity
 
 Перед запуском session-owned процессов Mac проверяет согласованность зашифрованной локальной Syncthing identity и owner-scoped ключа из credential store. Низкоуровневый sync-компонент только классифицирует непригодную пару и не меняет config или credentials.
 
@@ -190,7 +188,7 @@ Lifecycle machine содержит состояния:
 
 UI не определяет состояние самостоятельно: он читает local API snapshot и отправляет команды. Discovery вызывается только в `searching`. В текущей конфигурации Wails обычный X завершает только дочерний Wails UI process: desktop process, lifecycle/runtime и tray/menu-bar продолжают работать. Следующий `Show` создаёт новый UI child, а не скрывает и не возвращает то же окно; transient UI state в новом child начинается заново. Finish work выполняет terminal shutdown.
 
-### В активной ветке: ownership и восстановление Windows UI
+### Текущее: ownership и восстановление Windows UI
 
 Повторный ручной запуск `cmd/remote-docker-desktop` сохраняет существующий same-user single-instance/upgrade gate. Если desktop process уже работает, новый процесс вызывает приватный аутентифицированный local API с ограниченным context, требует подтверждённый ответ `shown: true` и завершается до создания agent, lifecycle supervisor или UI child. Ошибка transport/focus, ответ `shown: false` и ещё не готовое приложение не считаются успешным показом и также не создают конкурирующий desktop/agent/UI.
 
@@ -198,11 +196,11 @@ UI не определяет состояние самостоятельно: о
 
 `exec.Cmd.ProcessState` не является общей liveness-моделью: launcher использует собственное синхронизированное состояние и exact completion channel. `Stop` терминально закрывает launcher для будущих `Show`, поэтому поздний или уже выполняющийся focus не может запустить UI после Finish work. Одновременные Stop присоединяются к точной stop operation; если точный child ещё жив после ошибки, только один caller может выполнить единственную terminal retry-попытку. Известная ложная ошибка после уже исчерпанного retry вынесена отдельно в backlog и не означает работающий child или повторное завершение процесса.
 
-Обычный X не равен Finish work: в текущей конфигурации Wails он завершает только exact owned UI child, пока desktop process, lifecycle/runtime и tray продолжают работать. Повторный запуск ярлыка через `Show` создаёт replacement UI child, а не показывает скрытое прежнее окно; transient UI state поэтому сбрасывается. Эти Windows-сценарии подтверждены только сфокусированными автоматическими тестами и cross-compilation активной ветки. Физическая проверка точного artifact ещё не выполнена.
+Обычный X не равен Finish work: в текущей конфигурации Wails он завершает только exact owned UI child, пока desktop process, lifecycle/runtime и tray продолжают работать. Повторный запуск ярлыка через `Show` создаёт replacement UI child, а не показывает скрытое прежнее окно; transient UI state поэтому сбрасывается. Эти Windows-сценарии подтверждены только сфокусированными автоматическими тестами и cross-compilation текущего `main`. Физическая проверка точного artifact ещё не выполнена.
 
 Изменение не добавляет listener, port, service, autostart, protocol или schema и не меняет границу same-user local API.
 
-### В активной ветке: Windows tray icons
+### Текущее: Windows tray icons
 
 Windows tray использует пять отдельных state-specific ICO: `paused`, `search`, `pairing`, `connected` и `error`. Каждый ICO детерминированно собирается из выбранного pixel sign и содержит PNG-backed варианты 16, 20, 24 и 32 px. Файлы встраиваются в `RemoteDocker.exe` через Go `embed`; установщик не копирует их как отдельные runtime-файлы. Lifecycle `pairing_cancellation_pending` явно выбирает существующий `pairing` asset: отмена ещё завершает pairing, а не ищет host.
 
@@ -242,7 +240,7 @@ Pairing generation, revocation proof, rollback stages, cleanup lease и Docker C
 
 Приложение не регистрирует autostart. После reboot его запускают вручную.
 
-### В активной ветке: отмена установки соединения
+### Текущее: отмена установки соединения
 
 Отмена незавершённого подключения отделена от управления уже установленной session и от удаления доверия:
 
@@ -260,7 +258,7 @@ Cancel/stop сначала переводит lifecycle в `stopping`. Pairing s
 
 UI передаёт cancel/stop через отдельную local API операцию с ограниченным временем выполнения, показывает loader и блокирует повторный клик до результата. Это подтверждено сфокусированными автоматическими тестами, но ещё не проверено на физической паре Mac↔Windows.
 
-Эта ветка не добавляет protocol/schema version, LAN ports, listeners, services или autostart. Физическая проверка отложена до интеграции отдельных изменений Windows window activation и tray icon и сборки точных artifacts.
+Изменение не добавляет protocol/schema version, LAN ports, listeners, services или autostart. Физическая проверка отложена до сборки точных artifacts.
 
 ## Security boundaries
 

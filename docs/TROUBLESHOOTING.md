@@ -55,7 +55,7 @@ While cancellation is running, its button shows progress and duplicate clicks ar
 
 Do not delete Keychain/Credential Manager entries, registry records, WSL files, or the Docker Context manually. A partially confirmed pairing keeps an exact cleanup record so Remote Docker can revoke only the matching generation after the remote confirmation has finished.
 
-These controls have focused automatic coverage in the current development branch. Physical Mac-to-Windows behavior must still be verified with the exact built artifacts.
+These controls have focused automatic coverage in the current `main`. Physical Mac-to-Windows behavior must still be verified with the exact built artifacts.
 
 ## Only one device can connect
 
@@ -65,7 +65,7 @@ The first version intentionally supports one trusted Mac and one Windows host. R
 
 In the current Wails configuration, closing the window with X exits only the Wails UI child. The desktop process, lifecycle/runtime, and macOS menu bar or Windows tray remain available. This is not **Finish work**. The next Show from the shortcut creates a new UI child; it does not hide or reopen the same window, so transient UI state resets.
 
-**Development candidate only:** the Windows shortcut focus and bounded UI recovery behavior below exists in the current development branch. It is not part of `main` or the `0.2.8` package and has not yet been verified with a built artifact on physical Windows.
+**Current main, not a verified package:** the Windows shortcut focus and bounded UI recovery behavior below exists in `main` from `b5103e9`. It is not part of the `0.2.8` package and has not yet been verified with a built artifact on physical Windows.
 
 On Windows, launching the shortcut again while Remote Docker is already running uses the same-user local API and must receive `shown: true`; the second launcher then ends. If X has already exited the UI child, this Show creates one replacement child while the desktop process remains. It must not start a second agent or a second desktop process. A focus error, a `shown: false` result, or an application that is not ready is reported as a failed launch instead of false success.
 
@@ -73,9 +73,9 @@ If the exact owned UI stops naturally, the next Show may create it once. If that
 
 To stop its work while keeping the app open, choose **Pause**. To exit fully and stop all owned background work, choose **Finish work**.
 
-The development candidate has focused race-test and Windows cross-compilation coverage only. Until physical verification is recorded, a real shortcut, WebView2, tray, focus, or process-lifecycle problem remains an unverified result rather than a completed guarantee.
+The current `main` has focused race-test and Windows cross-compilation coverage only. Until physical verification is recorded, a real shortcut, WebView2, tray, focus, or process-lifecycle problem remains an unverified result rather than a completed guarantee.
 
-**Development candidate only:** on Windows the tray icon is expected to change with the application state: paused, search/waiting, pairing, connected, or error. These small state icons are embedded in the executable and are separate from the full application icon used by the shortcut. Windows uses regular colored ICOs; macOS keeps its template menu-bar icons. The Windows icons have automated structure and selection coverage, but their visibility on light and dark taskbars has not yet been physically verified.
+**Current main, not a verified package:** on Windows the tray icon is expected to change with the application state: paused, search/waiting, pairing, connected, or error. These small state icons are embedded in the executable and are separate from the full application icon used by the shortcut. Windows uses regular colored ICOs; macOS keeps its template menu-bar icons. The Windows icons have automated structure and selection coverage, but their visibility on light and dark taskbars has not yet been physically verified.
 
 If the Windows tray icon is missing, indistinguishable, stale, or disappears after closing the window with X, record the current UI state, taskbar theme and whether the desktop process is still running. Do not enable autostart or copy icon files into the installation directory as a workaround. Use the shortcut once to create a replacement UI child; if the icon still does not match the state, keep the exact application version and screenshot for the physical verification report.
 

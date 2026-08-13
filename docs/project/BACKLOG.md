@@ -2,8 +2,7 @@
 
 **Статус документа:** Текущее
 
-**Текущее проверено относительно:** `main` @ `3b7df2c`
-**Активная ветка проверена относительно:** `codex/fix-connection-cancel-windows-shell` @ `0993ff80b19614ed2596deb32f5ceb44dd50da6f`
+**Текущее проверено относительно:** `main` @ `b5103e9`
 **Дата содержательной проверки:** 2026-08-13
 
 Backlog содержит только незавершённую работу. Наличие пункта не разрешает агенту автоматически брать его в текущую задачу.
@@ -41,9 +40,9 @@ Backlog содержит только незавершённую работу. �
 - **Приоритет:** P1
 - **Доказательство:** Требует устройства
 - **Влияние:** Без подтверждённого pairing пользователь не может начать основной Docker workflow; stale trust ломает повторное подключение.
-- **Известно:** Пользователь ранее наблюдал отсутствие Windows approval UI, непринятый code и stale forgotten device. Исправления pairing reconciliation и restart-safe cleanup влиты в `main`. В активной ветке автоматические race/TLS-сценарии дополнительно покрывают точную отмену pairing/connecting, retry после stop failure, сохранение committed trust, Mac exact-generation cleanup и Windows durable-revoke notification. Эти тесты не подтверждают поведение реальных UI, сети и ОС.
+- **Известно:** Пользователь ранее наблюдал отсутствие Windows approval UI, непринятый code и stale forgotten device. Исправления pairing reconciliation, restart-safe cleanup и точной отмены pairing/connecting влиты в `main`. Автоматические race/TLS-сценарии покрывают retry после stop failure, сохранение committed trust, Mac exact-generation cleanup и Windows durable-revoke notification. Эти тесты не подтверждают поведение реальных UI, сети и ОС.
 - **Критерий завершения:** Search → select → code on both devices → approve/cancel/expiry → connected → disconnect → forget → repeat pairing работает без restart UI и без stale state. Отдельно подтверждены cancel до approve, cancel после approve во время connecting, stop failure с успешным retry, pause/disconnect одновременно с authenticated revoke и защита нового pairing от stale session/generation cleanup.
-- **Проверка:** Реальные Mac и Windows, fresh config и upgrade config; точные artifacts собираются после интеграции Windows window activation и tray icon, а результаты обоих UI фиксируются в `VERIFICATION.md`.
+- **Проверка:** Реальные Mac и Windows, fresh config и upgrade config; точные artifacts собираются из текущего `main`, а результаты обоих UI фиксируются в `VERIFICATION.md`.
 - **Связано:** [MVP](PRODUCT.md), [pairing architecture](ARCHITECTURE.md#discovery-и-pairing).
 
 ### RD-B002: Проверить обычную Docker/Compose совместимость с Mac
@@ -63,7 +62,7 @@ Backlog содержит только незавершённую работу. �
 - **Приоритет:** P1
 - **Доказательство:** Требует устройства
 - **Влияние:** Bind mounts могут получить устаревший source, а опубликованный сервис — быть недоступным с Mac.
-- **Известно:** В коде есть Syncthing readiness и SSH port supervisor; полного физического результата для release artifact нет. В активной ветке добавлено безопасное восстановление несовместимой локальной Syncthing identity для непривязанного Mac; автоматические проверки не доказывают работу с реальным Keychain и двумя ОС.
+- **Известно:** В `main` есть Syncthing readiness, SSH port supervisor и безопасное восстановление несовместимой локальной Syncthing identity для непривязанного Mac; полного физического результата для release artifact нет. Автоматические проверки не доказывают работу с реальным Keychain и двумя ОС.
 - **Критерий завершения:** Изменения Mac source достигают WSL до Docker execution; conflict/error виден; поддерживаемый TCP port доступен на том же свободном Mac localhost port; чужой local listener не завершается. Кандидат поверх воспроизведённой повреждённой identity восстанавливается без потери workspaces и завершает pairing/sync.
 - **Проверка:** Малые и крупные файлы, rename/delete, rapid edits, Compose bind mount, port conflict и removal container publication; отдельно — update Mac-кандидата поверх повреждённой identity, повторное pairing и базовая Docker-команда.
 - **Связано:** [workspace flow](ARCHITECTURE.md#поток-синхронизации-workspace), [TCP flow](ARCHITECTURE.md#поток-опубликованного-tcp-порта).
@@ -74,7 +73,7 @@ Backlog содержит только незавершённую работу. �
 - **Приоритет:** P1
 - **Доказательство:** Требует устройства
 - **Влияние:** Ошибка установки или update может оставить старый process, некорректный WSL state либо затронуть чужие OS resources.
-- **Известно:** Packaging contracts и проверяемый shutdown/rollback gate находятся в `main`. В активной ветке добавлены exact-window recovery и пять embedded Windows tray ICO; focused tests и cross-compilation не подтверждают их отображение Windows shell. Реальный NSIS/PowerShell/WSL lifecycle после `cfc06ec` не проверен.
+- **Известно:** Packaging contracts, проверяемый shutdown/rollback gate, exact-window recovery и пять embedded Windows tray ICO находятся в `main`; focused tests и cross-compilation не подтверждают их отображение Windows shell. Реальный NSIS/PowerShell/WSL lifecycle после `cfc06ec` не проверен.
 - **Критерий завершения:** Fresh install, same-version retry, supported update, reboot continuation, normal uninstall и explicit data removal дают заявленный результат без видимых зависших consoles и autostart. В текущей конфигурации Wails X завершает только UI child; desktop process, lifecycle/runtime и tray остаются, а следующий запуск ярлыка создаёт replacement UI child без второго desktop process. В tray различимы `paused`, `search`, `pairing`, `connected` и `error` на светлой и тёмной taskbar; полноразмерная иконка ярлыка не заменена state icon.
 - **Проверка:** Windows installer UI, logs, process list, WSL distributions, firewall rules, app/data directories и preserved Docker data. Отдельно зафиксировать process tree после X и нескольких повторных запусков ярлыка, доказать создание нового UI child и reset transient UI state, а также screenshot каждого tray state на light/dark taskbar и исчезновение icon после **Finish work**.
 - **Связано:** `docs/INSTALL.md`, `tests/integration/windows_package.Tests.ps1`, [verification](VERIFICATION.md#install-update-uninstall).
@@ -102,17 +101,6 @@ Backlog содержит только незавершённую работу. �
 - **Связано:** [security boundary](ARCHITECTURE.md#security-boundaries), [network verification](VERIFICATION.md#сеть-и-recovery).
 
 ## Важно, но не блокирует текущую физическую проверку
-
-### RD-B008: Интегрировать устранение race состояния UI subprocess
-
-- **Тип:** Дефект
-- **Приоритет:** P2
-- **Доказательство:** Подтверждено кодом в `main`; исправление подтверждено автоматическими тестами активной ветки
-- **Влияние:** В `main` параллельные `Show` и `Wait` могут обращаться к `exec.Cmd.ProcessState` без общей синхронизации. В активной ветке launcher-owned synchronized state устраняет это чтение и одновременно защищает exact-child focus, recovery и terminal Stop.
-- **Известно:** Исходная race воспроизведена race detector. В `codex/fix-connection-cancel-windows-shell` она закрыта детерминированными regression tests; focused race gate и Windows cross-compilation пройдены. Ветка ещё не влита, а физические Windows-сценарии вынесены в RD-B004/RD-B005.
-- **Критерий завершения:** Исправление с launcher-owned state и exact operation ownership влито в `main`; относящийся focused race gate пройден на merge commit. После этого пункт удаляется из активного backlog, не дожидаясь физической проверки отдельного UI UX.
-- **Проверка:** `go test -race -count=1 ./internal/desktop ./cmd/remote-docker-desktop` на merge commit.
-- **Связано:** `internal/desktop/uiprocess.go`, [Windows UI ownership](ARCHITECTURE.md#в-активной-ветке-ownership-и-восстановление-windows-ui).
 
 ### RD-B009: Подтвердить или опровергнуть transport-lab flake
 
@@ -145,7 +133,7 @@ Backlog содержит только незавершённую работу. �
 - **Известно:** Exact stop operation намеренно сохраняется для join/retry arbitration. После исчерпания retry поздний natural exit не заменяет сохранённый result. Независимое review классифицировало сценарий как Minor; он не блокирует физическую проверку или MVP.
 - **Критерий завершения:** Детерминированный тест подтверждает сценарий, после чего поздний Stop для уже завершившегося exact child возвращает success без нового signal/kill и без разрешения дополнительного retry.
 - **Проверка:** Отдельная узкая задача и focused race test `internal/desktop`; production-код не менять в документационной задаче.
-- **Связано:** `internal/desktop/uiprocess.go`, [Windows UI ownership](ARCHITECTURE.md#в-активной-ветке-ownership-и-восстановление-windows-ui).
+- **Связано:** `internal/desktop/uiprocess.go`, [Windows UI ownership](ARCHITECTURE.md#текущее-ownership-и-восстановление-windows-ui).
 
 ## После стабилизации MVP
 

@@ -2,7 +2,7 @@
 
 - **Статус:** Принято
 - **Дата:** 2026-08-09
-- **Проверено относительно:** `main` @ `cfc06ec`
+- **Проверено относительно:** `main` @ `b5103e9`
 
 ## Контекст
 
@@ -16,9 +16,9 @@ Remote Docker нужен только во время выбранной Docker-
 
 Autostart и silent restart tasks отклонены.
 
-### Дополнение в активной ветке: ownership desktop и UI child
+### Интегрированное дополнение: ownership desktop и UI child
 
-В `codex/fix-connection-cancel-windows-shell` desktop application владеет ровно одним exact UI child: command, process handle, completion channel и generation образуют его ownership. Повторный запуск использует same-user private local API и считается успешным только после подтверждённого `shown: true`; до этого второй launcher не создаёт agent, lifecycle supervisor или UI child.
+Desktop application владеет ровно одним exact UI child: command, process handle, completion channel и generation образуют его ownership. Повторный запуск использует same-user private local API и считается успешным только после подтверждённого `shown: true`; до этого второй launcher не создаёт agent, lifecycle supervisor или UI child.
 
 Для живого exact child `Show` выполняет private focus. Ошибка или timeout допускает только одну bounded recovery: launcher снова сверяет exact command/process/done/generation и operation ownership, завершает только этот child и создаёт не более одного replacement. Поиск или завершение окон/processes по name, title или PID и безграничный relaunch отклонены, потому что не доказывают ownership и могут затронуть foreign/newer process.
 
@@ -28,7 +28,7 @@ Autostart и silent restart tasks отклонены.
 
 Lifecycle различает Pause и terminal Quit. Installer/user docs запрещают autostart и требуют manual continuation после reboot.
 
-Дополнение active branch подтверждено focused desktop/command tests и Windows cross-compilation; физический Windows shortcut, Wails/WebView2, tray и process-lifecycle result ещё не проверены точным artifact.
+Дополнение подтверждено focused desktop/command tests и Windows cross-compilation; физический Windows shortcut, Wails/WebView2, tray и process-lifecycle result ещё не проверены точным artifact.
 
 ## Последствия
 
