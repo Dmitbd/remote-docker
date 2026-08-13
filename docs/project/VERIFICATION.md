@@ -3,7 +3,7 @@
 **Статус документа:** Текущее
 
 **Проверено относительно:** package source `main` @ `09ba7ca`
-**Автоматические проверки активной ветки:** `codex/fix-connection-cancel-windows-shell` @ `c55715c`
+**Автоматические проверки активной ветки:** `codex/fix-connection-cancel-windows-shell` @ `0993ff80b19614ed2596deb32f5ceb44dd50da6f`
 **Дата содержательной проверки:** 2026-08-13
 
 ## Правила доказательств
@@ -123,7 +123,7 @@
 
 ### Физическая Windows desktop boundary активной ветки
 
-Для `codex/fix-connection-cancel-windows-shell` @ `9e27cf3` installer/artifact не собирался. Все строки ниже остаются **Не проверено** до запуска точного artifact на Windows.
+Для `codex/fix-connection-cancel-windows-shell` @ `0993ff80b19614ed2596deb32f5ceb44dd50da6f` installer/artifact не собирался. Все строки ниже остаются **Не проверено** до запуска точного artifact на Windows.
 
 | Сценарий | Ожидаемый результат | Статус |
 |---|---|---|
