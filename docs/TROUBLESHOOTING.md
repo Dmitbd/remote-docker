@@ -63,9 +63,17 @@ The first version intentionally supports one trusted Mac and one Windows host. R
 
 ## The window disappeared but Docker still works
 
-Closing the window keeps Remote Docker available in the macOS menu bar or Windows tray. Open it from that icon.
+Closing the window with X hides it and keeps Remote Docker available in the macOS menu bar or Windows tray. This is not **Finish work**. Open the existing window from that icon.
+
+**Development candidate only:** the Windows shortcut focus and bounded UI recovery behavior below exists in the current development branch. It is not part of `main` or the `0.2.8` package and has not yet been verified with a built artifact on physical Windows.
+
+On Windows, launching the shortcut again while Remote Docker is already running is expected to show the same owned window and then end the second launcher process. It must not start a second agent or a second UI. A focus error, a `shown: false` result, or an application that is not ready is reported as a failed launch instead of false success.
+
+If the exact owned UI stops naturally, the desktop process may start it once. If that UI is still running but does not answer the private focus request, Remote Docker makes one bounded recovery attempt for that exact child. It does not search for or stop windows and processes by a shared title, name, or PID. Do not repeatedly click the shortcut while this bounded operation is in progress.
 
 To stop its work while keeping the app open, choose **Pause**. To exit fully and stop all owned background work, choose **Finish work**.
+
+The development candidate has focused race-test and Windows cross-compilation coverage only. Until physical verification is recorded, a real shortcut, WebView2, tray, focus, or process-lifecycle problem remains an unverified result rather than a completed guarantee.
 
 ## The Mac still uses a local Docker engine
 

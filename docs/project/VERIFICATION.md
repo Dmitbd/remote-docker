@@ -3,7 +3,8 @@
 **Статус документа:** Текущее
 
 **Проверено относительно:** package source `main` @ `09ba7ca`
-**Дата содержательной проверки:** 2026-08-11
+**Автоматические проверки активной ветки:** `codex/fix-connection-cancel-windows-shell` @ `00d0bcf`
+**Дата содержательной проверки:** 2026-08-13
 
 ## Правила доказательств
 
@@ -24,7 +25,7 @@
 | Docker command analysis/preflight | `internal/dockercli`, `internal/app` tests | Реализовано в CI, не реальный проект |
 | Workspace policy/sync control | `internal/workspace`, `internal/syncer`, `internal/app` tests | Реализовано в CI, не две физические файловые системы |
 | Port relay ownership | `internal/portrelay`, `internal/sshtransport` tests | Реализовано в CI, не реальный published port |
-| Desktop UI model/operations | `internal/desktopui`, `cmd/remote-docker-ui` tests | Реализовано в CI; process race см. RD-B008 |
+| Desktop UI model/operations | `internal/desktopui`, `cmd/remote-docker-ui` tests | Реализовано в CI; Windows activation/recovery active-branch evidence описано ниже |
 | WSL/package contracts | integration scripts и Pester | Windows и macOS package CI пройден для `09ba7ca`; установка требует устройства |
 
 Конкретный PR запускает только относящиеся к изменению packages и contracts согласно `AGENTS.md`.
@@ -46,10 +47,20 @@
 - Автоматические проверки не подтверждают реальный WebView, tray/menu-bar, firewall/VPN path, OS process cleanup или обмен между двумя устройствами. Физическая матрица остаётся непройденной до интеграции Windows window activation и tray icon и сборки точных artifacts.
 - Ветка не добавляет protocol/schema version, LAN ports, listeners, services или autostart.
 
+### В активной ветке: повторный запуск и bounded recovery Windows UI
+
+- Desktop command tests подтверждают цепочку `second instance → private authenticated local API → Application.Show → exact owned UI`: вызов ограничен context, требует `shown: true`, а error/false/not-ready не выдаются за успех и не продолжают создание второго agent/UI.
+- `internal/desktop` race tests подтверждают один launcher-owned child, focus работающего child, однократный запуск после natural exit и не более одного bounded recovery после focus error/timeout.
+- Recovery и terminal Stop сверяют exact command, process handle, completion channel, generation и operation ownership; код не перечисляет и не ищет окна/процессы по title, имени или PID и не завершает foreign/newer child.
+- Launcher-owned synchronized state заменяет чтение `exec.Cmd.ProcessState`; исходно воспроизведённая race закрыта regression tests активной ветки.
+- Stop терминален для launcher. Поздний/in-flight Show не запускает UI после Finish work; concurrent Stop присоединяется к exact operation, а retry arbitration разрешает не более одной terminal retry-попытки.
+- Сфокусированный race-набор `internal/desktop` и desktop command, а также Windows cross-compilation обоих test binaries пройдены локально для `00d0bcf`. Это доказывает проверяемые контракты и компилируемость target, но не поведение Windows, WebView2, shortcut, tray или реальных процессов.
+- Listener, port, service, autostart, protocol и schema не добавлялись.
+
 ### Интеграционная проверка 2026-08-11
 
 - Focused race tests пройдены для pairing/runtime/config/Docker ownership/file lock/lifecycle/local API/desktop UI и затронутых commands.
-- Новый `process-wait` и `single-instance` путь пройден отдельно с race detector; известный общий `ProcessLauncher` race остаётся в RD-B008.
+- Новый `process-wait` и `single-instance` путь пройден отдельно с race detector. На этом историческом `main` gate общий `ProcessLauncher` race оставался в RD-B008; автоматическое доказательство исправления существует только в активной ветке, описанной выше.
 - Windows cross-compilation пройдена для `internal/app`, `internal/desktop` и desktop command.
 - `internal/provision` contracts проверяют shutdown exit code, ожидание процесса и сохранение rollback binary.
 - GitHub Actions run `31497596190` успешно собрал development candidate `0.2.8`: WSL rootfs, unsigned NSIS EXE и unsigned macOS PKG.
@@ -99,6 +110,19 @@
 | Foreign local port conflict | Понятная ошибка; чужой process остаётся | Не проверено |
 | Pause | Runtime останавливается, приложение остаётся открытым | Не проверено |
 | Finish work | UI закрывается, app-owned background work отсутствует | Не проверено |
+
+### Физическая Windows desktop boundary активной ветки
+
+Для `codex/fix-connection-cancel-windows-shell` @ `00d0bcf` installer/artifact не собирался. Все строки ниже остаются **Не проверено** до запуска точного artifact на Windows.
+
+| Сценарий | Ожидаемый результат | Статус |
+|---|---|---|
+| Закрыть окно крестиком | Окно скрывается; Remote Docker остаётся доступен в tray; Finish work не выполняется | Не проверено |
+| Повторно запустить ярлык при скрытом окне | Существующее окно показывается и выводится вперёд; второй запуск завершается | Не проверено |
+| Сверить process tree после повторных запусков | Работают ровно один desktop process и один принадлежащий ему UI child | Не проверено |
+| Focus error или неотвечающий exact UI | Одна bounded recovery-попытка завершает только exact owned child и запускает не более одного replacement | Не проверено |
+| Ошибка recovery | Операция завершается ограниченно с ошибкой; foreign/newer process не изменяется; retry loop отсутствует | Не проверено |
+| Finish work одновременно с focus/Stop | После завершения нет owned UI child; поздний или in-flight Show не запускает новый | Не проверено |
 
 ## Сеть и recovery
 

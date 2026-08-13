@@ -2,8 +2,9 @@
 
 **Статус документа:** Текущее + В активной ветке + Целевое состояние
 
-**Текущее проверено относительно:** `main` @ `cfc06ec`
-**Дата содержательной проверки:** 2026-08-11
+**Текущее проверено относительно:** `main` @ `3b7df2c`
+**Активная ветка проверена относительно:** `codex/fix-connection-cancel-windows-shell` @ `00d0bcf`
+**Дата содержательной проверки:** 2026-08-13
 
 ## Как читать статусы
 
@@ -188,6 +189,18 @@ Lifecycle machine содержит состояния:
 - `needs_action`.
 
 UI не определяет состояние самостоятельно: он читает local API snapshot и отправляет команды. Discovery вызывается только в `searching`. Closing window сохраняет tray/menu-bar application, а Finish work вызывает terminal shutdown.
+
+### В активной ветке: ownership и восстановление Windows UI
+
+Повторный ручной запуск `cmd/remote-docker-desktop` сохраняет существующий same-user single-instance/upgrade gate. Если desktop process уже работает, новый процесс вызывает приватный аутентифицированный local API с ограниченным context, требует подтверждённый ответ `shown: true` и завершается до создания agent, lifecycle supervisor или UI child. Ошибка transport/focus, ответ `shown: false` и ещё не готовое приложение не считаются успешным показом и также не создают конкурирующий desktop/agent/UI.
+
+Один desktop application владеет одним точным UI child и его поколением. Для работающего child выполняется focus через существующий приватный endpoint; естественно завершившийся child запускается один раз. Ошибка или timeout focus допускает не более одной ограниченной попытки recovery: launcher повторно проверяет exact command, process handle, completion channel, generation и текущую operation ownership, завершает только этот child и только затем может запустить replacement. Поиск окон или процессов по title, общему имени или PID не используется; foreign или более новый child не изменяется.
+
+`exec.Cmd.ProcessState` не является общей liveness-моделью: launcher использует собственное синхронизированное состояние и exact completion channel. `Stop` терминально закрывает launcher для будущих `Show`, поэтому поздний или уже выполняющийся focus не может запустить UI после Finish work. Одновременные Stop присоединяются к точной stop operation; если точный child ещё жив после ошибки, только один caller может выполнить единственную terminal retry-попытку. Известная ложная ошибка после уже исчерпанного retry вынесена отдельно в backlog и не означает работающий child или повторное завершение процесса.
+
+Закрытие окна крестиком остаётся скрытием в tray, а не Finish work; повторный запуск ярлыка должен показать существующее окно. Эти Windows-сценарии подтверждены только сфокусированными автоматическими тестами и cross-compilation активной ветки. Физическая проверка точного artifact ещё не выполнена.
+
+Изменение не добавляет listener, port, service, autostart, protocol или schema и не меняет границу same-user local API.
 
 ## Данные, keys и ownership
 
