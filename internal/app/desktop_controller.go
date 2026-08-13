@@ -69,7 +69,18 @@ func (c *DesktopController) retryPendingTrustRevoke(ctx context.Context) error {
 	if pending == nil || !ok {
 		return nil
 	}
-	if err := retryer.retryTrustRevokedObserver(ctx, pending.deviceID, pending.sessionID); err != nil {
+	restorePause := c.supervisor.Snapshot().State == lifecycle.StatePaused
+	if restorePause {
+		if _, err := c.supervisor.machine.Apply(lifecycle.Event{Type: lifecycle.EventEnabled}); err != nil {
+			return err
+		}
+	}
+	retryErr := retryer.retryTrustRevokedObserver(ctx, pending.deviceID, pending.sessionID)
+	var pauseErr error
+	if restorePause {
+		pauseErr = c.supervisor.Pause(ctx)
+	}
+	if err := errors.Join(retryErr, pauseErr); err != nil {
 		return err
 	}
 	c.trustRevokedMu.Lock()
@@ -138,7 +149,7 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 			return nil, needsAction("wait for the active lifecycle operation to finish")
 		}
 		defer c.operations.Unlock()
-		if err := c.supervisor.Pause(ctx); err != nil {
+		if err := c.finishNonTerminalStop(ctx, c.supervisor.Pause); err != nil {
 			return nil, unavailable("Remote Docker could not be paused safely")
 		}
 		return c.actionResult(), nil
@@ -248,7 +259,9 @@ func (c *DesktopController) Handle(ctx context.Context, method localapi.Method, 
 			return nil, err
 		}
 		disconnect := lifecycle.Disconnect{Initiator: lifecycle.InitiatorLocal, Reason: lifecycle.ReasonUserDisconnect}
-		if err := c.supervisor.Disconnect(ctx, disconnect); err != nil {
+		if err := c.finishNonTerminalStop(ctx, func(stopCtx context.Context) error {
+			return c.supervisor.Disconnect(stopCtx, disconnect)
+		}); err != nil {
 			return nil, needsAction("no active Remote Docker connection exists")
 		}
 		return c.actionResult(), nil
@@ -341,15 +354,17 @@ func (c *DesktopController) cancelConnectionLocked(ctx context.Context, raw json
 			return nil, unavailable("pairing cancellation did not reach a terminal state")
 		}
 	}
-	stopErr := c.supervisor.CancelConnection(ctx)
-	if stopErr != nil {
+	if err := c.finishNonTerminalStop(ctx, c.supervisor.CancelConnection); err != nil {
 		return nil, unavailable("Remote Docker connection attempt could not be stopped safely")
 	}
-	revokeErr := c.retryPendingTrustRevoke(ctx)
-	if revokeErr != nil {
-		return nil, unavailable("revoked Windows trust could not be reconciled safely")
-	}
 	return c.actionResult(), nil
+}
+
+func (c *DesktopController) finishNonTerminalStop(ctx context.Context, stop func(context.Context) error) error {
+	if err := stop(ctx); err != nil {
+		return err
+	}
+	return c.retryPendingTrustRevoke(ctx)
 }
 
 func connectionLimitOccupied(snapshot lifecycle.Snapshot) bool {

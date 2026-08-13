@@ -308,7 +308,7 @@ func TestDesktopControllerRetainsPendingTrustRevokeAcrossShutdown(t *testing.T) 
 	}
 	got := machine.Snapshot()
 	if got.State != lifecycle.StatePaused || !got.Terminal || got.TrustedPeers != 1 || got.Peer == nil ||
-		controller.pendingTrustRevoke == nil || fallback.retryCalls != 1 {
+		controller.pendingTrustRevoke == nil || fallback.retryCalls != 0 {
 		t.Fatalf("shutdown pending revoke = %#v pending=%#v retries=%d", got, controller.pendingTrustRevoke, fallback.retryCalls)
 	}
 }
@@ -357,6 +357,75 @@ func TestDesktopControllerDoesNotRetryPendingTrustRevokeAfterStopFailure(t *test
 	if got.State != lifecycle.StateConnecting || got.TrustedPeers != 1 || got.Peer == nil || got.Peer.ID != "mac-one" ||
 		controller.pendingTrustRevoke == nil || fallback.retryCalls != 0 {
 		t.Fatalf("failed-stop pending revoke = %#v pending=%#v retries=%d", got, controller.pendingTrustRevoke, fallback.retryCalls)
+	}
+}
+
+func TestDesktopControllerRetriesPendingTrustRevokeAfterPauseAndDisconnectStop(t *testing.T) {
+	tests := []struct {
+		name      string
+		method    localapi.Method
+		connected bool
+		wantState lifecycle.State
+	}{
+		{name: "pause", method: localapi.MethodPause, wantState: lifecycle.StatePaused},
+		{name: "disconnect", method: localapi.MethodDisconnect, connected: true, wantState: lifecycle.StateHostWaiting},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			machine := newLifecycleMachine(t, lifecycle.RoleWindowsHost)
+			runtime := newRecordingSessionRuntime()
+			stopStarted := make(chan struct{})
+			releaseStop := make(chan struct{})
+			runtime.stop = func(context.Context) error {
+				close(stopStarted)
+				<-releaseStop
+				return nil
+			}
+			supervisor, _ := NewSupervisor(machine, runtime)
+			fallback := &trustRevokedBindingController{}
+			controller, err := NewDesktopController(supervisor, fallback)
+			if err != nil {
+				t.Fatalf("NewDesktopController() error = %v", err)
+			}
+			if _, err := controller.Handle(context.Background(), localapi.MethodEnable, nil); err != nil {
+				t.Fatalf("Enable() error = %v", err)
+			}
+			pairingState := lifecycle.Pairing{
+				SessionID: "session-1", Peer: lifecycle.Peer{ID: "temporary-mac", Name: "Mac"},
+				Code: "123456", ExpiresAt: time.Now().Add(time.Minute),
+			}
+			_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingStarted, Pairing: &pairingState})
+			_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingApproved})
+			_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventPairingCompleted, Peer: &lifecycle.Peer{ID: "mac-one", Name: "Mac"}})
+			if tt.connected {
+				_, _ = machine.Apply(lifecycle.Event{Type: lifecycle.EventConnected})
+			}
+
+			operationDone := make(chan error, 1)
+			go func() {
+				_, operationErr := controller.Handle(context.Background(), tt.method, nil)
+				operationDone <- operationErr
+			}()
+			waitForTestSignal(t, stopStarted, tt.name+" stop")
+			if err := fallback.observer(context.Background(), "mac-one", "session-1"); err == nil {
+				t.Fatal("trust-revoked observer acknowledged stopping state")
+			}
+			if got := machine.Snapshot(); got.State != lifecycle.StateStopping || got.TrustedPeers != 1 || got.Peer == nil ||
+				controller.pendingTrustRevoke == nil || fallback.retryCalls != 0 {
+				t.Fatalf("pending revoke before StopCompleted = %#v pending=%#v retries=%d", got, controller.pendingTrustRevoke, fallback.retryCalls)
+			}
+			close(releaseStop)
+			if err := waitForTestError(t, operationDone, tt.name+" result"); err != nil {
+				t.Fatalf("%s error = %v", tt.method, err)
+			}
+			got := machine.Snapshot()
+			stopCalls, _ := runtime.stopSnapshot()
+			if got.State != tt.wantState || got.TrustedPeers != 0 || got.Peer != nil || controller.pendingTrustRevoke != nil ||
+				fallback.retryCalls != 1 || stopCalls != 1 {
+				t.Fatalf("reconciled %s = %#v pending=%#v retries=%d stops=%d", tt.method, got, controller.pendingTrustRevoke, fallback.retryCalls, stopCalls)
+			}
+		})
 	}
 }
 
