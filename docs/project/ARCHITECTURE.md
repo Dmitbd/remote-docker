@@ -1,6 +1,6 @@
 # Архитектура Remote Docker
 
-**Статус документа:** Текущее + Целевое состояние
+**Статус документа:** Текущее + В активной ветке + Целевое состояние
 
 **Текущее проверено относительно:** `main` @ `cfc06ec`
 **Дата содержательной проверки:** 2026-08-11
@@ -8,6 +8,7 @@
 ## Как читать статусы
 
 - **Текущее** — находится в `main` и подтверждено production-кодом.
+- **В активной ветке** — существует в невлитой ветке и ещё не является частью `main`.
 - **Целевое состояние** — обязательное свойство рабочего MVP, которое может быть реализовано не полностью.
 
 ## Системная граница
@@ -219,6 +220,26 @@ Pairing generation, revocation proof, rollback stages, cleanup lease и Docker C
 - **Close window** не равен Finish work и оставляет tray/menu-bar application доступным.
 
 Приложение не регистрирует autostart. После reboot его запускают вручную.
+
+### В активной ветке: отмена установки соединения
+
+Отмена незавершённого подключения отделена от управления уже установленной session и от удаления доверия:
+
+- **Cancel pairing** отменяет только точную текущую pairing session, если её trust ещё не зафиксирован полностью.
+- **Stop connection attempt** останавливает runtime в `pairing` или `connecting`, не забывая уже зафиксированный trusted peer.
+- **Disconnect** завершает текущую рабочую session, сохраняя доверие для повторного подключения без нового comparison code.
+- **Pause** останавливает принадлежащий session runtime и оставляет приложение открытым в `paused`; доверие сохраняется, кроме случая, когда независимый proof-authenticated exact revoke уже сохранён на Windows.
+- **Forget/revoke** остаётся отдельной операцией, которая удаляет durable trust и принадлежащие ему артефакты.
+
+Cancel/stop сначала переводит lifecycle в `stopping`. Pairing session и comparison code очищаются только после успешного завершения принадлежащего приложению runtime и watchdog cleanup. Ошибка остановки возвращает прежнюю фазу `pairing` или `connecting`, сохраняет code/session и ownership незавершённых компонентов, поэтому пользователь может повторить операцию. Полностью зафиксированное доверие не удаляется обычными cancel, stop, disconnect или pause.
+
+Если Windows успел подтвердить trust, а Mac ещё не завершил локальный commit, Mac хранит exact session/generation journal и revocation proof. Успешный ранний revoke не считается окончательным, пока TLS-pinned observe-only запрос точной session не подтвердит, что ранее допущенный Confirm завершился. До этой quiescence boundary proof и journal остаются пригодными для повторной exact-generation очистки после timeout или restart.
+
+На Windows proof-authenticated revoke сначала удаляет принадлежащие pairing артефакты и сохраняет durable registry, а затем вне config transaction и server lock уведомляет lifecycle о точных device/session. Если lifecycle в это время находится в `stopping`, уведомление остаётся привязанным к точному завершённому pairing и доставляется локально после успешного non-terminal `StopCompleted` для cancel, disconnect или pause. Такая доставка не повторяет network revoke, installer cleanup или config save. `StopFailed` и terminal quit не подтверждают уведомление ложно; stale session/generation не очищает более новое trust.
+
+UI передаёт cancel/stop через отдельную local API операцию с ограниченным временем выполнения, показывает loader и блокирует повторный клик до результата. Это подтверждено сфокусированными автоматическими тестами, но ещё не проверено на физической паре Mac↔Windows.
+
+Эта ветка не добавляет protocol/schema version, LAN ports, listeners, services или autostart. Физическая проверка отложена до интеграции отдельных изменений Windows window activation и tray icon и сборки точных artifacts.
 
 ## Security boundaries
 

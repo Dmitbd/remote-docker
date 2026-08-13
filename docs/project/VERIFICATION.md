@@ -37,6 +37,15 @@
 - `Supervisor` и `DesktopController` публикуют `local_sync_identity_corrupt` без внутренней причины, если безопасная автоматическая ротация запрещена.
 - Сфокусированный race-набор `internal/lifecycle`, `internal/syncer`, `internal/app` пройден локально. Это не является физической проверкой macOS Keychain, Windows Syncthing или pairing.
 
+### В активной ветке: отмена установки соединения
+
+- `internal/localapi`, `internal/desktopui` и desktop UI command tests подтверждают отдельные cancel/stop операции, ограниченный operation context, loader/disabled guard и освобождение кнопки после ошибки.
+- `internal/lifecycle` и `internal/app` race tests подтверждают переход `pairing`/`connecting` → `stopping`, очистку comparison code только после успешного stop, retry после `StopFailed` и сохранение полностью committed trust.
+- Mac coordinator race tests подтверждают exact session/generation arbitration, сохранение revocation proof после partial commit и delayed Confirm, TLS-pinned observe-only quiescence fence и защиту более нового pairing от stale cleanup.
+- Windows pairing/app race tests и pinned loopback TLS-сценарий подтверждают порядок durable registry revoke → lifecycle notification, сохранение точного уведомления во время `stopping` и его однократную локальную доставку после успешного cancel/disconnect/pause без второго network revoke или config save.
+- Автоматические проверки не подтверждают реальный WebView, tray/menu-bar, firewall/VPN path, OS process cleanup или обмен между двумя устройствами. Физическая матрица остаётся непройденной до интеграции Windows window activation и tray icon и сборки точных artifacts.
+- Ветка не добавляет protocol/schema version, LAN ports, listeners, services или autostart.
+
 ### Интеграционная проверка 2026-08-11
 
 - Focused race tests пройдены для pairing/runtime/config/Docker ownership/file lock/lifecycle/local API/desktop UI и затронутых commands.
@@ -70,8 +79,14 @@
 | Manual start обоих приложений | Оба открываются один раз и начинают в Paused | Не проверено |
 | Windows Start hosting + Mac Search | Ожидаемый host появляется без stale entries | Не проверено |
 | Pairing approve | Одинаковый code на двух UI; оба переходят в Connected | Не проверено |
-| Pairing reject/cancel/expiry | Оба UI получают конечное понятное состояние | Не проверено |
+| Cancel pairing до approve | Оба UI завершают только точную текущую session; code исчезает после успешной остановки | Не проверено |
+| Pairing expiry | Просроченная session завершается на обоих UI и не создаёт доверие | Не проверено |
+| Cancel после approve во время connecting | Runtime останавливается; полностью committed trust сохраняется | Не проверено |
+| Stop failure и retry | Ошибка не маскируется как завершение; code/session и незавершённый ownership сохраняются; повтор успешен | Не проверено |
 | Disconnect и reconnect trusted peer | Trust сохраняется; повторный code не требуется | Не проверено |
+| Pause во время authenticated revoke | После успешной остановки Windows остаётся Paused без stale trust; durable revoke не повторяется | Не проверено |
+| Disconnect во время authenticated revoke | После успешной остановки Windows ожидает подключения без stale trust; durable revoke не повторяется | Не проверено |
+| Stale session/generation cleanup | Старый cancel/revoke не изменяет новый pairing или доверие | Не проверено |
 | Forget с доступным Windows | Local и remote trust очищены | Не проверено |
 | Forget при недоступном Windows | Local slot освобождён; cleanup не блокирует новое pairing | Не проверено |
 | Второй Mac | Busy не нарушает первую session | Требует устройства |

@@ -40,9 +40,9 @@ Backlog содержит только незавершённую работу. �
 - **Приоритет:** P1
 - **Доказательство:** Требует устройства
 - **Влияние:** Без подтверждённого pairing пользователь не может начать основной Docker workflow; stale trust ломает повторное подключение.
-- **Известно:** Пользователь ранее наблюдал отсутствие Windows approval UI, непринятый code и stale forgotten device. Исправления pairing reconciliation и restart-safe cleanup влиты в `main`, но физический результат для нового artifact ещё не зафиксирован.
-- **Критерий завершения:** Search → select → code on both devices → approve/reject/cancel → connected → disconnect → forget → repeat pairing работает без restart UI и без stale state.
-- **Проверка:** Реальные Mac и Windows, fresh config и upgrade config; результаты на обоих UI фиксируются в `VERIFICATION.md`.
+- **Известно:** Пользователь ранее наблюдал отсутствие Windows approval UI, непринятый code и stale forgotten device. Исправления pairing reconciliation и restart-safe cleanup влиты в `main`. В активной ветке автоматические race/TLS-сценарии дополнительно покрывают точную отмену pairing/connecting, retry после stop failure, сохранение committed trust, Mac exact-generation cleanup и Windows durable-revoke notification. Эти тесты не подтверждают поведение реальных UI, сети и ОС.
+- **Критерий завершения:** Search → select → code on both devices → approve/cancel/expiry → connected → disconnect → forget → repeat pairing работает без restart UI и без stale state. Отдельно подтверждены cancel до approve, cancel после approve во время connecting, stop failure с успешным retry, pause/disconnect одновременно с authenticated revoke и защита нового pairing от stale session/generation cleanup.
+- **Проверка:** Реальные Mac и Windows, fresh config и upgrade config; точные artifacts собираются после интеграции Windows window activation и tray icon, а результаты обоих UI фиксируются в `VERIFICATION.md`.
 - **Связано:** [MVP](PRODUCT.md), [pairing architecture](ARCHITECTURE.md#discovery-и-pairing).
 
 ### RD-B002: Проверить обычную Docker/Compose совместимость с Mac

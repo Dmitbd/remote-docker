@@ -41,6 +41,22 @@ The six-digit code appears on both application screens after the Mac selects a W
 
 Approve on Windows only if both device names and codes match. Reject mismatched requests. If a pinned host identity changes after a deliberate reinstall, remove the trusted device through the UI and pair again instead of editing identity files manually.
 
+## Cancel or stop connection does not finish
+
+Use the action that matches the current phase:
+
+- **Cancel pairing** cancels only the comparison request currently shown on both devices.
+- **Stop connection attempt** stops setup while the app is still pairing or connecting.
+- **Disconnect** ends an established connection but keeps the trusted device.
+- **Pause** stops owned runtime and keeps the application open.
+- **Forget** is the separate action that removes durable trust.
+
+While cancellation is running, its button shows progress and duplicate clicks are disabled. The comparison code may remain visible until owned runtime and watchdog cleanup have stopped successfully. If stopping fails, the app returns to the previous pairing/connecting phase instead of pretending that cancellation finished; retry the same action after checking the reported problem.
+
+Do not delete Keychain/Credential Manager entries, registry records, WSL files, or the Docker Context manually. A partially confirmed pairing keeps an exact cleanup record so Remote Docker can revoke only the matching generation after the remote confirmation has finished.
+
+These controls have focused automatic coverage in the current development branch. Physical Mac-to-Windows behavior must still be verified with the exact built artifacts.
+
 ## Only one device can connect
 
 The first version intentionally supports one trusted Mac and one Windows host. Remove the existing trusted Mac explicitly before pairing another one.

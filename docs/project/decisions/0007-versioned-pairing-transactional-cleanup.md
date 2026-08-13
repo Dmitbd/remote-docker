@@ -26,6 +26,15 @@ Remote confirmation может установить trust на Windows рань�
 
 Физический Mac↔Windows pairing, update и crash recovery остаются обязательными строками `VERIFICATION.md` и не считаются доказанными автоматическими тестами.
 
+### Дополнение в активной ветке
+
+В активной ветке отмена установки соединения продолжает этот durable-cleanup контракт двумя обязательными границами:
+
+- Ранний идемпотентный proof revoke не доказывает, что ранее допущенный Windows Confirm уже не может зафиксировать trust. Mac сохраняет exact session/generation journal и revocation proof, пока TLS-pinned observe-only запрос точной session не пройдёт через тот же server mutex и не подтвердит terminal/not-found состояние. Только после этой quiescence boundary повторный exact-generation revoke может завершить remote stage и удалить proof.
+- Proof-authenticated Windows revoke сначала сохраняет durable удаление registry и принадлежащих pairing артефактов. Exact device/session notification вызывается вне transaction/locks и остаётся привязанным к завершённому pairing до успешного lifecycle acknowledgement. Если lifecycle находится в `stopping`, после успешного non-terminal `StopCompleted` повторяется только локальная доставка; remote revoke, installer cleanup и config save не выполняются второй раз. `StopFailed`, terminal quit и stale generation не подтверждают и не применяют это уведомление.
+
+Дополнение реализовано в активной ветке `codex/fix-connection-cancel-windows-shell` и не считается частью `main` до интеграции. Сфокусированные race и pinned loopback TLS tests пройдены; физическая Mac↔Windows проверка отложена. Protocol/schema version, ports, listeners, services и autostart этим дополнением не меняются.
+
 ## Последствия
 
 - Cleanup переживает restart и не занимает локальный single-pair slot при недоступном Windows.
