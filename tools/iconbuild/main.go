@@ -12,6 +12,7 @@ import (
 )
 
 var appSizes = []int{16, 20, 24, 32, 48, 64, 128, 256}
+var traySizes = []int{16, 20, 24, 32}
 var trayStates = []string{"paused", "search", "pairing", "connected", "error"}
 
 func main() {
@@ -50,13 +51,16 @@ func main() {
 				mustWritePNG(filepath.Join(internalData, "tray-darwin-"+state+".png"), icon)
 			}
 		}
-		for _, size := range []int{16, 20, 24, 32} {
+		windowsImages := make([]image.Image, 0, len(traySizes))
+		for _, size := range traySizes {
 			icon := trayIcon(state, size, false)
+			windowsImages = append(windowsImages, icon)
 			mustWritePNG(filepath.Join(root, "assets", "icon", "tray", "windows", fmt.Sprintf("%s-%d.png", state, size)), icon)
 			if size == 32 {
 				mustWritePNG(filepath.Join(internalData, "tray-windows-"+state+".png"), icon)
 			}
 		}
+		mustWriteICOImages(filepath.Join(internalData, "tray-windows-"+state+".ico"), windowsImages, traySizes)
 	}
 }
 
@@ -146,17 +150,34 @@ func encodedPNG(value image.Image) []byte {
 }
 
 func mustWriteICO(path string, source image.Image) {
-	images := make([][]byte, 0, len(appSizes))
+	images := make([]image.Image, 0, len(appSizes))
 	for _, size := range appSizes {
-		images = append(images, encodedPNG(nearest(source, size)))
+		images = append(images, nearest(source, size))
+	}
+	mustWriteICOImages(path, images, appSizes)
+}
+
+func mustWriteICOImages(path string, images []image.Image, sizes []int) {
+	if err := os.WriteFile(path, encodeICO(images, sizes), 0o644); err != nil {
+		panic(err)
+	}
+}
+
+func encodeICO(images []image.Image, sizes []int) []byte {
+	if len(images) != len(sizes) {
+		panic("ICO image and size counts differ")
+	}
+	encodedImages := make([][]byte, 0, len(images))
+	for _, value := range images {
+		encodedImages = append(encodedImages, encodedPNG(value))
 	}
 	var output bytes.Buffer
 	_ = binary.Write(&output, binary.LittleEndian, uint16(0))
 	_ = binary.Write(&output, binary.LittleEndian, uint16(1))
-	_ = binary.Write(&output, binary.LittleEndian, uint16(len(images)))
-	offset := 6 + len(images)*16
-	for index, data := range images {
-		size := appSizes[index]
+	_ = binary.Write(&output, binary.LittleEndian, uint16(len(encodedImages)))
+	offset := 6 + len(encodedImages)*16
+	for index, data := range encodedImages {
+		size := sizes[index]
 		width := byte(size)
 		if size == 256 {
 			width = 0
@@ -171,12 +192,10 @@ func mustWriteICO(path string, source image.Image) {
 		_ = binary.Write(&output, binary.LittleEndian, uint32(offset))
 		offset += len(data)
 	}
-	for _, data := range images {
+	for _, data := range encodedImages {
 		output.Write(data)
 	}
-	if err := os.WriteFile(path, output.Bytes(), 0o644); err != nil {
-		panic(err)
-	}
+	return output.Bytes()
 }
 
 func mustWriteICNS(path string, source image.Image) {
