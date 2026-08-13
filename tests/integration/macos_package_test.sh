@@ -40,7 +40,7 @@ assert_plist_value() {
 [[ -x "${package_version_verifier}" ]] || fail "missing executable package version verifier"
 assert_file "${ci_workflow}"
 
-grep -F "REMOTE_DOCKER_VERSION: '0.2.8'" "${ci_workflow}" >/dev/null || fail "development packages do not share the product version"
+grep -F "REMOTE_DOCKER_VERSION: '0.2.9'" "${ci_workflow}" >/dev/null || fail "development packages do not share the product version"
 grep -F -- '-Version $env:REMOTE_DOCKER_VERSION' "${ci_workflow}" >/dev/null || fail "Windows development package ignores the shared product version"
 grep -F 'REMOTE_DOCKER_BUILD_VERSION="${GITHUB_RUN_NUMBER}"' "${ci_workflow}" >/dev/null || fail "macOS development package does not use a monotonic build version"
 if grep -E '(^|[[:space:]])REMOTE_DOCKER_VERSION[^A-Z_][^[:cntrl:]]*(GITHUB_RUN_NUMBER|github\.run_number)' "${ci_workflow}" >/dev/null; then
