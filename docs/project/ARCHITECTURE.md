@@ -157,6 +157,12 @@ Bootstrap передаёт полный текущий managed folder snapshot: 
 
 Connection runtime повторяет неуспешный bootstrap ограниченными шагами, не запускает presence до его успеха и не ослабляет readiness: `connected` публикуется только после фактического Syncthing-соединения. Изменение не добавляет RPC method, protocol/schema version, tunnel stream, port, listener, service или discovery boundary. Автоматические доказательства относятся к активной ветке `codex/fix-syncthing-bootstrap` @ `9a76d76`; физическая проверка нового artifact ещё не выполнена.
 
+### В активной ветке: lifetime presence-сессии
+
+После успешного bootstrap Mac connection runtime запускает один persistent SSH child для typed presence RPC. Владение этим процессом принадлежит всей runtime session: session context ограничивает lifetime child и завершает его при Pause, Disconnect или Finish work. Context отдельного `presence.hello` ограничивает только конкретный RPC и не может остановить общий SSH process после успешного ответа.
+
+Ошибка или timeout RPC остаются fail-closed: transport закрывает точный принадлежащий ему child, а lifecycle переходит в recovery вместо публикации ложного `connected`. Следующий heartbeat той же здоровой session переиспользует существующий child; параллельные или более новые процессы не затрагиваются. Это уточнение не меняет RPC, protocol/schema, tunnel stream, port, listener или security boundary. Автоматическое доказательство относится к активной ветке `codex/fix-presence-session-lifetime` @ `4e27357`; физическая проверка нового artifact ещё не выполнена.
+
 ### Текущее: восстановление Mac Syncthing identity
 
 Перед запуском session-owned процессов Mac проверяет согласованность зашифрованной локальной Syncthing identity и owner-scoped ключа из credential store. Низкоуровневый sync-компонент только классифицирует непригодную пару и не меняет config или credentials.

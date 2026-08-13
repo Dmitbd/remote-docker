@@ -36,6 +36,12 @@
 - `internal/app/agent_runtime_test.go` подтверждает production wiring bootstrap callback только в Mac connection runtime.
 - Сфокусированный race-прогон `internal/app` прошёл для `codex/fix-syncthing-bootstrap` @ `9a76d76`. Это не является физической проверкой Syncthing между Mac и Windows.
 
+### В активной ветке: lifetime presence-сессии
+
+- `internal/app/presence_transport_test.go` подтверждает, что отмена context успешного heartbeat не завершает общий SSH child, следующий heartbeat переиспользует его, а session cancellation останавливает child ровно один раз.
+- Отдельная регрессия сохраняет fail-closed контракт: timeout незавершённого RPC закрывает точный owned child.
+- Сфокусированный race-прогон `internal/app` и 20 повторов transport-тестов прошли для `codex/fix-presence-session-lifetime` @ `4e27357`. Это не является физической проверкой устойчивого Mac↔Windows соединения или очистки процессов.
+
 ### В `main`: восстановление Mac Syncthing identity
 
 - `internal/syncer` классифицирует валидную identity, неверный key, повреждённый blob и некорректный key без вывода secret details.
@@ -103,7 +109,7 @@
 
 На реальных Mac и Windows pairing завершился, tunnel identity/session, LAN, local relays и Docker channel были готовы, а WSL read-only diagnostics подтверждали active systemd target, Docker socket и Syncthing service. При этом Mac оставался в `connecting`: локальный Syncthing не содержал Windows device и `/rest/system/connections` оставался пустым. Причина подтверждена кодом: device records создавались только позднее в workspace preflight, тогда как connection readiness уже ожидал Syncthing connection.
 
-Исправление находится в активной ветке `codex/fix-syncthing-bootstrap` @ `9a76d76`. Новый artifact ещё не собран и физически не проверен.
+Первое исправление bootstrap находится в активной ветке `codex/fix-syncthing-bootstrap` @ `9a76d76`. При последующей проверке bootstrap и Syncthing стали ready, но lifecycle кратко переходил в `connected` и затем в `reconnecting`: persistent presence SSH child был ошибочно привязан к context первого `presence.hello` и завершался сразу после успешного ответа. Исправление lifetime находится в активной ветке `codex/fix-presence-session-lifetime` @ `4e27357`. Новый artifact с обоими исправлениями ещё не собран и физически не проверен.
 
 Начальный статус всех строк — **Не проверено** для development artifact `0.2.8`, созданного из `main` @ `09ba7ca`.
 
@@ -113,6 +119,8 @@
 | Windows Start hosting + Mac Search | Ожидаемый host появляется без stale entries | Не проверено |
 | Pairing approve | Одинаковый code на двух UI; оба переходят в Connected | Не проверено |
 | Fresh pairing Syncthing bootstrap | Exact paired devices создаются без dummy folder; оба UI достигают Connected | 0.2.9: не пройдено; новый кандидат: не проверено |
+| Stable presence session | Connected сохраняется между heartbeat; один session-owned presence SSH child не завершается после успешного ответа | Новый кандидат: не проверено |
+| Presence cleanup | Pause/Disconnect/Finish work завершают exact presence SSH child без накопления процессов и соединений | Новый кандидат: не проверено |
 | Cancel pairing до approve | Оба UI завершают только точную текущую session; code исчезает после успешной остановки | Не проверено |
 | Pairing expiry | Просроченная session завершается на обоих UI и не создаёт доверие | Не проверено |
 | Cancel после approve во время connecting | Runtime останавливается; полностью committed trust сохраняется | Не проверено |
