@@ -53,10 +53,21 @@ type uiShowOperation struct {
 }
 
 type uiStopOperation struct {
-	child uiChildSnapshot
-	done  chan struct{}
-	err   error
+	child        uiChildSnapshot
+	done         chan struct{}
+	err          error
+	disposition  uiStopDisposition
+	retry        bool
+	retryClaimed bool
 }
+
+type uiStopDisposition uint8
+
+const (
+	uiStopCompleted uiStopDisposition = iota + 1
+	uiStopExitInFlight
+	uiStopRetryableLiveFailure
+)
 
 type uiChildSnapshot struct {
 	command    *exec.Cmd
@@ -234,7 +245,7 @@ func (p *ProcessLauncher) recoverChild(ctx context.Context, child uiChildSnapsho
 		return errUIChildOwnershipChanged
 	}
 	p.stopping = true
-	operation := p.beginStopLocked(child)
+	operation := p.beginStopLocked(child, false)
 	signalProcess := p.signal
 	if signalProcess == nil {
 		signalProcess = func(process *os.Process, signal os.Signal) error { return process.Signal(signal) }
@@ -253,7 +264,7 @@ func (p *ProcessLauncher) recoverChild(ctx context.Context, child uiChildSnapsho
 			}
 			p.releaseStopping(child)
 			err := errors.Join(fmt.Errorf("signal desktop UI process: %w", signalErr), fmt.Errorf("kill desktop UI process: %w", killErr))
-			p.finishStop(operation, err)
+			p.finishStop(operation, err, uiStopRetryableLiveFailure)
 			return err
 		}
 		return p.completeRecovery(ctx, child, operation)
@@ -262,19 +273,19 @@ func (p *ProcessLauncher) recoverChild(ctx context.Context, child uiChildSnapsho
 }
 
 func (p *ProcessLauncher) completeRecovery(ctx context.Context, child uiChildSnapshot, operation *uiStopOperation) error {
-	err := p.finishRecovery(ctx, child)
-	p.finishStop(operation, err)
+	err, disposition := p.finishRecovery(ctx, child)
+	p.finishStop(operation, err, disposition)
 	return err
 }
 
-func (p *ProcessLauncher) finishRecovery(ctx context.Context, child uiChildSnapshot) error {
+func (p *ProcessLauncher) finishRecovery(ctx context.Context, child uiChildSnapshot) (error, uiStopDisposition) {
 	select {
 	case <-child.done:
 	case <-ctx.Done():
 		p.mu.Lock()
 		if !p.ownsChildLocked(child) {
 			p.mu.Unlock()
-			return errors.Join(ctx.Err(), errUIChildOwnershipChanged)
+			return errors.Join(ctx.Err(), errUIChildOwnershipChanged), uiStopCompleted
 		}
 		killProcess := p.kill
 		if killProcess == nil {
@@ -284,16 +295,16 @@ func (p *ProcessLauncher) finishRecovery(ctx context.Context, child uiChildSnaps
 		killErr := killProcess(child.process)
 		if killErr != nil {
 			p.releaseStopping(child)
-			return errors.Join(ctx.Err(), fmt.Errorf("kill desktop UI process: %w", killErr))
+			return errors.Join(ctx.Err(), fmt.Errorf("kill desktop UI process: %w", killErr)), uiStopRetryableLiveFailure
 		}
-		return ctx.Err()
+		return ctx.Err(), uiStopExitInFlight
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.generation != child.generation || p.process != nil || p.done != child.done {
-		return errUIChildOwnershipChanged
+		return errUIChildOwnershipChanged, uiStopCompleted
 	}
-	return p.startLocked()
+	return p.startLocked(), uiStopCompleted
 }
 
 func (p *ProcessLauncher) observeExactChildExit(ctx context.Context, done <-chan struct{}) error {
@@ -315,16 +326,17 @@ func (p *ProcessLauncher) releaseStopping(child uiChildSnapshot) {
 	p.mu.Unlock()
 }
 
-func (p *ProcessLauncher) beginStopLocked(child uiChildSnapshot) *uiStopOperation {
-	operation := &uiStopOperation{child: child, done: make(chan struct{})}
+func (p *ProcessLauncher) beginStopLocked(child uiChildSnapshot, retry bool) *uiStopOperation {
+	operation := &uiStopOperation{child: child, done: make(chan struct{}), retry: retry}
 	p.stop = operation
 	return operation
 }
 
-func (p *ProcessLauncher) finishStop(operation *uiStopOperation, err error) {
+func (p *ProcessLauncher) finishStop(operation *uiStopOperation, err error, disposition uiStopDisposition) {
 	p.mu.Lock()
 	operation.err = err
-	if p.stop == operation {
+	operation.disposition = disposition
+	if p.stop == operation && !p.closed {
 		p.stop = nil
 	}
 	close(operation.done)
@@ -360,15 +372,7 @@ func (p *ProcessLauncher) Stop(ctx context.Context) error {
 	if p.stop != nil {
 		operation := p.stop
 		p.mu.Unlock()
-		select {
-		case <-operation.done:
-			if operation.err == nil {
-				return nil
-			}
-			return p.retryTerminalStop(ctx, operation)
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+		return p.joinTerminalStop(ctx, operation)
 	}
 	child := uiChildSnapshot{command: p.process, done: p.done, generation: p.generation}
 	if p.process != nil {
@@ -386,7 +390,7 @@ func (p *ProcessLauncher) Stop(ctx context.Context) error {
 		p.generation++
 		p.stopping = true
 		child.generation = p.generation
-		operation := p.beginStopLocked(child)
+		operation := p.beginStopLocked(child, false)
 		p.mu.Unlock()
 		return p.runTerminalStop(ctx, child, operation)
 	}
@@ -397,21 +401,62 @@ func (p *ProcessLauncher) Stop(ctx context.Context) error {
 	return nil
 }
 
-func (p *ProcessLauncher) retryTerminalStop(ctx context.Context, previous *uiStopOperation) error {
+func (p *ProcessLauncher) joinTerminalStop(ctx context.Context, operation *uiStopOperation) error {
+	select {
+	case <-operation.done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	switch operation.disposition {
+	case uiStopCompleted:
+		return nil
+	case uiStopExitInFlight:
+		select {
+		case <-operation.child.done:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	case uiStopRetryableLiveFailure:
+		return p.claimTerminalRetry(ctx, operation)
+	default:
+		return operation.err
+	}
+}
+
+func (p *ProcessLauncher) claimTerminalRetry(ctx context.Context, previous *uiStopOperation) error {
 	p.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		p.mu.Unlock()
+		return err
+	}
+	if p.stop != previous {
+		current := p.stop
+		p.mu.Unlock()
+		if current == nil {
+			return previous.err
+		}
+		return p.joinTerminalStop(ctx, current)
+	}
+	if previous.retry || previous.retryClaimed || previous.disposition != uiStopRetryableLiveFailure {
+		err := previous.err
+		p.mu.Unlock()
+		return err
+	}
 	if p.process == nil {
 		p.mu.Unlock()
 		return nil
 	}
 	child := uiChildSnapshot{command: p.process, process: p.process.Process, done: p.done, generation: p.generation}
-	if !p.sameChildLocked(previous.child) || p.done != previous.child.done {
+	if !p.sameChildLocked(previous.child) || p.done != previous.child.done || p.generation != previous.child.generation {
 		p.mu.Unlock()
 		return errUIChildOwnershipChanged
 	}
+	previous.retryClaimed = true
 	p.generation++
 	child.generation = p.generation
 	p.stopping = true
-	operation := p.beginStopLocked(child)
+	operation := p.beginStopLocked(child, true)
 	p.mu.Unlock()
 	return p.runTerminalStop(ctx, child, operation)
 }
@@ -428,35 +473,35 @@ func (p *ProcessLauncher) runTerminalStop(ctx context.Context, child uiChildSnap
 	if err := signalProcess(child.process, os.Interrupt); err != nil {
 		if killErr := killProcess(child.process); killErr != nil {
 			if p.observeExactChildExit(ctx, child.done) == nil {
-				p.finishStop(operation, nil)
+				p.finishStop(operation, nil, uiStopCompleted)
 				return nil
 			}
 			p.releaseStopping(child)
 			err := errors.Join(fmt.Errorf("signal desktop UI process: %w", err), fmt.Errorf("kill desktop UI process: %w", killErr))
-			p.finishStop(operation, err)
+			p.finishStop(operation, err, uiStopRetryableLiveFailure)
 			return err
 		}
 		select {
 		case <-child.done:
-			p.finishStop(operation, nil)
+			p.finishStop(operation, nil, uiStopCompleted)
 			return nil
 		case <-ctx.Done():
-			p.finishStop(operation, ctx.Err())
+			p.finishStop(operation, ctx.Err(), uiStopExitInFlight)
 			return ctx.Err()
 		}
 	}
 	select {
 	case <-child.done:
-		p.finishStop(operation, nil)
+		p.finishStop(operation, nil, uiStopCompleted)
 		return nil
 	case <-ctx.Done():
 		if err := killProcess(child.process); err != nil {
 			p.releaseStopping(child)
 			result := errors.Join(ctx.Err(), fmt.Errorf("kill desktop UI process: %w", err))
-			p.finishStop(operation, result)
+			p.finishStop(operation, result, uiStopRetryableLiveFailure)
 			return result
 		}
-		p.finishStop(operation, ctx.Err())
+		p.finishStop(operation, ctx.Err(), uiStopExitInFlight)
 		return ctx.Err()
 	}
 }

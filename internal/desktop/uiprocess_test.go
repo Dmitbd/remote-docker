@@ -709,6 +709,37 @@ func TestProcessLauncherTerminalStopJoinsFailedRecoveryWithoutWaitingForChildExi
 	}
 }
 
+func TestProcessLauncherTerminalStopJoinsSuccessfulRecoveryStop(t *testing.T) {
+	var starts atomic.Int32
+	launcher := newUIProcessTestLauncher(&starts, nil)
+	launcher.focus = func(context.Context) error { return errors.New("focus failed") }
+	recoverySignalEntered := make(chan struct{})
+	releaseRecoverySignal := make(chan struct{})
+	launcher.signal = func(process *os.Process, signal os.Signal) error {
+		close(recoverySignalEntered)
+		<-releaseRecoverySignal
+		return process.Signal(signal)
+	}
+	if err := launcher.Show(context.Background()); err != nil {
+		t.Fatalf("first Show() error = %v", err)
+	}
+	showResult := make(chan error, 1)
+	go func() { showResult <- launcher.Show(context.Background()) }()
+	<-recoverySignalEntered
+	stopResult := make(chan error, 1)
+	go func() { stopResult <- launcher.Stop(context.Background()) }()
+	close(releaseRecoverySignal)
+	if err := <-showResult; !errors.Is(err, errUIProcessLauncherClosed) {
+		t.Fatalf("recovery Show() error = %v, want terminal launcher closure", err)
+	}
+	if err := <-stopResult; err != nil {
+		t.Fatalf("terminal Stop() error = %v, want successful exact recovery stop join", err)
+	}
+	if got := starts.Load(); got != 1 {
+		t.Fatalf("starts = %d, want no replacement after terminal Stop", got)
+	}
+}
+
 func TestProcessLauncherConcurrentStopJoinsFailedLeaderThenRetriesOnce(t *testing.T) {
 	leaderSignalErr := errors.New("leader signal failed")
 	leaderKillErr := errors.New("leader kill failed")
@@ -761,6 +792,186 @@ func TestProcessLauncherConcurrentStopJoinsFailedLeaderThenRetriesOnce(t *testin
 	if got := killCalls.Load(); got != 1 {
 		t.Fatalf("kill calls = %d, want only failed leader fallback", got)
 	}
+}
+
+func TestProcessLauncherThreeStopsArbitrateOneRetryAfterLeaderFailure(t *testing.T) {
+	leaderSignalErr := errors.New("leader signal failed")
+	leaderKillErr := errors.New("leader kill failed")
+	var starts atomic.Int32
+	launcher := newUIProcessTestLauncher(&starts, nil)
+	leaderSignalEntered := make(chan struct{})
+	releaseLeaderSignal := make(chan struct{})
+	retrySignalEntered := make(chan struct{})
+	releaseRetrySignal := make(chan struct{})
+	var signalCalls atomic.Int32
+	launcher.signal = func(process *os.Process, signal os.Signal) error {
+		switch signalCalls.Add(1) {
+		case 1:
+			close(leaderSignalEntered)
+			<-releaseLeaderSignal
+			return leaderSignalErr
+		case 2:
+			close(retrySignalEntered)
+			<-releaseRetrySignal
+			return process.Signal(signal)
+		default:
+			return errors.New("unexpected second retry signal")
+		}
+	}
+	var killCalls atomic.Int32
+	launcher.kill = func(process *os.Process) error {
+		if killCalls.Add(1) == 1 {
+			return leaderKillErr
+		}
+		return process.Kill()
+	}
+	if err := launcher.Show(context.Background()); err != nil {
+		t.Fatalf("Show() error = %v", err)
+	}
+	leaderResult := make(chan error, 1)
+	go func() { leaderResult <- launcher.Stop(context.Background()) }()
+	<-leaderSignalEntered
+	joinerResults := make(chan error, 2)
+	for range 2 {
+		go func() { joinerResults <- launcher.Stop(context.Background()) }()
+	}
+	close(releaseLeaderSignal)
+	<-leaderResult
+	<-retrySignalEntered
+	close(releaseRetrySignal)
+	for range 2 {
+		if err := <-joinerResults; err != nil {
+			t.Fatalf("joiner Stop() error = %v", err)
+		}
+	}
+	if got := signalCalls.Load(); got != 2 {
+		t.Fatalf("signal calls = %d, want leader plus exactly one retry", got)
+	}
+	if got := killCalls.Load(); got != 1 {
+		t.Fatalf("kill calls = %d, want only leader fallback", got)
+	}
+}
+
+func TestProcessLauncherStopTimeoutAfterSuccessfulKillDoesNotResignal(t *testing.T) {
+	var starts atomic.Int32
+	ready := make(chan struct{})
+	waitReturned := make(chan struct{})
+	releaseCallback := make(chan struct{})
+	launcher := newUIProcessTestLauncher(&starts, func(_ int32, command *exec.Cmd) {
+		command.Env = append(command.Env, "REMOTE_DOCKER_UI_HELPER_ACTION=ready")
+		command.Stdout = &readyWriter{ready: ready}
+	})
+	launcher.wait = func(command *exec.Cmd) error {
+		err := command.Wait()
+		close(waitReturned)
+		<-releaseCallback
+		return err
+	}
+	var signalCalls atomic.Int32
+	launcher.signal = func(*os.Process, os.Signal) error {
+		signalCalls.Add(1)
+		return nil
+	}
+	var killCalls atomic.Int32
+	launcher.kill = func(process *os.Process) error {
+		killCalls.Add(1)
+		return process.Kill()
+	}
+	if err := launcher.Show(context.Background()); err != nil {
+		t.Fatalf("Show() error = %v", err)
+	}
+	<-ready
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := launcher.Stop(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("leader Stop() error = %v, want timeout after successful kill", err)
+	}
+	<-waitReturned
+	joinerResult := make(chan error, 1)
+	go func() { joinerResult <- launcher.Stop(context.Background()) }()
+	close(releaseCallback)
+	if err := <-joinerResult; err != nil {
+		t.Fatalf("joiner Stop() error = %v, want exact exit join", err)
+	}
+	if got := signalCalls.Load(); got != 1 {
+		t.Fatalf("signal calls = %d, want no re-signal after successful kill", got)
+	}
+	if got := killCalls.Load(); got != 1 {
+		t.Fatalf("kill calls = %d, want one successful kill", got)
+	}
+}
+
+func TestProcessLauncherFailedTerminalRetryIsNotRetriedAgain(t *testing.T) {
+	wantSignalErr := errors.New("signal failed")
+	wantKillErr := errors.New("kill failed")
+	var starts atomic.Int32
+	launcher := newUIProcessTestLauncher(&starts, nil)
+	var signalCalls atomic.Int32
+	launcher.signal = func(*os.Process, os.Signal) error {
+		signalCalls.Add(1)
+		return wantSignalErr
+	}
+	launcher.kill = func(*os.Process) error { return wantKillErr }
+	if err := launcher.Show(context.Background()); err != nil {
+		t.Fatalf("Show() error = %v", err)
+	}
+	if err := launcher.Stop(context.Background()); err == nil {
+		t.Fatal("leader Stop() error = nil, want failure")
+	}
+	if err := launcher.Stop(context.Background()); err == nil {
+		t.Fatal("one retry Stop() error = nil, want failure")
+	}
+	if err := launcher.Stop(context.Background()); err == nil {
+		t.Fatal("post-retry Stop() error = nil, want retry result")
+	}
+	if got := signalCalls.Load(); got != 2 {
+		t.Fatalf("signal calls = %d, want leader plus one retry only", got)
+	}
+	launcher.signal = nil
+	launcher.kill = nil
+	launcher.mu.Lock()
+	command := launcher.process
+	launcher.mu.Unlock()
+	if command != nil && command.Process != nil {
+		_ = command.Process.Kill()
+	}
+	waitForLauncherChild(t, launcher)
+}
+
+func TestProcessLauncherCancelledJoinerDoesNotClaimRetry(t *testing.T) {
+	wantSignalErr := errors.New("signal failed")
+	wantKillErr := errors.New("kill failed")
+	var starts atomic.Int32
+	launcher := newUIProcessTestLauncher(&starts, nil)
+	var signalCalls atomic.Int32
+	launcher.signal = func(*os.Process, os.Signal) error {
+		signalCalls.Add(1)
+		return wantSignalErr
+	}
+	launcher.kill = func(*os.Process) error { return wantKillErr }
+	if err := launcher.Show(context.Background()); err != nil {
+		t.Fatalf("Show() error = %v", err)
+	}
+	if err := launcher.Stop(context.Background()); err == nil {
+		t.Fatal("leader Stop() error = nil, want failure")
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := launcher.Stop(cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled joiner error = %v, want context canceled", err)
+	}
+	if got := signalCalls.Load(); got != 1 {
+		t.Fatalf("signal calls = %d, want cancelled joiner not to claim retry", got)
+	}
+	launcher.signal = nil
+	launcher.kill = nil
+	launcher.mu.Lock()
+	command := launcher.process
+	launcher.mu.Unlock()
+	if command != nil && command.Process != nil {
+		_ = command.Process.Kill()
+	}
+	waitForLauncherChild(t, launcher)
 }
 
 func TestUIProcessHelper(t *testing.T) {
