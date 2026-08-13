@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"image/png"
 	"os"
-	"runtime"
 	"testing"
 
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
@@ -71,14 +70,32 @@ func TestEmbeddedWindowsTrayAssetsUseMatchingICO(t *testing.T) {
 	}
 }
 
-func TestTrayIconRetainsSafeFallbacks(t *testing.T) {
-	fallbackPlatform := runtime.GOOS
-	if fallbackPlatform != "darwin" {
-		fallbackPlatform = "windows"
+func TestOtherPlatformsUseDecodableColoredPNGFallback(t *testing.T) {
+	for _, state := range []TrayState{TrayPaused, TraySearch, TrayPairing, TrayConnected, TrayError} {
+		want, err := os.ReadFile("../../assets/icon/tray/windows/" + string(state) + "-32.png")
+		if err != nil {
+			t.Fatalf("read colored tray fallback %s: %v", state, err)
+		}
+		for _, platform := range []string{"linux", "freebsd", "unsupported"} {
+			got := TrayIcon(platform, state)
+			if !bytes.Equal(got, want) {
+				t.Fatalf("tray %s/%s differs from checked-in colored PNG fallback", platform, state)
+			}
+			if len(got) < 8 || !bytes.Equal(got[:8], []byte("\x89PNG\r\n\x1a\n")) {
+				t.Fatalf("tray %s/%s is not PNG: %x", platform, state, got[:min(len(got), 8)])
+			}
+			icon, decodeErr := png.Decode(bytes.NewReader(got))
+			if decodeErr != nil || icon.Bounds().Dx() != 32 || icon.Bounds().Dy() != 32 {
+				t.Fatalf("tray %s/%s bounds=%v error=%v", platform, state, icon.Bounds(), decodeErr)
+			}
+		}
 	}
-	if got, want := TrayIcon("unsupported", TrayPaused), TrayIcon(fallbackPlatform, TrayPaused); !bytes.Equal(got, want) {
-		t.Fatalf("unknown platform fallback differs from %s", fallbackPlatform)
+	if got := TrayIcon("linux", TrayPaused); len(got) >= 4 && binary.LittleEndian.Uint16(got[2:4]) == 1 {
+		t.Fatal("Linux tray fallback must not be an ICO")
 	}
+}
+
+func TestTrayIconUnknownStateRetainsNilFallback(t *testing.T) {
 	for _, platform := range []string{"darwin", "windows", "unsupported"} {
 		if got := TrayIcon(platform, TrayState("unknown")); got != nil {
 			t.Fatalf("unknown state for %s returned %d bytes, want nil", platform, len(got))

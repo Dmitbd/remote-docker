@@ -2,7 +2,6 @@ package assets
 
 import (
 	"embed"
-	"runtime"
 
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
 )
@@ -25,17 +24,14 @@ func AppIcon() []byte {
 }
 
 func TrayIcon(platform string, state TrayState) []byte {
-	if platform != "darwin" && platform != "windows" {
-		platform = runtime.GOOS
+	switch platform {
+	case "darwin":
+		return read("data/tray-darwin-" + string(state) + ".png")
+	case "windows":
+		return read("data/tray-windows-" + string(state) + ".ico")
+	default:
+		return read("data/tray-windows-" + string(state) + ".png")
 	}
-	if platform != "darwin" {
-		platform = "windows"
-	}
-	extension := ".png"
-	if platform == "windows" {
-		extension = ".ico"
-	}
-	return read("data/tray-" + platform + "-" + string(state) + extension)
 }
 
 func TrayStateFor(snapshot lifecycle.Snapshot) TrayState {

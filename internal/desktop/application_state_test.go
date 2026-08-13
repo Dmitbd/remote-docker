@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	productassets "github.com/Dmitbd/remote-docker/internal/assets"
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
 )
 
@@ -95,10 +95,18 @@ func TestTrayApplicationReflectsLifecycleIconUpdates(t *testing.T) {
 	if iconCalls[0].mode != "template" || iconCalls[1].mode != "template" {
 		t.Fatalf("Darwin icon modes = %q, %q, want template", iconCalls[0].mode, iconCalls[1].mode)
 	}
-	if want := productassets.TrayIcon("darwin", productassets.TrayPaused); !bytes.Equal(iconCalls[0].icon, want) {
+	wantPaused, err := os.ReadFile("../assets/data/tray-darwin-paused.png")
+	if err != nil {
+		t.Fatalf("read expected paused tray asset: %v", err)
+	}
+	if !bytes.Equal(iconCalls[0].icon, wantPaused) {
 		t.Fatal("initial tray icon does not match paused state")
 	}
-	if want := productassets.TrayIcon("darwin", productassets.TrayConnected); !bytes.Equal(iconCalls[1].icon, want) {
+	wantConnected, err := os.ReadFile("../assets/data/tray-darwin-connected.png")
+	if err != nil {
+		t.Fatalf("read expected connected tray asset: %v", err)
+	}
+	if !bytes.Equal(iconCalls[1].icon, wantConnected) {
 		t.Fatal("updated tray icon does not match connected state")
 	}
 	quitCtx, quitCancel := context.WithTimeout(context.Background(), time.Second)
@@ -118,10 +126,12 @@ func TestTrayApplicationUsesPlatformCorrectIconMode(t *testing.T) {
 	for _, test := range []struct {
 		platform string
 		mode     string
+		asset    string
 	}{
-		{platform: "windows", mode: "regular"},
-		{platform: "darwin", mode: "template"},
-		{platform: "linux", mode: "regular"},
+		{platform: "windows", mode: "regular", asset: "../assets/data/tray-windows-paused.ico"},
+		{platform: "darwin", mode: "template", asset: "../assets/data/tray-darwin-paused.png"},
+		{platform: "linux", mode: "regular", asset: "../../assets/icon/tray/windows/paused-32.png"},
+		{platform: "unsupported", mode: "regular", asset: "../../assets/icon/tray/windows/paused-32.png"},
 	} {
 		t.Run(test.platform, func(t *testing.T) {
 			tray := newFakeTray()
@@ -143,7 +153,10 @@ func TestTrayApplicationUsesPlatformCorrectIconMode(t *testing.T) {
 			if calls[0].mode != test.mode {
 				t.Fatalf("icon mode = %q, want %q", calls[0].mode, test.mode)
 			}
-			want := productassets.TrayIcon(test.platform, productassets.TrayPaused)
+			want, err := os.ReadFile(test.asset)
+			if err != nil {
+				t.Fatalf("read expected tray asset: %v", err)
+			}
 			if !bytes.Equal(calls[0].icon, want) {
 				t.Fatal("tray received bytes for the wrong platform/state")
 			}
