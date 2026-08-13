@@ -7,7 +7,7 @@ import (
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
 )
 
-//go:embed data/*.png
+//go:embed data/*.png data/*.ico
 var files embed.FS
 
 type TrayState string
@@ -31,7 +31,11 @@ func TrayIcon(platform string, state TrayState) []byte {
 	if platform != "darwin" {
 		platform = "windows"
 	}
-	return read("data/tray-" + platform + "-" + string(state) + ".png")
+	extension := ".png"
+	if platform == "windows" {
+		extension = ".ico"
+	}
+	return read("data/tray-" + platform + "-" + string(state) + extension)
 }
 
 func TrayStateFor(snapshot lifecycle.Snapshot) TrayState {

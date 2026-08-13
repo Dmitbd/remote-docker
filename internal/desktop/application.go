@@ -20,7 +20,8 @@ type trayMenuItem interface {
 type trayRuntime interface {
 	Run(func(), func())
 	Quit()
-	SetIcon([]byte)
+	SetRegularIcon([]byte)
+	SetTemplateIcon([]byte)
 	SetTooltip(string)
 	AddMenuItem(string, string) trayMenuItem
 	AddSeparator()
@@ -148,16 +149,22 @@ func (a *Application) observe(ctx context.Context) {
 }
 
 func (a *Application) updateTray(snapshot lifecycle.Snapshot) {
-	a.tray.SetIcon(productassets.TrayIcon(a.platform, productassets.TrayStateFor(snapshot)))
+	icon := productassets.TrayIcon(a.platform, productassets.TrayStateFor(snapshot))
+	if a.platform == "darwin" {
+		a.tray.SetTemplateIcon(icon)
+	} else {
+		a.tray.SetRegularIcon(icon)
+	}
 	a.tray.SetTooltip("Remote Docker · " + string(snapshot.State))
 }
 
 type systemTray struct{}
 
-func (systemTray) Run(ready, exit func())  { systray.Run(ready, exit) }
-func (systemTray) Quit()                   { systray.Quit() }
-func (systemTray) SetIcon(icon []byte)     { systray.SetTemplateIcon(icon, icon) }
-func (systemTray) SetTooltip(value string) { systray.SetTooltip(value) }
+func (systemTray) Run(ready, exit func())      { systray.Run(ready, exit) }
+func (systemTray) Quit()                       { systray.Quit() }
+func (systemTray) SetRegularIcon(icon []byte)  { systray.SetIcon(icon) }
+func (systemTray) SetTemplateIcon(icon []byte) { systray.SetTemplateIcon(icon, icon) }
+func (systemTray) SetTooltip(value string)     { systray.SetTooltip(value) }
 func (systemTray) AddMenuItem(title, tooltip string) trayMenuItem {
 	return systemTrayItem{item: systray.AddMenuItem(title, tooltip)}
 }

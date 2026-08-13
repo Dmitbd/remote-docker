@@ -5,38 +5,83 @@ import (
 	"encoding/binary"
 	"image/png"
 	"os"
+	"runtime"
 	"testing"
 
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
 )
 
-func TestEmbeddedAppAndTrayAssetsDecodeWithExpectedDimensions(t *testing.T) {
+func TestEmbeddedAppAndDarwinTrayAssetsDecodeWithExpectedDimensions(t *testing.T) {
 	app, err := png.Decode(bytes.NewReader(AppIcon()))
 	if err != nil || app.Bounds().Dx() != 1024 || app.Bounds().Dy() != 1024 {
 		t.Fatalf("app icon bounds=%v error=%v", app.Bounds(), err)
 	}
-	for _, platform := range []string{"darwin", "windows"} {
-		for _, state := range []TrayState{TrayPaused, TraySearch, TrayPairing, TrayConnected, TrayError} {
-			icon, err := png.Decode(bytes.NewReader(TrayIcon(platform, state)))
-			if err != nil || icon.Bounds().Dx() != 32 || icon.Bounds().Dy() != 32 {
-				t.Fatalf("tray %s/%s bounds=%v error=%v", platform, state, icon.Bounds(), err)
-			}
-			transparent, opaque := false, false
-			for y := 0; y < icon.Bounds().Dy(); y++ {
-				for x := 0; x < icon.Bounds().Dx(); x++ {
-					_, _, _, alpha := icon.At(x, y).RGBA()
-					if alpha == 0 {
-						transparent = true
-					} else if alpha == 0xffff {
-						opaque = true
-					} else {
-						t.Fatalf("tray %s/%s has intermediate alpha %d", platform, state, alpha)
-					}
+	for _, state := range []TrayState{TrayPaused, TraySearch, TrayPairing, TrayConnected, TrayError} {
+		got := TrayIcon("darwin", state)
+		want, readErr := os.ReadFile("data/tray-darwin-" + string(state) + ".png")
+		if readErr != nil {
+			t.Fatalf("read Darwin tray %s: %v", state, readErr)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("Darwin tray %s differs from checked-in PNG", state)
+		}
+		icon, decodeErr := png.Decode(bytes.NewReader(got))
+		if decodeErr != nil || icon.Bounds().Dx() != 32 || icon.Bounds().Dy() != 32 {
+			t.Fatalf("tray darwin/%s bounds=%v error=%v", state, icon.Bounds(), decodeErr)
+		}
+		transparent, opaque := false, false
+		for y := 0; y < icon.Bounds().Dy(); y++ {
+			for x := 0; x < icon.Bounds().Dx(); x++ {
+				_, _, _, alpha := icon.At(x, y).RGBA()
+				if alpha == 0 {
+					transparent = true
+				} else if alpha == 0xffff {
+					opaque = true
+				} else {
+					t.Fatalf("tray darwin/%s has intermediate alpha %d", state, alpha)
 				}
 			}
-			if !transparent || !opaque {
-				t.Fatalf("tray %s/%s alpha transparent=%t opaque=%t", platform, state, transparent, opaque)
-			}
+		}
+		if !transparent || !opaque {
+			t.Fatalf("tray darwin/%s alpha transparent=%t opaque=%t", state, transparent, opaque)
+		}
+	}
+}
+
+func TestEmbeddedWindowsTrayAssetsUseMatchingICO(t *testing.T) {
+	seen := make(map[string]TrayState)
+	for _, state := range []TrayState{TrayPaused, TraySearch, TrayPairing, TrayConnected, TrayError} {
+		got := TrayIcon("windows", state)
+		want, err := os.ReadFile("data/tray-windows-" + string(state) + ".ico")
+		if err != nil {
+			t.Fatalf("read Windows tray %s: %v", state, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("Windows tray %s differs from checked-in ICO", state)
+		}
+		if len(got) < 6 || binary.LittleEndian.Uint16(got[0:2]) != 0 ||
+			binary.LittleEndian.Uint16(got[2:4]) != 1 || binary.LittleEndian.Uint16(got[4:6]) != 4 {
+			t.Fatalf("Windows tray %s has invalid ICO header %x", state, got[:min(len(got), 6)])
+		}
+		key := string(got)
+		if previous, ok := seen[key]; ok {
+			t.Fatalf("Windows tray states %s and %s use identical ICO bytes", previous, state)
+		}
+		seen[key] = state
+	}
+}
+
+func TestTrayIconRetainsSafeFallbacks(t *testing.T) {
+	fallbackPlatform := runtime.GOOS
+	if fallbackPlatform != "darwin" {
+		fallbackPlatform = "windows"
+	}
+	if got, want := TrayIcon("unsupported", TrayPaused), TrayIcon(fallbackPlatform, TrayPaused); !bytes.Equal(got, want) {
+		t.Fatalf("unknown platform fallback differs from %s", fallbackPlatform)
+	}
+	for _, platform := range []string{"darwin", "windows", "unsupported"} {
+		if got := TrayIcon(platform, TrayState("unknown")); got != nil {
+			t.Fatalf("unknown state for %s returned %d bytes, want nil", platform, len(got))
 		}
 	}
 }

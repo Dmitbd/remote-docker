@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"sync"
@@ -8,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	productassets "github.com/Dmitbd/remote-docker/internal/assets"
 	"github.com/Dmitbd/remote-docker/internal/lifecycle"
 )
 
@@ -86,6 +88,19 @@ func TestTrayApplicationReflectsLifecycleIconUpdates(t *testing.T) {
 	tray.waitReady(t)
 	updates <- lifecycle.Snapshot{State: lifecycle.StateConnected}
 	tray.waitIcons(t, 2)
+	iconCalls := tray.iconCallsSnapshot()
+	if len(iconCalls) != 2 {
+		t.Fatalf("icon calls = %d, want two", len(iconCalls))
+	}
+	if iconCalls[0].mode != "template" || iconCalls[1].mode != "template" {
+		t.Fatalf("Darwin icon modes = %q, %q, want template", iconCalls[0].mode, iconCalls[1].mode)
+	}
+	if want := productassets.TrayIcon("darwin", productassets.TrayPaused); !bytes.Equal(iconCalls[0].icon, want) {
+		t.Fatal("initial tray icon does not match paused state")
+	}
+	if want := productassets.TrayIcon("darwin", productassets.TrayConnected); !bytes.Equal(iconCalls[1].icon, want) {
+		t.Fatal("updated tray icon does not match connected state")
+	}
 	quitCtx, quitCancel := context.WithTimeout(context.Background(), time.Second)
 	if err := application.Quit(quitCtx); err != nil {
 		t.Fatalf("Quit() error = %v", err)
@@ -96,6 +111,43 @@ func TestTrayApplicationReflectsLifecycleIconUpdates(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("application did not stop")
+	}
+}
+
+func TestTrayApplicationUsesPlatformCorrectIconMode(t *testing.T) {
+	for _, test := range []struct {
+		platform string
+		mode     string
+	}{
+		{platform: "windows", mode: "regular"},
+		{platform: "darwin", mode: "template"},
+		{platform: "linux", mode: "regular"},
+	} {
+		t.Run(test.platform, func(t *testing.T) {
+			tray := newFakeTray()
+			application, err := NewApplication(ApplicationOptions{
+				UI:       &fakeUIProcess{},
+				Snapshot: func() lifecycle.Snapshot { return lifecycle.Snapshot{} },
+				Platform: test.platform,
+				Tray:     tray,
+			})
+			if err != nil {
+				t.Fatalf("NewApplication() error = %v", err)
+			}
+
+			application.updateTray(lifecycle.Snapshot{State: lifecycle.StatePaused})
+			calls := tray.iconCallsSnapshot()
+			if len(calls) != 1 {
+				t.Fatalf("icon calls = %d, want one", len(calls))
+			}
+			if calls[0].mode != test.mode {
+				t.Fatalf("icon mode = %q, want %q", calls[0].mode, test.mode)
+			}
+			want := productassets.TrayIcon(test.platform, productassets.TrayPaused)
+			if !bytes.Equal(calls[0].icon, want) {
+				t.Fatal("tray received bytes for the wrong platform/state")
+			}
+		})
 	}
 }
 
@@ -148,6 +200,13 @@ type fakeTray struct {
 	quitOnce  sync.Once
 	quitCalls atomic.Int32
 	icons     atomic.Int32
+	iconMu    sync.Mutex
+	iconCalls []trayIconCall
+}
+
+type trayIconCall struct {
+	mode string
+	icon []byte
 }
 
 func newFakeTray() *fakeTray {
@@ -166,7 +225,12 @@ func (t *fakeTray) Quit() {
 	t.quitOnce.Do(func() { close(t.done) })
 }
 
-func (t *fakeTray) SetIcon([]byte)    { t.icons.Add(1) }
+func (t *fakeTray) SetRegularIcon(icon []byte) {
+	t.recordIcon("regular", icon)
+}
+func (t *fakeTray) SetTemplateIcon(icon []byte) {
+	t.recordIcon("template", icon)
+}
 func (t *fakeTray) SetTooltip(string) {}
 func (t *fakeTray) AddSeparator()     {}
 func (t *fakeTray) AddMenuItem(title, _ string) trayMenuItem {
@@ -204,6 +268,19 @@ func (t *fakeTray) waitIcons(testingT *testing.T, count int32) {
 			time.Sleep(time.Millisecond)
 		}
 	}
+}
+
+func (t *fakeTray) recordIcon(mode string, icon []byte) {
+	t.iconMu.Lock()
+	t.iconCalls = append(t.iconCalls, trayIconCall{mode: mode, icon: append([]byte(nil), icon...)})
+	t.iconMu.Unlock()
+	t.icons.Add(1)
+}
+
+func (t *fakeTray) iconCallsSnapshot() []trayIconCall {
+	t.iconMu.Lock()
+	defer t.iconMu.Unlock()
+	return append([]trayIconCall(nil), t.iconCalls...)
 }
 
 type fakeTrayItem struct{ clicked chan struct{} }
